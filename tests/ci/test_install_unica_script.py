@@ -28,6 +28,7 @@ def run_script(*args: str, env: dict[str, str] | None = None) -> subprocess.Comp
     )
 
 
+@unittest.skipIf(os.name == "nt", "install-unica.sh URL checks run on POSIX CI")
 class InstallUnicaScriptTests(unittest.TestCase):
     def test_prints_latest_release_asset_url_for_target(self) -> None:
         result = run_script("--target", "darwin-arm64", "--print-download-url")
