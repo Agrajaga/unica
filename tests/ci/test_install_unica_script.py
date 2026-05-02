@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import os
 import unittest
 from pathlib import Path
 
@@ -8,10 +9,16 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "install-unica.sh"
 
 
+def script_command(*args: str) -> list[str]:
+    if os.name == "nt":
+        return ["bash", str(SCRIPT), *args]
+    return [str(SCRIPT), *args]
+
+
 class InstallUnicaScriptTests(unittest.TestCase):
     def test_prints_latest_release_asset_url_for_target(self) -> None:
         result = subprocess.run(
-            [str(SCRIPT), "--target", "darwin-arm64", "--print-download-url"],
+            script_command("--target", "darwin-arm64", "--print-download-url"),
             check=True,
             text=True,
             stdout=subprocess.PIPE,
@@ -26,7 +33,7 @@ class InstallUnicaScriptTests(unittest.TestCase):
 
     def test_prints_pinned_release_asset_url_for_target(self) -> None:
         result = subprocess.run(
-            [str(SCRIPT), "--target", "linux-x64", "--version", "v0.3.3", "--print-download-url"],
+            script_command("--target", "linux-x64", "--version", "v0.3.3", "--print-download-url"),
             check=True,
             text=True,
             stdout=subprocess.PIPE,

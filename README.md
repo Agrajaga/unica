@@ -32,7 +32,7 @@ curl -fsSL https://github.com/ingvarvilkman/unica/releases/latest/download/insta
 Для установки конкретного релиза:
 
 ```sh
-curl -fsSL https://github.com/ingvarvilkman/unica/releases/latest/download/install-unica.sh | sh -s -- --version v0.3.4
+curl -fsSL https://github.com/ingvarvilkman/unica/releases/latest/download/install-unica.sh | sh -s -- --version v0.3.5
 ```
 
 Release assets собираются отдельно под платформы:
