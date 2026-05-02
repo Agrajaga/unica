@@ -9,6 +9,7 @@ The public skills model developer operations, not infrastructure tools:
 - create, run, update, dump, and load infobases;
 - work with forms, roles, SKD, MXL, subsystems, command interfaces, help, templates, and web publication;
 - search and analyze BSL code inside those workflows.
+- bootstrap a new 1C repository workspace with `v8project.yaml`.
 
 Bundled tooling, wrappers, MCP server names, checksums, and third-party notices are internal package infrastructure. Project configuration is `v8project.yaml` / `V8TR_CONFIG`; database and build workflows should use v8-runner before native fallback scripts. See `references/tooling.md` when maintaining the plugin itself.
 
@@ -18,14 +19,12 @@ The `skills/` directory contains operation skills adapted from `cc-1c-skills` wi
 
 - `cf-edit`, `cf-info`, `cf-init`, `cf-validate`
 - `cfe-init`, `cfe-borrow`, `cfe-diff`, `cfe-patch-method`, `cfe-validate`
-- `db-create`, `db-run`, `db-update`, `db-dump-xml`, `db-load-xml`, `db-dump-cf`, `db-load-cf`, `db-load-git`
+- `workspace-init`, `db-auth-check`, `db-create`, `db-run`, `db-update`, `db-dump-xml`, `db-load-xml`, `db-dump-cf`, `db-load-cf`, `db-load-git`
 - `epf-init`, `epf-build`, `epf-dump`, `epf-validate`
 - `erf-init`, `erf-build`, `erf-dump`, `erf-validate`
 - `form-add`, `form-edit`, `form-info`, `form-compile`, `form-validate`, `form-remove`
 - `meta-compile`, `meta-edit`, `meta-info`, `meta-remove`, `meta-validate`
 - `mxl-*`, `role-*`, `skd-*`, `subsystem-*`, `interface-*`, `template-*`, `web-*`, `img-grid`
-
-The previous infrastructure skills (`unica-setup`, `unica-bsl`, `unica-v8-runner`, `unica-rlm-tools-bsl`, `unica-v8std`) are intentionally not public skills.
 
 ## Local Codex Install
 
@@ -48,13 +47,37 @@ To check what a fresh Codex session sees:
 codex debug prompt-input 'test'
 ```
 
+## Local Debug Install
+
+From this repository, one command builds a fully working local Unica package for
+the current machine, installs it into Codex as `unica-local`, and verifies a
+fresh Codex prompt:
+
+```sh
+scripts/dev/install-local-unica.sh
+```
+
+The script builds only the current host target, writes the generated marketplace
+under `.build/local-codex-unica/package/marketplace`, removes any previous
+`unica-local` marketplace, adds the new one, validates the bundled MCP metadata
+and launchers, and checks that fresh Codex sees `Unica`, `workspace-init`, and
+`db-auth-check`.
+
+Useful development flags:
+
+```sh
+scripts/dev/install-local-unica.sh --skip-build
+scripts/dev/install-local-unica.sh --skip-install
+scripts/dev/install-local-unica.sh --marketplace-name unica-dev
+```
+
 ## Support Matrix
 
 | Area | Windows | macOS arm64 | Notes |
 | --- | --- | --- | --- |
 | Operation skills and PowerShell scripts | Primary path | Available when PowerShell is installed | The source skills are Windows-first because 1C Designer automation is Windows-first. |
 | Python script ports | Available with Python | Available with `python3` | Used for XML/metadata operations where ports exist. |
-| Bundled binaries | Built by GitHub Actions into `bin/win-x64/` | Built by GitHub Actions into `bin/darwin-arm64/` | Linux x64 is built into `bin/linux-x64/`; release artifacts carry the generated multi-target manifest. Binaries are ignored in source control. |
+| Bundled binaries | Built by GitHub Actions into `bin/win-x64/` | Built by GitHub Actions into `bin/darwin-arm64/` | Linux x64 is built into `bin/linux-x64/`; each release artifact carries one target-specific manifest. Binaries are ignored in source control. |
 | MCP local tools | Direct PowerShell launcher is supported for packaged Windows binaries | Shell-first stdio MCP entries are supported on macOS/Linux | Remote `unica-v8std` works independently of local binaries. |
 | 1C platform operations | Requires local 1C platform | Requires local 1C platform or compatible tooling | Skills resolve project/database context from `v8project.yaml` when present. |
 
@@ -86,9 +109,10 @@ Wrappers read `third-party/manifest.json`, check the host target, verify SHA-256
 2. build `darwin-arm64`, `linux-x64`, and `win-x64` tool bundles;
 3. download pinned `bsl-analyzer` and `v8-runner` release assets from the lock;
 4. build `rlm-tools-bsl` and `rlm-bsl-index` with PyInstaller from the locked upstream source tag;
-5. generate a multi-target `third-party/manifest.json` with SHA-256 checksums;
+5. generate a target-specific `third-party/manifest.json` with SHA-256 checksums;
 6. write official marketplace metadata with visible display name `Unica` and plugin id `unica`;
-7. publish `unica-codex-marketplace-<version>.tar.gz` and `.zip` as workflow artifacts and, on tags, GitHub Release assets.
+7. publish platform-specific archives such as `unica-codex-marketplace-darwin-arm64.tar.gz`, `unica-codex-marketplace-linux-x64.tar.gz`, and `unica-codex-marketplace-win-x64.zip` as workflow artifacts and, on tags, GitHub Release assets;
+8. publish `install-unica.sh` as a release asset for one-command installation.
 
 The tool build script requires Python 3.10 or newer; CI uses Python 3.12 and
 creates a local venv under `.build/` for Python-packaged tools.

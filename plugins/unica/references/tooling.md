@@ -18,9 +18,9 @@ Tool-specific behavior is an implementation detail of those workflows.
 ## Bundled Tools
 
 The pinned bundled tools are declared in `third-party/tools.lock.json`.
-Release packages generate a multi-target `third-party/manifest.json` for
-`darwin-arm64`, `linux-x64`, and `win-x64` in GitHub Actions. The checked-in
-manifest is only a source-tree placeholder.
+Release packages are platform-specific: each GitHub Actions package contains
+one `bin/<target>/` directory and a matching `third-party/manifest.json` for
+that target. The checked-in manifest is only a source-tree placeholder.
 
 - `bsl-analyzer`: BSL diagnostics, metadata/code inspection, and local/reference MCP profiles.
 - `v8-runner`: 1C build, syntax, test, and platform-oriented automation.
@@ -76,14 +76,16 @@ artifacts:
   `third-party/tools.lock.json`;
 - Python-packaged tools are built in a target-local venv; `build-unica-tools.py`
   requires Python 3.10 or newer and CI runs it on Python 3.12;
-- the package job merges those target manifests into a generated
+- each package job writes one target-specific generated
   `third-party/manifest.json`;
 - the package job writes official marketplace metadata where the marketplace
   name is `unica`, the plugin id is `unica`, and the visible display name is
   `Unica`;
-- the final artifacts are `unica-codex-marketplace-<version>.tar.gz` and
-  `unica-codex-marketplace-<version>.zip`;
-- tag builds upload the same archives to the GitHub Release.
+- the final artifacts are platform-specific, for example
+  `unica-codex-marketplace-darwin-arm64.tar.gz`,
+  `unica-codex-marketplace-linux-x64.tar.gz`, and
+  `unica-codex-marketplace-win-x64.zip`;
+- tag builds upload the same archives plus `install-unica.sh` to the GitHub Release.
 
 ## MCP Contract
 

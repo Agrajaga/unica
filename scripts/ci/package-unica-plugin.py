@@ -67,10 +67,19 @@ def validate_tool_against_lock(tool: dict, locked: dict, target: str) -> None:
         raise SystemExit(f"{tool['name']} target {target} is missing from tools lock")
 
 
-def load_tool_bundles(tools_root: Path, lock: dict) -> tuple[dict[str, dict], list[Path]]:
+def load_tool_bundles(
+    tools_root: Path,
+    lock: dict,
+    *,
+    allow_partial_targets: bool = False,
+    target: str | None = None,
+) -> tuple[dict[str, dict], list[Path]]:
     grouped: dict[str, dict] = {}
     bin_roots: list[Path] = []
     locked_tools = lock_by_tool(lock)
+    expected_targets = set(lock.get("targets", {}))
+    if target is not None and target not in expected_targets:
+        raise SystemExit(f"unknown target {target}; expected one of {', '.join(sorted(expected_targets))}")
 
     manifests = sorted(tools_root.rglob("tools.json"))
     if not manifests:
@@ -78,8 +87,11 @@ def load_tool_bundles(tools_root: Path, lock: dict) -> tuple[dict[str, dict], li
 
     for manifest_path in manifests:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        target = manifest["target"]
-        bin_root = manifest_path.parent / "bin" / target
+        manifest_target = manifest["target"]
+        if target is not None and manifest_target != target:
+            continue
+
+        bin_root = manifest_path.parent / "bin" / manifest_target
         if not bin_root.exists():
             raise SystemExit(f"tool binary directory not found: {bin_root}")
         bin_roots.append(manifest_path.parent / "bin")
@@ -88,7 +100,7 @@ def load_tool_bundles(tools_root: Path, lock: dict) -> tuple[dict[str, dict], li
             name = tool["name"]
             if name not in locked_tools:
                 raise SystemExit(f"tool bundle contains tool not present in lock: {name}")
-            validate_tool_against_lock(tool, locked_tools[name], target)
+            validate_tool_against_lock(tool, locked_tools[name], manifest_target)
 
             current = grouped.setdefault(
                 name,
@@ -106,18 +118,26 @@ def load_tool_bundles(tools_root: Path, lock: dict) -> tuple[dict[str, dict], li
             for key in ("version", "repository", "sourceTag", "sourceCommit", "license"):
                 if current[key] != tool[key]:
                     raise SystemExit(f"inconsistent {key} for {name}: {current[key]} != {tool[key]}")
-            current["binaries"][target] = {
+            current["binaries"][manifest_target] = {
                 "targetTriple": tool["targetTriple"],
                 "binaryPath": tool["binaryPath"],
                 "sha256": tool["sha256"],
             }
 
-    expected_targets = set(lock.get("targets", {}))
+    if target is not None and not grouped:
+        raise SystemExit(f"no tools.json files found for target {target} under {tools_root}")
+
     for name in sorted(locked_tools):
         if name not in grouped:
             raise SystemExit(f"tool bundle missing locked tool: {name}")
         actual_targets = set(grouped[name]["binaries"])
-        if actual_targets != expected_targets:
+        if allow_partial_targets:
+            if not actual_targets:
+                raise SystemExit(f"{name} bundle has no targets")
+            unknown_targets = actual_targets - expected_targets
+            if unknown_targets:
+                raise SystemExit(f"{name} bundle contains unknown targets: {sorted(unknown_targets)}")
+        elif actual_targets != expected_targets:
             raise SystemExit(
                 f"{name} target matrix differs from lock: {sorted(actual_targets)} != {sorted(expected_targets)}"
             )
@@ -146,9 +166,9 @@ def write_manifest(plugin_dir: Path, grouped_tools: dict[str, dict], lock_file: 
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def write_official_marketplace(source_path: Path, dest_path: Path) -> None:
+def write_official_marketplace(source_path: Path, dest_path: Path, *, marketplace_name: str = PLUGIN_ID) -> None:
     data = json.loads(source_path.read_text(encoding="utf-8"))
-    data["name"] = PLUGIN_ID
+    data["name"] = marketplace_name
     data.setdefault("interface", {})["displayName"] = DISPLAY_NAME
 
     if len(data.get("plugins", [])) != 1:
@@ -177,8 +197,14 @@ def assert_archive_clean(marketplace_dir: Path) -> None:
             raise SystemExit(f"archive contains nested package artifact: {rel}")
 
 
-def make_archives(marketplace_dir: Path, out_dir: Path, version: str) -> None:
-    base_name = f"unica-codex-marketplace-{version}"
+def archive_base_name(version: str, *, target: str | None = None) -> str:
+    if target:
+        return f"unica-codex-marketplace-{target}"
+    return f"unica-codex-marketplace-{version}"
+
+
+def make_archives(marketplace_dir: Path, out_dir: Path, version: str, *, target: str | None = None) -> None:
+    base_name = archive_base_name(version, target=target)
     tar_path = out_dir / f"{base_name}.tar.gz"
     zip_path = out_dir / f"{base_name}.zip"
 
@@ -196,6 +222,10 @@ def main() -> None:
     parser.add_argument("--tools-root", type=Path, required=True)
     parser.add_argument("--lock-file", type=Path, default=Path("plugins/unica/third-party/tools.lock.json"))
     parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--marketplace-name", default=PLUGIN_ID)
+    parser.add_argument("--allow-partial-targets", action="store_true")
+    parser.add_argument("--no-archives", action="store_true")
+    parser.add_argument("--target")
     args = parser.parse_args()
 
     repo_root = args.repo_root.resolve()
@@ -218,13 +248,24 @@ def main() -> None:
 
     marketplace_dst = marketplace_dir / ".agents" / "plugins"
     marketplace_dst.mkdir(parents=True, exist_ok=True)
-    write_official_marketplace(marketplace_src, marketplace_dst / "marketplace.json")
+    write_official_marketplace(
+        marketplace_src,
+        marketplace_dst / "marketplace.json",
+        marketplace_name=args.marketplace_name,
+    )
 
     lock = load_lock(lock_file)
-    grouped_tools, bin_roots = load_tool_bundles(args.tools_root.resolve(), lock)
+    grouped_tools, bin_roots = load_tool_bundles(
+        args.tools_root.resolve(),
+        lock,
+        allow_partial_targets=args.allow_partial_targets,
+        target=args.target,
+    )
     for bin_root in bin_roots:
         for target_dir in bin_root.iterdir():
             if target_dir.is_dir():
+                if args.target is not None and target_dir.name != args.target:
+                    continue
                 copytree(target_dir, plugin_dst / "bin" / target_dir.name)
 
     write_manifest(plugin_dst, grouped_tools, lock_file)
@@ -236,7 +277,8 @@ def main() -> None:
     assert_archive_clean(marketplace_dir)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    make_archives(marketplace_dir, args.out_dir, version)
+    if not args.no_archives:
+        make_archives(marketplace_dir, args.out_dir, version, target=args.target)
 
 
 if __name__ == "__main__":

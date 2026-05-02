@@ -20,17 +20,29 @@ Unica - это плагин для Codex, который помогает раб
 - Для тех, кто поддерживает или расширяет сам плагин Unica.
 - Для команд, которым нужен воспроизводимый набор 1С-инструментов внутри Codex.
 
-## Установка готового пакета
+## Установка
 
-Если у вас есть готовый архив `unica-codex-marketplace-<version>.tar.gz`:
+Одна команда скачивает installer из последнего GitHub Release, определяет
+платформу, скачивает нужный пакет Unica и устанавливает его в Codex:
 
 ```sh
-tar -xzf unica-codex-marketplace-<version>.tar.gz
-cd unica-codex-marketplace-<version>
-codex plugin marketplace add "$PWD"
+curl -fsSL https://github.com/ingvarvilkman/unica/releases/latest/download/install-unica.sh | sh
 ```
 
-После этого откройте `/plugins` в Codex и включите `Unica`, если плагин не включился автоматически.
+Для установки конкретного релиза:
+
+```sh
+curl -fsSL https://github.com/ingvarvilkman/unica/releases/latest/download/install-unica.sh | sh -s -- --version v0.3.4
+```
+
+Release assets собираются отдельно под платформы:
+
+- `unica-codex-marketplace-darwin-arm64.tar.gz`
+- `unica-codex-marketplace-linux-x64.tar.gz`
+- `unica-codex-marketplace-win-x64.zip`
+
+Installer выбирает нужный архив, регистрирует marketplace `unica-local`,
+обновляет cache Codex и включает `unica@unica-local`.
 
 Проверка:
 
@@ -47,10 +59,12 @@ codex debug prompt-input 'test'
 ```sh
 git clone https://github.com/ingvarvilkman/unica.git
 cd unica
-codex plugin marketplace add "$PWD"
+scripts/dev/install-local-unica.sh
 ```
 
-Важно: установка из исходников показывает навыки и метаданные плагина, но локальные bundled-утилиты работают только в собранном marketplace-пакете, где есть `plugins/unica/bin/<target>/` и сгенерированный `third-party/manifest.json`.
+Скрипт соберет пакет под текущую машину из локальных исходников, установит его
+в Codex как `unica-local` и проверит свежую сессию через
+`codex debug prompt-input`.
 
 ## Что нужно для работы
 
