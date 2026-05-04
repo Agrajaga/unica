@@ -333,6 +333,9 @@ class UnicaSkillRoutingTests(unittest.TestCase):
     def skill_root(self) -> Path:
         return self.repo_root() / "plugins" / "unica" / "skills"
 
+    def reference_root(self) -> Path:
+        return self.repo_root() / "plugins" / "unica" / "references"
+
     def parity_reference_root(self) -> Path:
         return (
             self.repo_root()
@@ -380,35 +383,12 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         scanned_docs = [
             self.repo_root() / "README.md",
             self.repo_root() / "plugins" / "unica" / "README.md",
-            self.repo_root() / "plugins" / "unica" / "references" / "v8project.md",
-            self.repo_root()
-            / "plugins"
-            / "unica"
-            / "references"
-            / "cc-1c-skills"
-            / "docs"
-            / "epf-guide.md",
-            self.repo_root()
-            / "plugins"
-            / "unica"
-            / "references"
-            / "cc-1c-skills"
-            / "docs"
-            / "build-spec.md",
-            self.repo_root()
-            / "plugins"
-            / "unica"
-            / "references"
-            / "cc-1c-skills"
-            / "docs"
-            / "form-guide.md",
-            self.repo_root()
-            / "plugins"
-            / "unica"
-            / "references"
-            / "cc-1c-skills"
-            / "docs"
-            / "mxl-guide.md",
+            self.reference_root() / "README.md",
+            self.reference_root() / "tooling" / "v8project.md",
+            self.reference_root() / "tooling" / "runtime-build.md",
+            self.reference_root() / "use-cases" / "workspace-runtime.md",
+            self.reference_root() / "use-cases" / "forms-ui.md",
+            self.reference_root() / "use-cases" / "reports-printing.md",
         ]
         for doc in scanned_docs:
             text = doc.read_text(encoding="utf-8")
@@ -485,6 +465,76 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 self.assertIn(token, description_text)
         self.assertIn("Не используй", description_text)
         self.assertIn("XML", description_text)
+
+    def test_references_are_structured_by_unica_use_cases(self) -> None:
+        reference_root = self.reference_root()
+        self.assertFalse((reference_root / "cc-1c-skills").exists())
+        self.assertFalse((reference_root / "ai-rules-1c").exists())
+
+        required_paths = [
+            "README.md",
+            "use-cases/workspace-runtime.md",
+            "use-cases/metadata-modeling.md",
+            "use-cases/forms-ui.md",
+            "use-cases/reports-printing.md",
+            "use-cases/extensions-cfe.md",
+            "use-cases/rights-access.md",
+            "use-cases/web-publication-testing.md",
+            "use-cases/code-quality-review.md",
+            "use-cases/integrations.md",
+            "specs/README.md",
+            "platform/development-standards.md",
+            "platform/platform-solutions.md",
+            "tooling/v8project.md",
+            "tooling/internal-package.md",
+            "tooling/runtime-build.md",
+        ]
+        for relative_path in required_paths:
+            with self.subTest(path=relative_path):
+                path = reference_root / relative_path
+                self.assertTrue(path.is_file())
+                text = path.read_text(encoding="utf-8")
+                if relative_path.startswith("use-cases/"):
+                    self.assertIn("## When to use", text)
+                    self.assertIn("## Primary path", text)
+
+    def test_references_do_not_contain_stale_upstream_instructions(self) -> None:
+        forbidden_patterns = [
+            r"references/(cc-1c-skills|ai-rules-1c)",
+            r"\bClaude\b",
+            r"\bclaude\b",
+            r"Anthropic",
+            r"\.claude",
+            r"/db-",
+            r"/epf-(init|build|dump|validate)",
+            r"/erf-(init|build|dump|validate)",
+            r"1c-code-metadata-mcp",
+            r"1c-metadata-manage",
+            r"deploy_and_test",
+        ]
+        scanned_roots = [self.reference_root(), self.skill_root()]
+        for root in scanned_roots:
+            for path in root.rglob("*.md"):
+                text = path.read_text(encoding="utf-8")
+                for pattern in forbidden_patterns:
+                    with self.subTest(path=path.relative_to(self.repo_root()), pattern=pattern):
+                        self.assertIsNone(re.search(pattern, text))
+
+    def test_documented_reference_paths_exist(self) -> None:
+        roots = [
+            self.repo_root() / "README.md",
+            self.repo_root() / "plugins" / "unica" / "README.md",
+            *self.skill_root().glob("*/SKILL.md"),
+            *self.reference_root().rglob("*.md"),
+        ]
+        pattern = re.compile(r"`(references/[^`]+?\.md)`")
+        for doc in roots:
+            text = doc.read_text(encoding="utf-8")
+            for match in pattern.findall(text):
+                with self.subTest(doc=doc.relative_to(self.repo_root()), reference=match):
+                    local_target = doc.parent / match
+                    plugin_target = self.repo_root() / "plugins" / "unica" / match
+                    self.assertTrue(local_target.is_file() or plugin_target.is_file())
 
     def test_skills_do_not_use_model_specific_assistant_names(self) -> None:
         forbidden = ["Claude", "claude", "Anthropic", ".claude", "CLAUDE.md"]

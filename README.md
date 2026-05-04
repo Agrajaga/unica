@@ -76,7 +76,7 @@ scripts/dev/install-local-unica.sh
 ## Где смотреть детали
 
 - Техническое описание плагина: `plugins/unica/README.md`.
-- Внутренняя схема инструментов и сборки: `plugins/unica/references/tooling.md`.
+- Внутренняя схема инструментов и сборки: `plugins/unica/references/tooling/internal-package.md`.
 - Список pinned-инструментов: `plugins/unica/third-party/tools.lock.json`.
 
 Официальная публикация в публичный каталог Codex будет отдельным шагом, когда OpenAI откроет self-serve публикацию плагинов. Сейчас репозиторий готовит воспроизводимый marketplace-пакет, который можно устанавливать как локальный или Git-backed marketplace.
