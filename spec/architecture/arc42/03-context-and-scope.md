@@ -17,6 +17,7 @@ Public tool groups:
 - `unica.form.*`, `unica.skd.*`, `unica.mxl.*`, `unica.role.*`
 - `unica.interface.*`, `unica.subsystem.*`, `unica.template.*`
 - `unica.build.*`
+- `unica.runtime.*`
 - `unica.code.*`
 - `unica.standards.*`
 

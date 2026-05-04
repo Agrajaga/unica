@@ -53,10 +53,10 @@
     },
     {
       "name": "v8-runner",
-      "version": "0.3.0",
+      "version": "0.4.1",
       "repository": "https://github.com/alkoleft/v8-runner-rust",
-      "sourceTag": "v0.3.0",
-      "sourceCommit": "e41c9dba5552851036fd6087f0b4a72ede01cb81",
+      "sourceTag": "v0.4.1",
+      "sourceCommit": "43966e1cb18be2213eb2ff90165fe318021f097a",
       "license": "NOASSERTION",
       "assetStrategy": "archive-release-asset",
       "binaryName": "v8-runner",

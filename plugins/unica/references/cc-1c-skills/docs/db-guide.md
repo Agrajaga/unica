@@ -1,51 +1,41 @@
-# Базы данных 1С
+# Базы данных и runtime workflows 1С
 
-Группа `/db-*` работает через `v8project.yaml` и v8-runner. Старые native Designer scripts остаются только fallback для режимов, которых нет в v8-runner.
+Старые `/db-*` навыки заменены единым packaged skill `v8-runner`.
+Обычный путь выполнения: MCP `unica` -> tool `unica.runtime.execute` -> internal
+v8-runner adapter. Отдельный запуск package launcher-а не является нормальным
+workflow для пользовательских задач.
 
-## Навыки
+## Карта операций
 
-| Навык | Основной backend |
+| Задача | MCP arguments |
 | --- | --- |
-| `/db-list` | `v8-runner config init`, чтение/правка `v8project.yaml` |
-| `/db-create` | `v8-runner config init` + `v8-runner init` |
-| `/db-dump-cf` | `v8-runner make --output` |
-| `/db-load-cf` | `v8-runner load --path` |
-| `/db-dump-xml` | `v8-runner dump --mode ...` |
-| `/db-load-xml` | `v8-runner build` |
-| `/db-update` | `v8-runner build` или `v8-runner load --mode update` |
-| `/db-run` | `v8-runner launch` |
-| `/db-load-git` | `v8-runner build` |
+| Создать `v8project.yaml` | `operation=config-init`, `connection=<строка>` |
+| Инициализировать базу/workspace | `operation=init` |
+| Загрузить исходники | `operation=build` |
+| Полная пересборка | `operation=build`, `fullRebuild=true` |
+| Выгрузить исходники | `operation=dump`, `mode=full|incremental|partial` |
+| Экспортировать CF/CFE/EPF/ERF | `operation=make`, `output=<file>` |
+| Загрузить CF/CFE | `operation=load`, `path=<file>`, `mode=load|merge|update` |
+| Запустить 1С | `operation=launch`, `clientMode=thin|thick|designer|ordinary` |
+| Проверить синтаксис | `operation=syntax`, `mode=designer-config|designer-modules|edt` |
+| Запустить тесты | `operation=test`, `testRunner=yaxunit|va` |
 
-## Рабочий цикл
+## Пример
 
-```text
-v8project.yaml -> /db-create -> /db-load-xml -> /db-update -> /db-run
-                                 ^             |
-                                 |             v
-                             правки XML <- /db-dump-xml
-```
-
-## Примеры
-
-```sh
-# создать конфиг и базу/workspace
-plugins/unica/scripts/run-v8-runner.sh config init --connection '/F/Users/me/1c-bases/dev'
-plugins/unica/scripts/run-v8-runner.sh init
-
-# загрузить исходники
-plugins/unica/scripts/run-v8-runner.sh build
-
-# выгрузить исходники
-plugins/unica/scripts/run-v8-runner.sh dump --mode full
-
-# экспортировать CF
-plugins/unica/scripts/run-v8-runner.sh make --output build/config.cf
-
-# загрузить CF и применить обновление
-plugins/unica/scripts/run-v8-runner.sh load --path build/config.cf --mode update
-
-# запустить клиент
-plugins/unica/scripts/run-v8-runner.sh launch thin
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "unica.runtime.execute",
+    "arguments": {
+      "cwd": "<workspace>",
+      "operation": "build",
+      "sourceSet": "main",
+      "dryRun": false
+    }
+  }
+}
 ```
 
 ## Спецификации

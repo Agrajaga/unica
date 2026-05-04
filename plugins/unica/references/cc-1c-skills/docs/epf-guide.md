@@ -1,190 +1,97 @@
-# Внешние обработки и отчёты (EPF / ERF)
+# Внешние обработки и отчеты (EPF / ERF)
 
-Навыки для создания, модификации и сборки внешних обработок (`.epf`) и внешних отчётов (`.erf`) 1С:Предприятия 8.3 из XML-исходников.
+Runtime-сценарии EPF/ERF выполняются через skill `v8-runner` и публичный MCP tool `unica.runtime.execute`. Старые отдельные EPF/ERF runtime skills заменены external source-set workflow.
 
-## Навыки обработок (EPF)
+`epf-bsp-init` и `epf-bsp-add-command` остаются помощниками для редактирования кода регистрации БСП. Они не собирают и не выгружают артефакты.
 
-| Навык | Параметры | Описание |
-|-------|-----------|----------|
-| `/epf-init` | `<Name> [Synonym]` | Создать новую обработку (корневой XML + модуль объекта) |
-| `/epf-build` | `<ProcessorName>` | Собрать EPF из XML (через 1cv8.exe) |
-| `/epf-dump` | `<EpfFile>` | Разобрать EPF в XML (через 1cv8.exe) |
-| `/epf-bsp-init` | `<ProcessorName> <Вид>` | Добавить регистрацию БСП (СведенияОВнешнейОбработке) |
-| `/epf-bsp-add-command` | `<ProcessorName> <Идентификатор>` | Добавить команду в дополнительную обработку БСП |
-| `/epf-validate` | `<ObjectPath> [-MaxErrors 30]` | Валидация структурной корректности обработки (10 проверок) |
+## Source Sets
 
-## Внешние отчёты (ERF)
+| Артефакт | v8-runner source-set type | Типовое имя source-set |
+| --- | --- | --- |
+| `.epf` external processing | `EXTERNAL_DATA_PROCESSORS` | `external-processors` |
+| `.erf` external report | `EXTERNAL_REPORTS` | `external-reports` |
 
-| Навык | Параметры | Описание |
-|-------|-----------|----------|
-| `/erf-init` | `<ReportName> [Synonym] [--WithSKD]` | Создать новый отчёт (корневой XML + модуль объекта + опционально СКД) |
-| `/erf-build` | `<ReportName>` | Собрать ERF из XML (через 1cv8.exe) |
-| `/erf-dump` | `<ErfFile>` | Разобрать ERF в XML (через 1cv8.exe) |
-| `/erf-validate` | `<ObjectPath> [-MaxErrors 30]` | Валидация структурной корректности отчёта (10 проверок) |
+External source sets настраиваются в `v8project.yaml`. Если нужный source-set еще не объявлен, используй `v8-runner` `operation=config-init` или явно отредактируй конфиг.
 
-Флаг `--WithSKD` создаёт макет `ОсновнаяСхемаКомпоновкиДанных` и привязывает его к `MainDataCompositionSchema`.
+## MCP Workflows
 
-## Универсальные навыки
+### Загрузка XML-исходников в базу
 
-Работают с любыми объектами — обработками, отчётами, справочниками, документами и др.
-
-| Навык | Параметры | Описание |
-|-------|-----------|----------|
-| `/template-add` | `<ObjectName> <TemplateName> <TemplateType>` | Добавить макет (HTML, Text, SpreadsheetDocument, BinaryData, DataCompositionSchema) |
-| `/template-remove` | `<ObjectName> <TemplateName>` | Удалить макет |
-| `/help-add` | `<ObjectName>` | Добавить встроенную справку (Help.xml + HTML) |
-| `/form-remove` | `<ObjectName> <FormName>` | Удалить форму |
-
-Для отчётов: при добавлении макета типа DataCompositionSchema автоматически заполняется `MainDataCompositionSchema` (если пуст).
-
-Навыки удаления (`template-remove`, `form-remove`) не вызываются Claude автоматически — только по явной команде пользователя.
-
-## Сценарии использования
-
-Не обязательно запоминать команды и параметры. Просто опишите задачу своими словами — Claude сам подберёт нужные навыки.
-
-### Обработка с формой
-
-Типичная обработка для манипуляций с данными — форма для пользователя, модуль объекта для логики.
-
-```
-> Создай обработку ЗагрузкаПрайса с формой
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "unica.runtime.execute",
+    "arguments": {
+      "operation": "build",
+      "cwd": "<workspace>",
+      "sourceSet": "external-processors",
+      "mode": "full"
+    }
+  }
+}
 ```
 
-Claude выполнит `/epf-init` и `/form-add` с правильными параметрами.
+Для внешних отчетов используй `sourceSet: "external-reports"`.
 
-### Внешняя печатная форма
+### Выгрузка внешних исходников из базы
 
-Обработка с макетом табличного документа, подключаемая через механизм дополнительных обработок БСП к конкретному документу.
-
-```
-> Создай внешнюю печатную форму для документа Реализация. Макет — табличный документ.
-```
-
-Claude создаст обработку, добавит макет SpreadsheetDocument, вызовет `/epf-bsp-init` с видом ПечатнаяФорма и назначением, сгенерирует `СведенияОВнешнейОбработке()` и процедуру `Печать()`.
-
-### Внешний отчёт с СКД
-
-```
-> Создай внешний отчёт ОстаткиНаСкладе с СКД
-```
-
-Claude выполнит `/erf-init ОстаткиНаСкладе --WithSKD`, затем предложит заполнить схему компоновки через `/skd-compile`.
-
-### Доработка существующей обработки
-
-```
-> Добавь справку с описанием как пользоваться обработкой
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "unica.runtime.execute",
+    "arguments": {
+      "operation": "dump",
+      "cwd": "<workspace>",
+      "sourceSet": "external-reports",
+      "mode": "full"
+    }
+  }
+}
 ```
 
-Claude вызовет `/help-add` и предложит отредактировать HTML.
+### Публикация `.epf` / `.erf` артефактов
 
-```
-> Добавь ещё одну команду печати — накладная
-```
-
-Claude вызовет `/epf-bsp-add-command`, добавит команду в `СведенияОВнешнейОбработке()` и блок обработки в процедуру `Печать()`.
-
-```
-> Собери
-```
-
-Claude вызовет `/epf-build` или `/erf-build` в зависимости от типа объекта.
-
-### Примеры слеш-команд
-
-Слеш-команды работают для случаев, когда хочется точного контроля:
-
-```
-> /epf-init МояОбработка "Моя обработка"
-> /form-add МояОбработка.xml Форма
-> /template-add МояОбработка Макет HTML
-> /help-add МояОбработка
-> /epf-build МояОбработка
-
-> /erf-init МойОтчёт --WithSKD
-> /template-add МойОтчёт ДопМакет SpreadsheetDocument
-> /erf-build МойОтчёт
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "unica.runtime.execute",
+    "arguments": {
+      "operation": "make",
+      "cwd": "<workspace>",
+      "sourceSet": "external-processors",
+      "output": "build/external"
+    }
+  }
+}
 ```
 
-## Структура каталогов
+Для external source-set операция `make` пишет артефакты в каталог. Для публикации `.erf` используй `sourceSet: "external-reports"`.
 
-После `/epf-init` создаётся структура:
+## Related Skills
 
-```
-src/
-├── МояОбработка.xml                          # Корневой файл метаданных
-└── МояОбработка/
-    └── Ext/
-        └── ObjectModule.bsl                  # Модуль объекта
-```
+Работа с XML на уровне объектов остается за native metadata skills:
 
-После `/form-add` и `/template-add`:
+- `form-add`, `form-compile`, `form-edit`, `form-validate`, `form-info`;
+- `template-add`, `template-remove`;
+- `mxl-compile`, `mxl-decompile`, `mxl-info`, `mxl-validate`;
+- `skd-compile`, `skd-edit`, `skd-info`, `skd-validate`;
+- `epf-bsp-init`, `epf-bsp-add-command` для кода регистрации БСП.
 
-```
-src/
-├── МояОбработка.xml
-└── МояОбработка/
-    ├── Ext/
-    │   └── ObjectModule.bsl
-    ├── Forms/
-    │   ├── Форма.xml                         # Метаданные формы
-    │   └── Форма/
-    │       └── Ext/
-    │           ├── Form.xml                  # Описание формы
-    │           └── Form/
-    │               └── Module.bsl            # Модуль формы
-    └── Templates/
-        ├── Макет.xml                         # Метаданные макета
-        └── Макет/
-            └── Ext/
-                └── Template.html             # Содержимое макета
-```
+## Important Limits
 
-После `/erf-init МойОтчёт --WithSKD`:
+- `operation=load` предназначен только для `.cf` и `.cfe`; он не загружает `.epf` или `.erf`.
+- Для `build` и `dump` нужна настроенная база с целевой платформой и типами метаданных. Пустые базы могут потерять ссылочные типы при выгрузке.
+- Инвалидацией cache после успешных non-dry-run runtime операций управляет MCP orchestrator `unica`; skill-инструкции не должны просить ассистента запускать отдельное обновление cache.
 
-```
-src/
-├── МойОтчёт.xml                              # Корневой файл (ExternalReport)
-└── МойОтчёт/
-    ├── Ext/
-    │   └── ObjectModule.bsl                  # Модуль объекта
-    └── Templates/
-        ├── ОсновнаяСхемаКомпоновкиДанных.xml
-        └── ОсновнаяСхемаКомпоновкиДанных/
-            └── Ext/
-                └── Template.xml              # Пустая СКД
-```
+## Specifications
 
-Первая добавленная форма автоматически становится основной (DefaultForm). Флаг `--main` нужен только для переназначения основной формы на другую.
-
-## Сборка и разборка
-
-### Сборка (`/epf-build`, `/erf-build`)
-
-Если база не указана — автоматически создаётся временная база с заглушками метаданных для ссылочных типов. Явная база не обязательна, но предпочтительна — обеспечивает точное соответствие типов.
-
-**Ограничение**: если на форме обработки выведены наборы записей регистров, в XML-исходниках нет информации о том, чем является поле регистра — измерением, ресурсом или реквизитом. Скрипт пытается угадать категорию по имени, но при ошибке 1С молча сбрасывает привязки колонок (DataPath). В таких случаях лучше использовать реальную базу с нужной конфигурацией.
-
-### Разборка (`/epf-dump`, `/erf-dump`)
-
-База с конфигурацией **обязательна**. Dump в пустой базе безвозвратно теряет ссылочные типы (`CatalogRef.XXX` → `xs:string`).
-
-## Технические детали
-
-- Все XML-файлы создаются в **UTF-8 с BOM** (как в реальных выгрузках 1С)
-- PowerShell-скрипты используют `System.Xml.XmlDocument` для модификации корневого XML
-- UUID генерируются через `[guid]::NewGuid()`
-- ClassId обработки: `c3831ec8-d8d5-4f93-8a22-f9bfae07327f`
-- ClassId отчёта: `e41aff26-25cf-4bb6-b6c1-3f478a75f374`
-- Порядок элементов в `ChildObjects`: TabularSections → Forms → Templates
-- Первая форма автоматически назначается основной (DefaultForm)
-- Навыки БСП (`epf-bsp-*`) не используют скрипты — Claude модифицирует код напрямую через Read/Edit
-- Для отчётов: `/template-add` с типом DataCompositionSchema автоматически заполняет `MainDataCompositionSchema`
-
-## Спецификации
-
-- [XML-формат выгрузки обработок](1c-epf-spec.md) — структура XML-файлов, namespace, элементы форм
-- [XML-формат внешних отчётов](1c-erf-spec.md) — отличия ERF от EPF, Properties, MainDataCompositionSchema
-- [Встроенная справка](1c-help-spec.md) — Help.xml, HTML-страницы, кнопка справки на форме
-- [Сборка и разборка EPF/ERF](build-spec.md) — команды `1cv8.exe`, параметры, коды возврата
+- [XML-формат внешних обработок](1c-epf-spec.md)
+- [XML-формат внешних отчетов](1c-erf-spec.md)
+- [Встроенная справка](1c-help-spec.md)
+- [Runtime-сборка и выгрузка](build-spec.md)

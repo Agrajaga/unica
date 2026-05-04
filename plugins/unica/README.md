@@ -5,13 +5,13 @@ Unica is a Codex plugin for day-to-day 1C:Enterprise development work.
 The public skills model developer operations, not infrastructure tools:
 
 - create, inspect, edit, validate, compile, dump, and load 1C metadata;
-- build and validate external processings and reports (`EPF`/`ERF`);
-- create, run, update, dump, and load infobases;
+- build, dump, and publish external processing/report source sets (`EPF`/`ERF`) through v8-runner MCP workflows;
+- run v8-runner database/build/runtime workflows through MCP `unica`;
 - work with forms, roles, SKD, MXL, subsystems, command interfaces, help, templates, and web publication;
 - search and analyze BSL code inside those workflows.
 - bootstrap a new 1C repository workspace with `v8project.yaml`.
 
-Bundled tooling, wrappers, MCP server names, checksums, and third-party notices are internal package infrastructure. Project configuration is `v8project.yaml` / `V8TR_CONFIG`; database and build workflows should use v8-runner before native fallback scripts. See `references/tooling.md` when maintaining the plugin itself.
+Bundled tooling, wrappers, MCP server names, checksums, and third-party notices are internal package infrastructure. Project configuration is `v8project.yaml` / `V8TR_CONFIG`; database and build workflows should use the `v8-runner` skill, which calls MCP `unica.runtime.execute`. See `references/tooling.md` when maintaining the plugin itself.
 
 ## Skills
 
@@ -19,9 +19,8 @@ The `skills/` directory contains operation skills adapted from `cc-1c-skills` wi
 
 - `cf-edit`, `cf-info`, `cf-init`, `cf-validate`
 - `cfe-init`, `cfe-borrow`, `cfe-diff`, `cfe-patch-method`, `cfe-validate`
-- `workspace-init`, `db-auth-check`, `db-create`, `db-run`, `db-update`, `db-dump-xml`, `db-load-xml`, `db-dump-cf`, `db-load-cf`, `db-load-git`
-- `epf-init`, `epf-build`, `epf-dump`, `epf-validate`
-- `erf-init`, `erf-build`, `erf-dump`, `erf-validate`
+- `v8-runner`, `db-auth-check`
+- `epf-bsp-init`, `epf-bsp-add-command` for BSP registration helpers; EPF/ERF build and dump workflows live in `v8-runner`
 - `form-add`, `form-edit`, `form-info`, `form-compile`, `form-validate`, `form-remove`
 - `meta-compile`, `meta-edit`, `meta-info`, `meta-remove`, `meta-validate`
 - `mxl-*`, `role-*`, `skd-*`, `subsystem-*`, `interface-*`, `template-*`, `web-*`, `img-grid`
@@ -60,7 +59,7 @@ scripts/dev/install-local-unica.sh
 The script builds only the current host target, writes the generated marketplace
 under `.build/local-codex-unica/package/marketplace`, removes any previous
 `unica-local` marketplace, adds the new one, validates the bundled MCP metadata
-and launchers, and checks that fresh Codex sees `Unica`, `workspace-init`, and
+and launchers, and checks that fresh Codex sees `Unica`, `v8-runner`, and
 `db-auth-check`.
 
 Useful development flags:

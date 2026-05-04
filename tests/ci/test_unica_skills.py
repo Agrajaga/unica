@@ -49,15 +49,31 @@ IN_SCOPE_TOOLS = {
 }
 
 OUT_OF_SCOPE = [
-    "db-create",
-    "db-dump-cf",
-    "workspace-init",
-    "epf-build",
-    "erf-init",
     "web-test",
     "help-add",
     "img-grid",
 ]
+
+REPLACED_RUNTIME_SKILLS = {
+    "db-create",
+    "db-list",
+    "db-dump-xml",
+    "db-dump-cf",
+    "db-load-xml",
+    "db-load-cf",
+    "db-load-git",
+    "db-update",
+    "db-run",
+    "workspace-init",
+    "epf-init",
+    "epf-build",
+    "epf-dump",
+    "epf-validate",
+    "erf-init",
+    "erf-build",
+    "erf-dump",
+    "erf-validate",
+}
 
 TASK_EXAMPLE_ARGUMENT_KEYS = {
     "cf-edit": ["ConfigPath", "Operation", "Value"],
@@ -353,6 +369,122 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 text = skill_path.read_text(encoding="utf-8")
                 for name in forbidden:
                     self.assertNotIn(name, text)
+
+    def test_v8_runner_replaces_runtime_and_external_skills_with_single_mcp_skill(self) -> None:
+        skill_dir = self.skill_root() / "v8-runner"
+        self.assertTrue((skill_dir / "SKILL.md").is_file())
+        for skill in REPLACED_RUNTIME_SKILLS:
+            with self.subTest(skill=skill):
+                self.assertFalse((self.skill_root() / skill).exists())
+
+        scanned_docs = [
+            self.repo_root() / "README.md",
+            self.repo_root() / "plugins" / "unica" / "README.md",
+            self.repo_root() / "plugins" / "unica" / "references" / "v8project.md",
+            self.repo_root()
+            / "plugins"
+            / "unica"
+            / "references"
+            / "cc-1c-skills"
+            / "docs"
+            / "epf-guide.md",
+            self.repo_root()
+            / "plugins"
+            / "unica"
+            / "references"
+            / "cc-1c-skills"
+            / "docs"
+            / "build-spec.md",
+            self.repo_root()
+            / "plugins"
+            / "unica"
+            / "references"
+            / "cc-1c-skills"
+            / "docs"
+            / "form-guide.md",
+            self.repo_root()
+            / "plugins"
+            / "unica"
+            / "references"
+            / "cc-1c-skills"
+            / "docs"
+            / "mxl-guide.md",
+        ]
+        for doc in scanned_docs:
+            text = doc.read_text(encoding="utf-8")
+            for skill in REPLACED_RUNTIME_SKILLS:
+                with self.subTest(path=doc.relative_to(self.repo_root()), skill=skill):
+                    self.assertNotIn(f"/{skill}", text)
+                    self.assertNotIn(f"`{skill}`", text)
+
+        for doc in skill_dir.glob("**/*.md"):
+            with self.subTest(path=doc.relative_to(skill_dir)):
+                text = doc.read_text(encoding="utf-8")
+                self.assertNotIn("run-v8-runner.sh", text)
+                self.assertNotIn("unica-v8-runner", text)
+                self.assertNotIn('"args"', text)
+        self.assertIn(
+            "unica.runtime.execute",
+            (skill_dir / "SKILL.md").read_text(encoding="utf-8"),
+        )
+
+    def test_v8_runner_examples_are_parameterized_mcp_calls(self) -> None:
+        skill_doc = self.skill_root() / "v8-runner" / "SKILL.md"
+        text = skill_doc.read_text(encoding="utf-8")
+        examples = [
+            block
+            for block in re.findall(r"```json\n(.*?)\n```", text, flags=re.S)
+            if '"method": "tools/call"' in block
+        ]
+        self.assertGreaterEqual(len(examples), 20)
+        operations = set()
+        for block in examples:
+            payload = json.loads(block)
+            self.assertEqual(payload["params"]["name"], "unica.runtime.execute")
+            arguments = payload["params"]["arguments"]
+            self.assertIn("operation", arguments)
+            self.assertNotEqual(set(arguments.keys()), {"cwd"})
+            self.assertNotIn("args", arguments)
+            operations.add(arguments["operation"])
+
+        self.assertTrue(
+            {
+                "config-init",
+                "init",
+                "build",
+                "dump",
+                "convert",
+                "make",
+                "load",
+                "syntax",
+                "test",
+                "launch",
+                "extensions",
+            }.issubset(operations)
+        )
+        self.assertIn('"sourceSet": "external-processors"', text)
+        self.assertIn('"sourceSet": "external-reports"', text)
+        self.assertIn('"output": "build/external"', text)
+
+    def test_v8_runner_metadata_describes_runtime_trigger_surface(self) -> None:
+        skill_doc = self.skill_root() / "v8-runner" / "SKILL.md"
+        text = skill_doc.read_text(encoding="utf-8")
+        description = re.search(r"^description:\s*(.+)$", text, flags=re.M)
+        self.assertIsNotNone(description)
+        description_text = description.group(1)
+        for token in [
+            "информационная база",
+            "v8project.yaml",
+            "workspace",
+            "source-set",
+            "EPF/ERF",
+            "CF/CFE",
+            "syntax/tests/launch",
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, description_text)
+        self.assertIn("Не используй", description_text)
+        self.assertIn("XML", description_text)
 
     def test_skills_do_not_use_model_specific_assistant_names(self) -> None:
         forbidden = ["Claude", "claude", "Anthropic", ".claude", "CLAUDE.md"]

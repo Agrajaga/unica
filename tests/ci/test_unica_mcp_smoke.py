@@ -42,6 +42,7 @@ class UnicaMcpSmokeTests(unittest.TestCase):
         self.assertIn("unica.project.status", tools)
         self.assertIn("unica.form.edit", tools)
         self.assertIn("unica.build.load", tools)
+        self.assertIn("unica.runtime.execute", tools)
         self.assertIn("unica.standards.explain", tools)
 
     def test_mutating_dry_run_reports_cache_impact(self) -> None:
@@ -69,3 +70,31 @@ class UnicaMcpSmokeTests(unittest.TestCase):
         self.assertEqual(payload["cache"]["mode"], "dry-run")
         self.assertIn("FormChanged", payload["cache"]["events"])
         self.assertIn("metadata_graph", payload["cache"]["invalidated"])
+
+    def test_runtime_execute_dry_run_reports_runner_cache_impact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            responses = self.call_mcp(
+                [
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "unica.runtime.execute",
+                            "arguments": {
+                                "cwd": str(tmp_path),
+                                "operation": "dump",
+                            },
+                        },
+                    }
+                ],
+                cache_dir=tmp_path / "cache",
+            )
+
+        text = responses[0]["result"]["content"][0]["text"]
+        payload = json.loads(text)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["cache"]["mode"], "dry-run")
+        self.assertIn("SourceSetChanged", payload["cache"]["events"])
+        self.assertIn("run-v8-runner.sh", " ".join(payload["command"]))

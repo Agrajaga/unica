@@ -1,12 +1,27 @@
 # Конфигурация проекта v8project.yaml
 
-`v8project.yaml` — единый проектный конфиг Unica и v8-runner. Для нестандартного расположения используй `V8TR_CONFIG`.
+`v8project.yaml` — единый проектный конфиг Unica и v8-runner. Для локальных
+секретов и путей используй `v8project.local.yaml`; для нестандартного
+расположения основного конфига используй `V8TR_CONFIG`.
 
 ## Создание
 
-```sh
-plugins/unica/scripts/run-v8-runner.sh config init --connection '/F/Users/me/1c-bases/dev'
-plugins/unica/scripts/run-v8-runner.sh config init --connection '/Sserver/ref'
+Создавай конфиг через MCP `unica.runtime.execute`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "unica.runtime.execute",
+    "arguments": {
+      "operation": "config-init",
+      "config": "./v8project.yaml",
+      "connection": "File=build/ib",
+      "dryRun": false
+    }
+  }
+}
 ```
 
 ## Минимальный пример
@@ -16,46 +31,33 @@ basePath: '.'
 workPath: 'build'
 format: DESIGNER
 builder: DESIGNER
-connection: '/F/Users/me/1c-bases/dev'
+infobase:
+  connection: 'File=build/ib'
 source-set:
   - name: main
     type: CONFIGURATION
     path: 'src'
-build:
-  partialLoadThreshold: 20
 ```
-
-## Основные поля
-
-| Поле | Назначение |
-| --- | --- |
-| `basePath` | Корень проекта для относительных путей |
-| `workPath` | Рабочий каталог v8-runner |
-| `format` | Формат исходников, например `DESIGNER` или `EDT` |
-| `builder` | Backend сборки, например `DESIGNER` или `IBCMD` |
-| `connection` | Строка подключения к базе 1С |
-| `source-set` | Набор исходников конфигурации, расширения или внешнего артефакта |
-| `build` | Настройки загрузки/сборки |
 
 ## Правила Unica
 
 - `V8TR_CONFIG` имеет приоритет над `./v8project.yaml`.
-- Все db-skills используют v8-runner поверх этого файла.
+- Skill `v8-runner` использует MCP `unica.runtime.execute`; cache refresh делает orchestrator.
 - Для source path используй `source-set[].path`, а не отдельный project registry.
-- Для web helpers используй `connection` из этого файла, но Apache path задавай `UNICA_APACHE_PATH`, `-ApachePath` или `tools/apache24`.
-- Для записи видео используй `FFMPEG_PATH` или явный `ffmpegPath` в вызове `startRecording()`.
+- Для web helpers используй connection из проекта, но Apache path задавай `UNICA_APACHE_PATH`, `-ApachePath` или `tools/apache24`.
+- Credentials держи в локальном overlay или переменных окружения, а не в коммитимом конфиге.
 
-## Команды
+## Операции
 
-| Задача | Команда |
+| Задача | MCP arguments |
 | --- | --- |
-| Инициализация базы/workspace | `v8-runner init` |
-| Загрузка исходников | `v8-runner build` |
-| Полная пересборка | `v8-runner build --full-rebuild` |
-| Выгрузка XML | `v8-runner dump --mode full|incremental|partial` |
-| Экспорт CF/CFE | `v8-runner make --output <file>` |
-| Загрузка CF/CFE | `v8-runner load --path <file> --mode load|merge|update` |
-| Запуск 1С | `v8-runner launch thin|thick|designer|ordinary` |
-| Синтаксическая проверка | `v8-runner syntax designer-config` или `designer-modules` |
+| Инициализация базы/workspace | `operation=init` |
+| Загрузка исходников | `operation=build` |
+| Полная пересборка | `operation=build`, `fullRebuild=true` |
+| Выгрузка XML | `operation=dump`, `mode=full|incremental|partial` |
+| Экспорт CF/CFE | `operation=make`, `output=<file>` |
+| Загрузка CF/CFE | `operation=load`, `path=<file>`, `mode=load|merge|update` |
+| Запуск 1С | `operation=launch`, `clientMode=thin|thick|designer|ordinary` |
+| Синтаксическая проверка | `operation=syntax`, `mode=designer-config|designer-modules|edt` |
 
 Более короткая внутренняя памятка: `plugins/unica/references/v8project.md`.

@@ -41,6 +41,10 @@ pub struct CliAdapter<'a> {
     runner: &'a dyn ProcessRunner,
 }
 
+pub struct RuntimeAdapter<'a> {
+    runner: &'a dyn ProcessRunner,
+}
+
 impl<'a> CliAdapter<'a> {
     pub fn new(
         launcher: &'static str,
@@ -175,6 +179,121 @@ impl<'a> CliAdapter<'a> {
             stderr: Some(output.stderr),
             command: Some(command),
         })
+    }
+}
+
+impl<'a> RuntimeAdapter<'a> {
+    pub fn new() -> Self {
+        Self {
+            runner: &SYSTEM_PROCESS_RUNNER,
+        }
+    }
+
+    pub fn with_runner(runner: &'a dyn ProcessRunner) -> Self {
+        Self { runner }
+    }
+
+    pub fn invoke(
+        &self,
+        tool_name: &str,
+        args: &Map<String, Value>,
+        context: &WorkspaceContext,
+        dry_run: bool,
+        mutating: bool,
+    ) -> Result<AdapterOutcome, String> {
+        let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
+            "could not locate Unica plugin root for internal adapter lookup".to_string()
+        })?;
+        let launcher = plugin_root.join("scripts").join("run-v8-runner.sh");
+        let report_args = runtime_args(args, true)?;
+        let execution_args = runtime_args(args, false)?;
+        let mut command = vec![launcher.display().to_string()];
+        command.extend(report_args);
+
+        if dry_run {
+            return Ok(AdapterOutcome {
+                ok: true,
+                summary: format!(
+                    "dry run: {tool_name} would call internal v8-runner runtime adapter"
+                ),
+                changes: if mutating {
+                    vec!["no files changed because dryRun is true".to_string()]
+                } else {
+                    Vec::new()
+                },
+                warnings: if launcher.exists() {
+                    Vec::new()
+                } else {
+                    vec![format!(
+                        "internal adapter launcher not found: {}",
+                        launcher.display()
+                    )]
+                },
+                errors: Vec::new(),
+                artifacts: Vec::new(),
+                stdout: None,
+                stderr: None,
+                command: Some(command),
+            });
+        }
+
+        if !launcher.exists() {
+            return Err(format!(
+                "internal adapter launcher not found: {}",
+                launcher.display()
+            ));
+        }
+
+        let output = self.runner.run(&ProcessCommand {
+            program: launcher.clone(),
+            args: execution_args,
+            cwd: context.cwd.clone(),
+            timeout: DEFAULT_PROCESS_TIMEOUT,
+        })?;
+        let ok = output.status_success;
+        Ok(AdapterOutcome {
+            ok,
+            summary: if ok {
+                format!("{tool_name} completed through internal v8-runner runtime adapter")
+            } else {
+                format!("{tool_name} failed through internal v8-runner runtime adapter")
+            },
+            changes: if mutating {
+                vec!["internal v8-runner runtime adapter executed".to_string()]
+            } else {
+                Vec::new()
+            },
+            warnings: if ok {
+                Vec::new()
+            } else if output.timed_out {
+                vec!["internal v8-runner runtime adapter timed out".to_string()]
+            } else {
+                vec![format!(
+                    "internal v8-runner runtime adapter exited with status {}",
+                    output.status
+                )]
+            },
+            errors: if ok {
+                Vec::new()
+            } else if output.stderr.trim().is_empty() && output.timed_out {
+                vec![format!(
+                    "internal v8-runner runtime adapter timed out after {} seconds",
+                    DEFAULT_PROCESS_TIMEOUT.as_secs()
+                )]
+            } else {
+                vec![output.stderr.trim().to_string()]
+            },
+            artifacts: Vec::new(),
+            stdout: Some(output.stdout),
+            stderr: Some(output.stderr),
+            command: Some(command),
+        })
+    }
+}
+
+impl<'a> Default for RuntimeAdapter<'a> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -474,6 +593,129 @@ fn normalize_mcp_http_body(text: &str) -> Result<String, String> {
     Ok(joined)
 }
 
+fn runtime_args(args: &Map<String, Value>, redact: bool) -> Result<Vec<String>, String> {
+    if args.contains_key("args") {
+        return Err(
+            "raw args are not accepted by internal adapters; use typed tool arguments".to_string(),
+        );
+    }
+
+    let operation = args
+        .get("operation")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "unica.runtime.execute requires string `operation` argument".to_string())?;
+    let mut result = Vec::new();
+
+    append_runtime_global_args(&mut result, operation, args, redact);
+
+    match operation {
+        "config-init" => {
+            result.extend(["config".to_string(), "init".to_string()]);
+            append_arg(&mut result, "--output", args, "config", redact);
+            append_arg(&mut result, "--connection", args, "connection", redact);
+            append_arg(&mut result, "--format", args, "format", redact);
+            append_arg(&mut result, "--builder", args, "builder", redact);
+        }
+        "init" => result.push("init".to_string()),
+        "build" => {
+            result.push("build".to_string());
+            append_bool_flag(&mut result, "--full-rebuild", args, "fullRebuild");
+            append_arg(&mut result, "--source-set", args, "sourceSet", redact);
+            append_arg(&mut result, "--extension", args, "extension", redact);
+        }
+        "dump" => {
+            result.push("dump".to_string());
+            append_arg(&mut result, "--mode", args, "mode", redact);
+            append_arg(&mut result, "--object", args, "object", redact);
+            append_arg(&mut result, "--source-set", args, "sourceSet", redact);
+            append_arg(&mut result, "--extension", args, "extension", redact);
+        }
+        "convert" => {
+            result.push("convert".to_string());
+            append_arg(&mut result, "--source-set", args, "sourceSet", redact);
+            append_arg(&mut result, "--output", args, "output", redact);
+            append_arg(&mut result, "--path", args, "path", redact);
+            append_arg(&mut result, "--format", args, "format", redact);
+            append_arg(&mut result, "--extension", args, "extension", redact);
+        }
+        "make" => {
+            result.push("make".to_string());
+            append_arg(&mut result, "--output", args, "output", redact);
+            append_arg(&mut result, "--source-set", args, "sourceSet", redact);
+            append_arg(&mut result, "--extension", args, "extension", redact);
+        }
+        "load" => {
+            result.push("load".to_string());
+            append_arg(&mut result, "--path", args, "path", redact);
+            append_arg(&mut result, "--mode", args, "mode", redact);
+            append_arg(&mut result, "--settings", args, "settings", redact);
+            append_arg(&mut result, "--extension", args, "extension", redact);
+        }
+        "syntax" => {
+            result.push("syntax".to_string());
+            if let Some(mode) = string_arg(args, "mode", redact) {
+                result.push(mode);
+            }
+            append_bool_flag(&mut result, "--server", args, "server");
+            append_bool_flag(&mut result, "--thin-client", args, "thinClient");
+        }
+        "test" => {
+            result.push("test".to_string());
+            if let Some(test_runner) = string_arg(args, "testRunner", redact) {
+                result.push(test_runner);
+            }
+            append_bool_flag(&mut result, "--full", args, "fullRebuild");
+            if let Some(test_scope) = string_arg(args, "testScope", redact) {
+                result.push(test_scope);
+            }
+            if let Some(module) = string_arg(args, "module", redact) {
+                result.push(module);
+            }
+            append_arg(&mut result, "--source-set", args, "sourceSet", redact);
+            append_arg(&mut result, "--extension", args, "extension", redact);
+        }
+        "launch" => {
+            result.push("launch".to_string());
+            match args.get("clientMode").and_then(Value::as_str) {
+                Some("mcp-va") => {
+                    result.extend(["mcp".to_string(), "va".to_string()]);
+                    append_arg(&mut result, "--mode", args, "mode", redact);
+                    append_arg(&mut result, "--mcp-port", args, "mcpPort", redact);
+                    append_arg(&mut result, "--mcp-config", args, "mcpConfig", redact);
+                }
+                Some("mcp") => {
+                    result.push("mcp".to_string());
+                    append_arg(&mut result, "--mode", args, "mode", redact);
+                    append_arg(&mut result, "--mcp-port", args, "mcpPort", redact);
+                    append_arg(&mut result, "--mcp-config", args, "mcpConfig", redact);
+                }
+                Some(client_mode) => result.push(client_mode.to_string()),
+                None => {}
+            }
+        }
+        "extensions" => {
+            result.push("extensions".to_string());
+            append_arg(&mut result, "--name", args, "sourceSet", redact);
+            append_arg(&mut result, "--extension", args, "extension", redact);
+        }
+        other => return Err(format!("unknown runtime operation: {other}")),
+    }
+
+    Ok(result)
+}
+
+fn append_runtime_global_args(
+    result: &mut Vec<String>,
+    operation: &str,
+    args: &Map<String, Value>,
+    redact: bool,
+) {
+    if operation != "config-init" {
+        append_arg(result, "--config", args, "config", redact);
+    }
+    append_arg(result, "--workdir", args, "workdir", redact);
+}
+
 fn cli_args(args: &Map<String, Value>, redact: bool) -> Result<Vec<String>, String> {
     if args.contains_key("args") {
         return Err(
@@ -507,6 +749,38 @@ fn cli_args(args: &Map<String, Value>, redact: bool) -> Result<Vec<String>, Stri
         }
     }
     Ok(result)
+}
+
+fn append_arg(
+    result: &mut Vec<String>,
+    flag: &str,
+    args: &Map<String, Value>,
+    key: &str,
+    redact: bool,
+) {
+    if let Some(value) = string_arg(args, key, redact) {
+        result.push(flag.to_string());
+        result.push(value);
+    }
+}
+
+fn append_bool_flag(result: &mut Vec<String>, flag: &str, args: &Map<String, Value>, key: &str) {
+    if args.get(key).and_then(Value::as_bool).unwrap_or(false) {
+        result.push(flag.to_string());
+    }
+}
+
+fn string_arg(args: &Map<String, Value>, key: &str, redact: bool) -> Option<String> {
+    args.get(key).and_then(|value| {
+        if value.is_null() {
+            return None;
+        }
+        if redact && is_secret_key(key) {
+            Some("<redacted>".to_string())
+        } else {
+            Some(value_to_cli_string(value))
+        }
+    })
 }
 
 fn is_secret_key(key: &str) -> bool {
@@ -584,6 +858,202 @@ mod tests {
         assert!(command.contains("run-v8-runner.sh"));
         assert!(command.contains("build"));
         assert!(command.contains("--source-set main"));
+    }
+
+    #[test]
+    fn runtime_adapter_maps_build_to_allowlisted_v8_runner_argv() {
+        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let runner = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("build"));
+        args.insert("sourceSet".to_string(), json!("main"));
+        args.insert("fullRebuild".to_string(), json!(true));
+
+        let outcome = RuntimeAdapter::with_runner(&runner)
+            .invoke("unica.runtime.execute", &args, &context, false, true)
+            .unwrap();
+
+        assert!(outcome.ok);
+        let commands = runner.commands.borrow();
+        assert_eq!(
+            commands[0].args,
+            vec!["build", "--full-rebuild", "--source-set", "main"]
+        );
+    }
+
+    #[test]
+    fn runtime_adapter_maps_config_init_config_to_output_arg() {
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("config-init"));
+        args.insert("config".to_string(), json!("./v8project.yaml"));
+        args.insert("connection".to_string(), json!("File=build/ib"));
+        args.insert("format".to_string(), json!("edt"));
+        args.insert("builder".to_string(), json!("IBCMD"));
+
+        let argv = runtime_args(&args, false).unwrap();
+
+        assert_eq!(
+            argv,
+            vec![
+                "config",
+                "init",
+                "--output",
+                "./v8project.yaml",
+                "--connection",
+                "File=build/ib",
+                "--format",
+                "edt",
+                "--builder",
+                "IBCMD"
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_adapter_maps_test_and_launch_mcp_va() {
+        let mut test_args = Map::new();
+        test_args.insert("operation".to_string(), json!("test"));
+        test_args.insert("testRunner".to_string(), json!("yaxunit"));
+        test_args.insert("fullRebuild".to_string(), json!(true));
+        test_args.insert("testScope".to_string(), json!("module"));
+        test_args.insert("module".to_string(), json!("CommonModule.Тесты"));
+
+        assert_eq!(
+            runtime_args(&test_args, false).unwrap(),
+            vec!["test", "yaxunit", "--full", "module", "CommonModule.Тесты"]
+        );
+
+        let mut launch_args = Map::new();
+        launch_args.insert("operation".to_string(), json!("launch"));
+        launch_args.insert("clientMode".to_string(), json!("mcp-va"));
+        launch_args.insert("mode".to_string(), json!("thin"));
+        launch_args.insert("mcpPort".to_string(), json!(1550));
+
+        assert_eq!(
+            runtime_args(&launch_args, false).unwrap(),
+            vec![
+                "launch",
+                "mcp",
+                "va",
+                "--mode",
+                "thin",
+                "--mcp-port",
+                "1550"
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_adapter_maps_each_runtime_operation_to_expected_argv() {
+        let cases = vec![
+            (json!({"operation": "init"}), vec!["init"]),
+            (
+                json!({
+                    "operation": "dump",
+                    "mode": "partial",
+                    "object": "Catalog:Номенклатура",
+                    "sourceSet": "main",
+                    "extension": "MyExtension",
+                }),
+                vec![
+                    "dump",
+                    "--mode",
+                    "partial",
+                    "--object",
+                    "Catalog:Номенклатура",
+                    "--source-set",
+                    "main",
+                    "--extension",
+                    "MyExtension",
+                ],
+            ),
+            (
+                json!({
+                    "operation": "convert",
+                    "sourceSet": "main",
+                    "output": "build/convert",
+                }),
+                vec![
+                    "convert",
+                    "--source-set",
+                    "main",
+                    "--output",
+                    "build/convert",
+                ],
+            ),
+            (
+                json!({
+                    "operation": "make",
+                    "output": "build/config.cf",
+                    "sourceSet": "main",
+                }),
+                vec![
+                    "make",
+                    "--output",
+                    "build/config.cf",
+                    "--source-set",
+                    "main",
+                ],
+            ),
+            (
+                json!({
+                    "operation": "load",
+                    "path": "build/config.cf",
+                    "mode": "merge",
+                    "settings": "merge-settings.xml",
+                }),
+                vec![
+                    "load",
+                    "--path",
+                    "build/config.cf",
+                    "--mode",
+                    "merge",
+                    "--settings",
+                    "merge-settings.xml",
+                ],
+            ),
+            (
+                json!({
+                    "operation": "syntax",
+                    "mode": "designer-modules",
+                    "server": true,
+                    "thinClient": true,
+                }),
+                vec!["syntax", "designer-modules", "--server", "--thin-client"],
+            ),
+            (
+                json!({
+                    "operation": "extensions",
+                    "sourceSet": "MyExtension",
+                }),
+                vec!["extensions", "--name", "MyExtension"],
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let args = input.as_object().unwrap().clone();
+            assert_eq!(runtime_args(&args, false).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn runtime_adapter_rejects_raw_args_vector() {
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("build"));
+        args.insert("args".to_string(), json!(["--unsafe", "../outside"]));
+
+        let error = runtime_args(&args, false).unwrap_err();
+
+        assert!(error.contains("raw args are not accepted"));
     }
 
     #[test]
@@ -764,6 +1234,18 @@ mod tests {
 
     impl ProcessRunner for FakeProcessRunner {
         fn run(&self, _command: &ProcessCommand) -> Result<ProcessOutput, String> {
+            Ok(self.output.clone())
+        }
+    }
+
+    struct RecordingProcessRunner {
+        commands: RefCell<Vec<ProcessCommand>>,
+        output: ProcessOutput,
+    }
+
+    impl ProcessRunner for RecordingProcessRunner {
+        fn run(&self, command: &ProcessCommand) -> Result<ProcessOutput, String> {
+            self.commands.borrow_mut().push(command.clone());
             Ok(self.output.clone())
         }
     }

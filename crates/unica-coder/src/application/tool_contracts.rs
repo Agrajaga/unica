@@ -169,6 +169,66 @@ const BUILD_ARGS: &[&str] = &[
     "user",
 ];
 
+const RUNTIME_ARGS: &[&str] = &[
+    "builder",
+    "clientMode",
+    "config",
+    "connection",
+    "extension",
+    "format",
+    "fullRebuild",
+    "mcpConfig",
+    "mcpPort",
+    "mode",
+    "module",
+    "object",
+    "operation",
+    "output",
+    "path",
+    "server",
+    "settings",
+    "sourceSet",
+    "testRunner",
+    "testScope",
+    "thinClient",
+    "workdir",
+];
+
+const RUNTIME_OPERATIONS: &[&str] = &[
+    "config-init",
+    "init",
+    "build",
+    "dump",
+    "convert",
+    "make",
+    "load",
+    "syntax",
+    "test",
+    "launch",
+    "extensions",
+];
+
+const RUNTIME_STRING_ARGS: &[&str] = &[
+    "builder",
+    "clientMode",
+    "config",
+    "connection",
+    "extension",
+    "format",
+    "mcpConfig",
+    "mode",
+    "module",
+    "object",
+    "operation",
+    "output",
+    "path",
+    "settings",
+    "sourceSet",
+    "testRunner",
+    "testScope",
+    "workdir",
+];
+
 const CODE_ARGS: &[&str] = &[
     "config",
     "format",
@@ -197,7 +257,7 @@ pub fn input_schema_for_tool(tool: &ToolSpec) -> Value {
     let property_names = allowed_args(tool);
     let mut properties = Map::new();
     for name in property_names {
-        properties.insert(name.to_string(), property_schema(name));
+        properties.insert(name.to_string(), property_schema_for_tool(tool, name));
     }
 
     json!({
@@ -225,12 +285,62 @@ pub fn validate_tool_arguments(
     for (key, value) in args {
         validate_argument_type(tool.name, key, value)?;
     }
+    if matches!(tool.handler, ToolHandler::RuntimeAdapter) {
+        validate_runtime_arguments(tool.name, args, dry_run)?;
+    }
 
     if !dry_run {
         for required in required_args(&tool) {
             if !args.contains_key(required) {
                 return Err(format!("{} requires `{required}` argument", tool.name));
             }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_runtime_arguments(
+    tool_name: &str,
+    args: &Map<String, Value>,
+    dry_run: bool,
+) -> Result<(), String> {
+    let operation = match args.get("operation") {
+        Some(Value::String(operation)) => operation.as_str(),
+        Some(_) => return Err(format!("{tool_name} argument `operation` must be string")),
+        None => return Err(format!("{tool_name} requires `operation` argument")),
+    };
+    for key in RUNTIME_STRING_ARGS {
+        if let Some(value) = args.get(*key) {
+            if !value.is_string() {
+                return Err(format!("{tool_name} argument `{key}` must be string"));
+            }
+        }
+    }
+    if !RUNTIME_OPERATIONS.contains(&operation) {
+        return Err(format!(
+            "{tool_name} argument `operation` must be one of: {}",
+            RUNTIME_OPERATIONS.join(", ")
+        ));
+    }
+
+    if dry_run {
+        return Ok(());
+    }
+
+    let required = match operation {
+        "load" => &["path"][..],
+        "make" => &["output"][..],
+        "syntax" => &["mode"][..],
+        "test" => &["testRunner"][..],
+        "launch" => &["clientMode"][..],
+        _ => &[][..],
+    };
+    for key in required {
+        if !args.contains_key(*key) {
+            return Err(format!(
+                "{tool_name} operation `{operation}` requires `{key}` argument"
+            ));
         }
     }
 
@@ -246,12 +356,14 @@ pub fn validate_workspace_paths(
     if dry_run || !tool.mutating {
         return Ok(());
     }
-    if !matches!(tool.handler, ToolHandler::NativeOperation { .. }) {
+    if !matches!(tool.handler, ToolHandler::NativeOperation { .. })
+        && !matches!(tool.handler, ToolHandler::RuntimeAdapter)
+    {
         return Ok(());
     }
 
     let policy = WorkspacePathPolicy::new(context);
-    for key in native_write_path_args(tool) {
+    for key in write_path_args(tool) {
         if let Some(Value::String(path)) = args.get(*key) {
             policy.resolve_write(path.as_str())?;
         }
@@ -259,7 +371,7 @@ pub fn validate_workspace_paths(
     Ok(())
 }
 
-fn native_write_path_args(tool: ToolSpec) -> &'static [&'static str] {
+fn write_path_args(tool: ToolSpec) -> &'static [&'static str] {
     match tool.handler {
         ToolHandler::NativeOperation { operation, .. } => match operation {
             "cf-init" | "cfe-init" => &["OutputDir", "outputDir"],
@@ -281,6 +393,7 @@ fn native_write_path_args(tool: ToolSpec) -> &'static [&'static str] {
             "cfe-borrow" | "cfe-patch-method" => &["ExtensionPath", "extensionPath"],
             _ => &[],
         },
+        ToolHandler::RuntimeAdapter => &["config", "path", "output", "settings", "mcpConfig"],
         _ => &[],
     }
 }
@@ -292,6 +405,7 @@ fn allowed_args(tool: &ToolSpec) -> Vec<&'static str> {
             names.extend(native_args_for(operation));
         }
         ToolHandler::BuildRuntime { .. } => names.extend(BUILD_ARGS),
+        ToolHandler::RuntimeAdapter => names.extend(RUNTIME_ARGS),
         ToolHandler::CodeAdapter { .. } => names.extend(CODE_ARGS),
         ToolHandler::StandardsAdapter { .. } => names.extend(STANDARDS_ARGS),
         ToolHandler::ProjectStatus => {}
@@ -325,8 +439,14 @@ fn required_args(tool: &ToolSpec) -> Vec<&'static str> {
             operation: "search",
             ..
         } => vec!["query"],
+        ToolHandler::RuntimeAdapter => runtime_required_args(tool),
         _ => Vec::new(),
     }
+}
+
+fn runtime_required_args(tool: &ToolSpec) -> Vec<&'static str> {
+    debug_assert!(matches!(tool.handler, ToolHandler::RuntimeAdapter));
+    vec!["operation"]
 }
 
 fn property_schema(name: &str) -> Value {
@@ -348,11 +468,14 @@ fn property_schema(name: &str) -> Value {
             | "createIfMissing"
             | "IsFunction"
             | "isFunction"
+            | "fullRebuild"
+            | "server"
+            | "thinClient"
     ) {
         "boolean"
     } else if matches!(
         name,
-        "limit" | "Offset" | "offset" | "MaxParams" | "maxParams"
+        "limit" | "Offset" | "offset" | "MaxParams" | "maxParams" | "mcpPort"
     ) {
         "integer"
     } else if matches!(
@@ -369,6 +492,24 @@ fn property_schema(name: &str) -> Value {
     } else {
         json!({ "type": value_type })
     }
+}
+
+fn property_schema_for_tool(tool: &ToolSpec, name: &str) -> Value {
+    if matches!(tool.handler, ToolHandler::RuntimeAdapter) {
+        match name {
+            "operation" => return json!({ "type": "string", "enum": RUNTIME_OPERATIONS }),
+            "clientMode" => {
+                return json!({
+                    "type": "string",
+                    "enum": ["designer", "thin", "thick", "ordinary", "mcp", "mcp-va"]
+                });
+            }
+            "testRunner" => return json!({ "type": "string", "enum": ["yaxunit", "va"] }),
+            "testScope" => return json!({ "type": "string", "enum": ["all", "module"] }),
+            _ => {}
+        }
+    }
+    property_schema(name)
 }
 
 fn validate_argument_type(tool_name: &str, key: &str, value: &Value) -> Result<(), String> {
@@ -403,11 +544,14 @@ fn expected_scalar_type(key: &str) -> Option<&'static str> {
             | "createIfMissing"
             | "IsFunction"
             | "isFunction"
+            | "fullRebuild"
+            | "server"
+            | "thinClient"
     ) {
         Some("boolean")
     } else if matches!(
         key,
-        "limit" | "Offset" | "offset" | "MaxParams" | "maxParams"
+        "limit" | "Offset" | "offset" | "MaxParams" | "maxParams" | "mcpPort"
     ) {
         Some("integer")
     } else {
@@ -460,5 +604,64 @@ mod tests {
 
         assert!(error.contains("dryRun"));
         assert!(error.contains("boolean"));
+    }
+
+    #[test]
+    fn runtime_contract_rejects_unknown_operation_and_raw_args() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.runtime.execute")
+            .unwrap();
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("shell"));
+        args.insert("args".to_string(), json!(["--unsafe"]));
+
+        let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+
+        assert!(error.contains("does not accept argument `args`"));
+
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("shell"));
+        let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+        assert!(error.contains("must be one of"));
+    }
+
+    #[test]
+    fn runtime_contract_requires_operation_specific_fields_for_real_execution() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.runtime.execute")
+            .unwrap();
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("load"));
+
+        validate_tool_arguments(tool, &args, true).unwrap();
+        let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+
+        assert!(error.contains("requires `path`"));
+    }
+
+    #[test]
+    fn runtime_schema_exposes_typed_arguments_without_additional_properties() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.runtime.execute")
+            .unwrap();
+        let schema = input_schema_for_tool(&tool);
+
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(schema["properties"].get("operation").is_some());
+        assert!(schema["properties"].get("sourceSet").is_some());
+        assert!(schema["properties"].get("args").is_none());
+        assert_eq!(schema["properties"]["fullRebuild"]["type"], "boolean");
+        assert_eq!(schema["properties"]["mcpPort"]["type"], "integer");
+        assert!(schema["properties"]["operation"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("build")));
+        assert!(schema["properties"]["clientMode"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("mcp-va")));
     }
 }

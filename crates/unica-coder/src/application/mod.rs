@@ -1,7 +1,7 @@
 use crate::domain::cache::{CacheAccess, CacheReport};
 use crate::domain::events::{DomainEvent, DomainEventKind};
 use crate::domain::workspace::WorkspaceContext;
-use crate::infrastructure::internal_adapters::{CliAdapter, StandardsAdapter};
+use crate::infrastructure::internal_adapters::{CliAdapter, RuntimeAdapter, StandardsAdapter};
 use crate::infrastructure::legacy_scripts::LegacyScriptAdapter;
 use crate::infrastructure::native_operations::NativeOperationAdapter;
 use crate::infrastructure::workspace_state::WorkspaceStateRepository;
@@ -39,6 +39,7 @@ pub enum ToolHandler {
         command: &'static [&'static str],
         event: Option<DomainEventKind>,
     },
+    RuntimeAdapter,
     CodeAdapter {
         command: &'static [&'static str],
     },
@@ -166,6 +167,17 @@ pub fn tools() -> Vec<ToolSpec> {
             },
         },
         ToolSpec {
+            name: "unica.runtime.execute",
+            description:
+                "Execute typed v8-runner runtime workflows through the single Unica MCP boundary.",
+            mutating: true,
+            cache_access: CacheAccess {
+                reads: &[],
+                writes: &["workspace_graph", "metadata_graph"],
+            },
+            handler: ToolHandler::RuntimeAdapter,
+        },
+        ToolSpec {
             name: "unica.code.search",
             description: "Search BSL code through the internal code index adapter.",
             mutating: false,
@@ -254,6 +266,9 @@ fn call_tool(spec: ToolSpec, args: &Map<String, Value>) -> Result<OperationResul
             "build/runtime",
         )
         .invoke(spec.name, args, &context, dry_run, spec.mutating)?,
+        ToolHandler::RuntimeAdapter => {
+            RuntimeAdapter::new().invoke(spec.name, args, &context, dry_run, spec.mutating)?
+        }
         ToolHandler::CodeAdapter { command } => CliAdapter::new(
             "run-bsl-analyzer.sh",
             command,
@@ -264,7 +279,7 @@ fn call_tool(spec: ToolSpec, args: &Map<String, Value>) -> Result<OperationResul
     };
 
     let events = if should_emit_events(spec, dry_run, &outcome) {
-        domain_events(spec)
+        domain_events(spec, args)
     } else {
         Vec::new()
     };
@@ -288,7 +303,7 @@ fn should_emit_events(spec: ToolSpec, dry_run: bool, outcome: &AdapterOutcome) -
     spec.mutating && (dry_run || outcome.ok)
 }
 
-fn domain_events(spec: ToolSpec) -> Vec<DomainEvent> {
+fn domain_events(spec: ToolSpec, args: &Map<String, Value>) -> Vec<DomainEvent> {
     match spec.handler {
         ToolHandler::LegacyScript {
             event: Some(event), ..
@@ -299,7 +314,19 @@ fn domain_events(spec: ToolSpec) -> Vec<DomainEvent> {
         ToolHandler::BuildRuntime {
             event: Some(event), ..
         } => vec![DomainEvent::new(event, spec.name)],
+        ToolHandler::RuntimeAdapter => runtime_event(args)
+            .map(|event| vec![DomainEvent::new(event, spec.name)])
+            .unwrap_or_default(),
         _ => Vec::new(),
+    }
+}
+
+fn runtime_event(args: &Map<String, Value>) -> Option<DomainEventKind> {
+    match args.get("operation").and_then(Value::as_str)? {
+        "config-init" | "init" | "convert" | "dump" => Some(DomainEventKind::SourceSetChanged),
+        "build" | "load" | "extensions" | "test" => Some(DomainEventKind::BuildCompleted),
+        "make" | "syntax" | "launch" => None,
+        _ => None,
     }
 }
 
@@ -788,6 +815,7 @@ mod tests {
         assert!(names.contains(&"unica.mxl.compile"));
         assert!(names.contains(&"unica.role.validate"));
         assert!(names.contains(&"unica.build.load"));
+        assert!(names.contains(&"unica.runtime.execute"));
         assert!(names.contains(&"unica.standards.explain"));
         assert!(!names.contains(&"unica-coder"));
     }
@@ -806,6 +834,40 @@ mod tests {
             .cache
             .invalidated
             .contains(&"metadata_graph".to_string()));
+    }
+
+    #[test]
+    fn runtime_execute_defaults_to_dry_run_and_maps_cache_event_by_operation() {
+        let mut args = Map::new();
+        args.insert("operation".to_string(), Value::String("dump".to_string()));
+
+        let result = UnicaApplication::new()
+            .call_tool("unica.runtime.execute", &args)
+            .unwrap();
+
+        assert!(result.ok);
+        assert!(result.summary.contains("dry run"));
+        assert_eq!(result.cache.mode, "dry-run");
+        assert!(result
+            .cache
+            .events
+            .contains(&"SourceSetChanged".to_string()));
+        assert!(result.command.unwrap().join(" ").contains(" dump"));
+    }
+
+    #[test]
+    fn runtime_event_is_not_emitted_for_non_invalidating_operations() {
+        let mut args = Map::new();
+        args.insert("operation".to_string(), Value::String("launch".to_string()));
+        args.insert("clientMode".to_string(), Value::String("thin".to_string()));
+
+        let result = UnicaApplication::new()
+            .call_tool("unica.runtime.execute", &args)
+            .unwrap();
+
+        assert!(result.ok);
+        assert!(result.cache.events.is_empty());
+        assert_eq!(result.cache.mode, "read");
     }
 
     #[test]

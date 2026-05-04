@@ -51,6 +51,15 @@ with tempfile.TemporaryDirectory() as tmp:
                 "arguments": {"dryRun": True, "cwd": tmp},
             },
         },
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "unica.runtime.execute",
+                "arguments": {"cwd": tmp, "operation": "dump"},
+            },
+        },
     ]
     env = os.environ.copy()
     env["UNICA_CACHE_DIR"] = str(Path(tmp) / "cache")
@@ -70,12 +79,16 @@ tools = {tool["name"] for tool in responses[1]["result"]["tools"]}
 assert "unica.project.status" in tools
 assert "unica.form.edit" in tools
 assert "unica.build.load" in tools
+assert "unica.runtime.execute" in tools
 assert "unica.standards.explain" in tools
 payload = json.loads(responses[2]["result"]["content"][0]["text"])
 assert payload["cache"]["mode"] == "dry-run"
 assert "FormChanged" in payload["cache"]["events"]
 assert "metadata_graph" in payload["cache"]["invalidated"]
 assert "lazy_rebuilt" in payload["cache"]
+runtime_payload = json.loads(responses[3]["result"]["content"][0]["text"])
+assert runtime_payload["cache"]["mode"] == "dry-run"
+assert "SourceSetChanged" in runtime_payload["cache"]["events"]
 print("ok")
 PY
 ```

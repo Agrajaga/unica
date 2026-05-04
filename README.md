@@ -50,7 +50,7 @@ Installer выбирает нужный архив, регистрирует mar
 codex debug prompt-input 'test'
 ```
 
-В выводе должны быть видны plugin `Unica` и навыки вида `unica:meta-compile`, `unica:epf-build`, `unica:db-update`.
+В выводе должны быть видны plugin `Unica` и навыки вида `unica:meta-compile`, `unica:v8-runner`, `unica:epf-bsp-init`.
 
 ## Установка из исходников для разработки
 
