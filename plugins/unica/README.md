@@ -136,13 +136,18 @@ Unica is licensed under `LGPL-3.0-or-later`. See `LICENSE`.
 From the repository root:
 
 ```sh
-python3 -m json.tool plugins/unica/.codex-plugin/plugin.json >/dev/null
-python3 -m json.tool plugins/unica/.mcp.json >/dev/null
-python3 -m json.tool plugins/unica/third-party/tools.lock.json >/dev/null
-python3 -m json.tool plugins/unica/third-party/manifest.json >/dev/null
+python3.12 -m unittest discover -s tests/ci
+python3.12 -m py_compile scripts/ci/*.py tests/ci/*.py
+python3.12 -m json.tool plugins/unica/.codex-plugin/plugin.json >/dev/null
+python3.12 -m json.tool plugins/unica/.mcp.json >/dev/null
+python3.12 -m json.tool plugins/unica/third-party/tools.lock.json >/dev/null
+python3.12 -m json.tool plugins/unica/third-party/manifest.json >/dev/null
 bash -n plugins/unica/scripts/*.sh
-python3 -m py_compile scripts/ci/*.py
+cargo fmt --all -- --check
+cargo clippy --package unica-coder --all-targets --all-features -- -D warnings
+cargo test --package unica-coder
 rg 'references/(cc-1c-skills|ai-rules-1c)|Claude|[.]claude|Anthropic' plugins/unica/references plugins/unica/skills
+git diff --check
 codex debug prompt-input 'test'
 ```
 

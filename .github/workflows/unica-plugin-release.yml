@@ -6,9 +6,15 @@ on:
     paths:
       - ".agents/plugins/marketplace.json"
       - ".github/workflows/unica-plugin-release.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/unica-coder/**"
       - "plugins/unica/**"
       - "scripts/ci/**"
       - "scripts/install-unica.sh"
+      - "tests/ci/**"
+      - "tests/fixtures/**"
+      - "spec/**"
   push:
     tags:
       - "v*"
@@ -17,9 +23,50 @@ permissions:
   contents: write
 
 jobs:
+  verify-source:
+    name: Verify source guardrails
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Test CI helper scripts
+        run: python -m unittest discover -s tests/ci
+
+      - name: Compile Python checks
+        run: python -m py_compile scripts/ci/*.py tests/ci/*.py
+
+      - name: Validate plugin JSON manifests
+        run: |
+          python -m json.tool plugins/unica/.codex-plugin/plugin.json >/dev/null
+          python -m json.tool plugins/unica/.mcp.json >/dev/null
+          python -m json.tool plugins/unica/third-party/tools.lock.json >/dev/null
+          python -m json.tool plugins/unica/third-party/manifest.json >/dev/null
+
+      - name: Check shell launchers
+        run: bash -n plugins/unica/scripts/*.sh
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Rust clippy
+        run: cargo clippy --package unica-coder --all-targets --all-features -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --package unica-coder
+
   build-tools:
     name: Build tools (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
+    needs: verify-source
     strategy:
       fail-fast: false
       matrix:
@@ -38,8 +85,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Test CI helper scripts
-        run: python -m unittest discover -s tests/ci
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Build target bundle
         run: >
