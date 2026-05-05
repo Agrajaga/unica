@@ -25,4 +25,3 @@ changing the top-level result shape casually.
 
 Generated packages must verify checksums and must not depend on globally
 installed tools when bundled equivalents exist.
-

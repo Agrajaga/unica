@@ -28,4 +28,3 @@ visibility.
 
 Volatile state defaults to `.build/unica` under the workspace root and can be
 overridden by `UNICA_CACHE_DIR`.
-

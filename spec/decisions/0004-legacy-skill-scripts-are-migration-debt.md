@@ -55,4 +55,3 @@ target architecture.
 - [x] ADR states that skill-local operation files are not target architecture.
 - [x] ADR distinguishes package launchers from skill-local operation files.
 - [x] ADR requires MCP implementation and parity tests before deletion.
-

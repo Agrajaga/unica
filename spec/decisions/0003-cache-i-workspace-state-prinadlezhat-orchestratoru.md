@@ -44,4 +44,3 @@ The `unica` orchestrator owns workspace state and cache coordination.
 - [x] ADR defines orchestrator ownership.
 - [x] ADR covers dry-run behavior.
 - [x] ADR separates internal engine caches from public coordination.
-

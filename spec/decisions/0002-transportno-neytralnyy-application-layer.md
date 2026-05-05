@@ -41,4 +41,3 @@ Keep the application layer transport-neutral.
 
 - [x] ADR states responsibility split between MCP and application.
 - [x] ADR keeps cache/event behavior out of transport-only code.
-
