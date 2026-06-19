@@ -107,6 +107,22 @@ class SkillProvenanceTests(unittest.TestCase):
         self.assertEqual(locked_tools["v8-runner"]["sourceTag"], "v0.5.1")
         self.assertEqual(locked_tools["v8-runner"]["sourceCommit"], "ad72f64222ab0a7e6dfd391adb437a956c0a2428")
 
+    def test_rlm_tools_are_locked_to_attested_1_21_0_pair(self) -> None:
+        tool_lock = json.loads(
+            (self.repo_root() / "plugins" / "unica" / "third-party" / "tools.lock.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        locked_tools = {tool["name"]: tool for tool in tool_lock["tools"]}
+
+        for name in ("rlm-tools-bsl", "rlm-bsl-index"):
+            self.assertEqual(locked_tools[name]["version"], "1.21.0")
+            self.assertEqual(locked_tools[name]["sourceTag"], "v1.21.0")
+            self.assertEqual(
+                locked_tools[name]["sourceCommit"],
+                "4913d976fbb4eee69d380464bfebda5dfa45c635",
+            )
+
     def test_all_local_and_contract_paths_exist(self) -> None:
         data = self.load_provenance()
         missing = []

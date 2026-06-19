@@ -88,18 +88,28 @@ class ProductContractTests(unittest.TestCase):
 
         self.assertTrue(any("--source-dir" in error for error in errors), errors)
 
-    def test_rlm_schema_contract_checks_tables_and_columns_used_by_unica_sql(self) -> None:
+    def test_rlm_schema_contract_checks_tables_meta_and_columns_used_by_unica_sql(self) -> None:
         module = load_contract_module()
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "bsl_index.db"
             with sqlite3.connect(db_path) as conn:
-                conn.execute("CREATE TABLE modules (id INTEGER, rel_path TEXT, object_name TEXT)")
+                conn.execute("CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT)")
+                conn.execute("INSERT INTO index_meta (key, value) VALUES ('builder_version', '14')")
+                conn.execute(
+                    "CREATE TABLE modules (id INTEGER, rel_path TEXT, object_name TEXT, "
+                    "category TEXT, module_type TEXT)"
+                )
                 conn.execute(
                     "CREATE TABLE methods (id INTEGER, module_id INTEGER, name TEXT, type TEXT, "
-                    "is_export INTEGER, line INTEGER, end_line INTEGER, params TEXT)"
+                    "is_export INTEGER, line INTEGER, end_line INTEGER, params TEXT, loc INTEGER)"
                 )
-                conn.execute("CREATE VIRTUAL TABLE methods_fts USING fts5(name)")
+                conn.execute("CREATE VIRTUAL TABLE methods_fts USING fts5(name, object_name)")
+                conn.execute(
+                    "CREATE TABLE regions (id INTEGER, module_id INTEGER, name TEXT, "
+                    "line INTEGER, end_line INTEGER)"
+                )
+                conn.execute("CREATE TABLE module_headers (module_id INTEGER, header_comment TEXT)")
 
             self.assertEqual(module.check_rlm_schema(db_path), [])
 
@@ -109,13 +119,47 @@ class ProductContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "bsl_index.db"
             with sqlite3.connect(db_path) as conn:
+                conn.execute("CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT)")
+                conn.execute("INSERT INTO index_meta (key, value) VALUES ('builder_version', '14')")
                 conn.execute("CREATE TABLE modules (id INTEGER, rel_path TEXT)")
                 conn.execute("CREATE TABLE methods (id INTEGER, module_id INTEGER, name TEXT)")
-                conn.execute("CREATE VIRTUAL TABLE methods_fts USING fts5(name)")
+                conn.execute("CREATE VIRTUAL TABLE methods_fts USING fts5(name, object_name)")
+                conn.execute(
+                    "CREATE TABLE regions (id INTEGER, module_id INTEGER, name TEXT, "
+                    "line INTEGER, end_line INTEGER)"
+                )
+                conn.execute("CREATE TABLE module_headers (module_id INTEGER, header_comment TEXT)")
 
             errors = module.check_rlm_schema(db_path)
 
         self.assertTrue(any("modules.object_name" in error for error in errors), errors)
+
+    def test_rlm_schema_contract_reports_old_builder_version(self) -> None:
+        module = load_contract_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "bsl_index.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT)")
+                conn.execute("INSERT INTO index_meta (key, value) VALUES ('builder_version', '12')")
+                conn.execute(
+                    "CREATE TABLE modules (id INTEGER, rel_path TEXT, object_name TEXT, "
+                    "category TEXT, module_type TEXT)"
+                )
+                conn.execute(
+                    "CREATE TABLE methods (id INTEGER, module_id INTEGER, name TEXT, type TEXT, "
+                    "is_export INTEGER, line INTEGER, end_line INTEGER, params TEXT, loc INTEGER)"
+                )
+                conn.execute("CREATE VIRTUAL TABLE methods_fts USING fts5(name, object_name)")
+                conn.execute(
+                    "CREATE TABLE regions (id INTEGER, module_id INTEGER, name TEXT, "
+                    "line INTEGER, end_line INTEGER)"
+                )
+                conn.execute("CREATE TABLE module_headers (module_id INTEGER, header_comment TEXT)")
+
+            errors = module.check_rlm_schema(db_path)
+
+        self.assertTrue(any("builder_version" in error and "14" in error for error in errors), errors)
 
 
 if __name__ == "__main__":

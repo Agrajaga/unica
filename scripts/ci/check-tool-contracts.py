@@ -21,9 +21,16 @@ TOOL_HELP_CHECKS = [
 ]
 
 RLM_SCHEMA_COLUMNS = {
-    "modules": {"id", "rel_path", "object_name"},
-    "methods": {"id", "module_id", "name", "type", "is_export", "line", "end_line", "params"},
-    "methods_fts": {"name"},
+    "index_meta": {"key", "value"},
+    "modules": {"id", "rel_path", "object_name", "category", "module_type"},
+    "methods": {"id", "module_id", "name", "type", "is_export", "line", "end_line", "params", "loc"},
+    "methods_fts": {"name", "object_name"},
+    "regions": {"id", "module_id", "name", "line", "end_line"},
+    "module_headers": {"module_id", "header_comment"},
+}
+
+RLM_REQUIRED_META = {
+    "builder_version": "14",
 }
 
 
@@ -78,6 +85,12 @@ def check_rlm_schema(db_path: Path) -> list[str]:
             columns = sqlite_columns(conn, table)
             for column in sorted(required_columns - columns):
                 errors.append(f"missing RLM column: {table}.{column}")
+        if "index_meta" in existing_tables:
+            for key, expected in RLM_REQUIRED_META.items():
+                row = conn.execute("SELECT value FROM index_meta WHERE key = ?", (key,)).fetchone()
+                actual = row[0] if row else None
+                if actual != expected:
+                    errors.append(f"RLM index_meta {key} must be {expected}, got {actual or '<missing>'}")
     return errors
 
 
