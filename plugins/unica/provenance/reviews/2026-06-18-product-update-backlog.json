@@ -1,41 +1,41 @@
 {
   "schemaVersion": 1,
   "id": "2026-06-18-product-update-backlog",
-  "generatedAt": "2026-06-18",
+  "generatedAt": "2026-06-21",
   "purpose": "Product and dependency update backlog for Unica bundled tools, plugin package dependencies, and release-package inputs.",
   "products": [
     {
       "id": "bsl-analyzer",
       "kind": "bundled-tool",
       "locked": "v0.2.37",
-      "latest": "v0.2.37",
+      "latest": "v0.2.43",
       "risk": "high",
       "batch": "bsl-analyzer-contract",
-      "status": "applied",
+      "status": "needs-review",
       "contractGate": true,
-      "notes": "Updated tools.lock.json to v0.2.37; analyze/search/MCP help gates passed, graph and diagnostics capabilities are exposed only through typed unica.code.* tools."
+      "notes": "v0.2.37 was applied with typed graph/diagnostics through unica.code.*; upstream v0.2.39..v0.2.43 now adds extension merge/weaving diagnostics and IDE formatting changes, so a follow-up contract review is required before moving the lock."
     },
     {
       "id": "rlm-tools-bsl",
       "kind": "bundled-tool",
       "locked": "v1.21.0",
-      "latest": "v1.22.0",
+      "latest": "v1.23.0",
       "risk": "medium",
       "batch": "rlm-index-contract",
       "status": "needs-review",
       "contractGate": true,
-      "notes": "v1.21.0 was applied together with rlm-bsl-index; v1.22.0 drift was detected after that batch and is intentionally kept out of the bsl-analyzer update."
+      "notes": "v1.21.0 was applied together with rlm-bsl-index; v1.22.0 and v1.23.0 add token-efficiency helpers and get_object_profile/read-only helper batching. Review helper contracts before exposing any new Unica capability."
     },
     {
       "id": "rlm-bsl-index",
       "kind": "bundled-tool",
       "locked": "v1.21.0",
-      "latest": "v1.22.0",
+      "latest": "v1.23.0",
       "risk": "medium",
       "batch": "rlm-index-contract",
       "status": "needs-review",
       "contractGate": true,
-      "notes": "v1.21.0 index build/update/info and BUILDER_VERSION 14 were applied; v1.22.0 drift needs a separate schema and rebuild review."
+      "notes": "v1.23.0 release states BUILDER_VERSION remains 14 and rebuild is not required, but bsl_index.py changed substantially; verify schema, stdout, and index update behavior before moving tools.lock.json."
     },
     {
       "id": "v8-runner",
@@ -62,25 +62,25 @@
     {
       "id": "lxml",
       "kind": "python-test-dependency",
-      "locked": "unpinned-installed-6.1.0",
+      "locked": "tests/ci/requirements.txt:6.1.1",
       "latest": "6.1.1",
       "risk": "low",
       "batch": "low-risk-dependencies",
       "status": "applied",
       "contractGate": false,
-      "notes": "Pin tests/ci/requirements.txt to make CI dependency state reproducible."
+      "notes": "Source pin is current; local interpreter may still have 6.1.0 until test requirements are installed."
     },
     {
       "id": "rust-compatible-lock-updates",
       "kind": "cargo-lock",
       "locked": "current-compatible",
-      "latest": "cargo-update-dry-run-2026-06-18",
-      "updateCount": 16,
+      "latest": "cargo-update-dry-run-2026-06-21",
+      "updateCount": 2,
       "risk": "low",
       "batch": "low-risk-dependencies",
-      "status": "applied",
+      "status": "needs-review",
       "contractGate": false,
-      "notes": "cargo update --dry-run reports compatible transitive updates only; direct major updates stay out of this batch."
+      "notes": "cargo update --dry-run reports compatible patch updates: cc 1.2.64 -> 1.2.65 and log 0.4.32 -> 0.4.33; direct major updates stay out of this batch."
     }
   ]
 }
