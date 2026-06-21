@@ -174,8 +174,15 @@ class SkillProvenanceTests(unittest.TestCase):
         self.assertNotIn("sha256", payload)
         self.assertNotIn("Digest", payload)
         self.assertEqual(upstreams["cc-1c-skills"]["commitsSinceBaseline"], 541)
-        self.assertEqual(upstreams["cc-1c-skills"]["changedWatchedPathCount"], 148)
-        self.assertIn("web-test", upstreams["cc-1c-skills"]["affectedEntries"])
+        self.assertEqual(upstreams["cc-1c-skills"]["changedWatchedPathCount"], 86)
+        self.assertNotIn("web-test", upstreams["cc-1c-skills"]["affectedEntries"])
+        self.assertIn("web-test", upstreams["cc-1c-skills"]["reviewedEntries"])
+        web_test_decision = next(
+            item
+            for item in upstreams["cc-1c-skills"]["entryDecisions"]
+            if item["skill"] == "web-test"
+        )
+        self.assertEqual(web_test_decision["decision"], "ported")
         self.assertEqual(upstreams["ai-rules-1c"]["commitsSinceBaseline"], 23)
         self.assertIn("code-search", upstreams["ai-rules-1c"]["affectedEntries"])
         self.assertEqual(upstreams["v8-runner-rust"]["commitsSinceBaseline"], 0)
@@ -249,8 +256,10 @@ class SkillProvenanceTests(unittest.TestCase):
         ]
         violations = []
         for root in scanned_roots:
-            for path in root.rglob("*.md"):
-                text = path.read_text(encoding="utf-8")
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore")
                 for token in forbidden:
                     if token in text:
                         violations.append(f"{path.relative_to(self.repo_root())}: {token}")

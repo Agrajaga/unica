@@ -745,6 +745,41 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 with self.subTest(path=doc.relative_to(self.repo_root()), token=token):
                     self.assertNotIn(token, text)
 
+    def test_web_test_tracks_upstream_regression_runner_without_legacy_publish_guidance(self) -> None:
+        skill_dir = self.skill_root() / "web-test"
+        skill_doc = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        regress_doc = (skill_dir / "regress.md").read_text(encoding="utf-8")
+        run_script = (skill_dir / "scripts" / "run.mjs").read_text(encoding="utf-8")
+
+        required_files = [
+            "scripts/cli/commands/test.mjs",
+            "scripts/cli/test-runner/assertions.mjs",
+            "scripts/cli/test-runner/discover.mjs",
+            "scripts/cli/test-runner/reporters.mjs",
+            "scripts/engine/table/row-fill.mjs",
+            "scripts/engine/spreadsheet/spreadsheet.mjs",
+            "scripts/dom/grid.mjs",
+            "scripts/dom/forms.mjs",
+        ]
+        for relative_path in required_files:
+            with self.subTest(path=relative_path):
+                self.assertTrue((skill_dir / relative_path).is_file())
+
+        self.assertIn("node $RUN test <dir|file>... [flags]", regress_doc)
+        self.assertIn("webtest.config.mjs", regress_doc)
+        self.assertIn("--url=<url>", regress_doc)
+        self.assertIn("--format=allure", regress_doc)
+        self.assertIn("--format=junit", regress_doc)
+        self.assertIn("hasMore", skill_doc)
+        self.assertIn("Picture columns", skill_doc)
+        self.assertIn("row: { col: val }", skill_doc)
+        self.assertIn("case 'test'", run_script)
+
+        for text in [skill_doc, regress_doc]:
+            self.assertNotIn("CLAUDE_SKILL_DIR", text)
+            self.assertNotIn("/web-publish", text)
+            self.assertIn("autonomous-server", text)
+
     def test_source_set_format_detection_contract_is_documented(self) -> None:
         docs = {
             "workspace-runtime": self.reference_root()

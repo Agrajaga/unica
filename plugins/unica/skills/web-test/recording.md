@@ -26,19 +26,21 @@ tools/ffmpeg/
 Скачать, распаковать в любой каталог (напр. `C:\tools\ffmpeg`), добавить `bin/` в системный PATH.
 После этого ffmpeg доступен во всех проектах.
 
-### Вариант 3: через переменную окружения
+### Вариант 3: через .v8-project.json (общий путь)
 
-Чтобы не копировать ffmpeg в каждый проект, задай переменную окружения:
+Чтобы не копировать ffmpeg в каждый проект, указать путь в конфиге:
 
-```powershell
-$env:FFMPEG_PATH = "C:\tools\ffmpeg\bin\ffmpeg.exe"
+```json
+{
+  "ffmpegPath": "C:\\tools\\ffmpeg\\bin\\ffmpeg.exe"
+}
 ```
 
-Также можно передать путь явно в `startRecording({ ffmpegPath })`.
+Модель прочитает это поле и передаст в `startRecording({ ffmpegPath })`.
 
 ### Порядок поиска ffmpeg
 
-1. `opts.ffmpegPath` — явный путь из параметра
+1. `opts.ffmpegPath` — явный путь (из `.v8-project.json` или параметра)
 2. `FFMPEG_PATH` — переменная окружения
 3. `ffmpeg` — в системном PATH
 4. `tools/ffmpeg/bin/ffmpeg.exe` — относительно корня проекта
@@ -238,30 +240,36 @@ Add voiceover to recorded videos. Captions shown via `showCaption()` are automat
 - **ffmpeg** — same as for video recording (ffprobe must be next to ffmpeg)
 - **node-edge-tts** — `npm install --prefix tools/tts node-edge-tts` (for Edge TTS provider, free, no API key). Also works if installed globally or at project level — the resolver tries multiple locations automatically
 
-### Configuration object
+### Configuration in `.v8-project.json`
 
 ```json
 {
-  "provider": "edge",
-  "voice": "ru-RU-DmitryNeural"
+  "tts": {
+    "provider": "edge",
+    "voice": "ru-RU-DmitryNeural"
+  }
 }
 ```
 
 For OpenAI-compatible provider:
 ```json
 {
-  "provider": "openai",
-  "apiKey": "sk-...",
-  "voice": "alloy"
+  "tts": {
+    "provider": "openai",
+    "apiKey": "sk-...",
+    "voice": "alloy"
+  }
 }
 ```
 
 For ElevenLabs:
 ```json
 {
-  "provider": "elevenlabs",
-  "apiKey": "sk_...",
-  "voice": "JBFqnCBsd6RMkjVDRZzb"
+  "tts": {
+    "provider": "elevenlabs",
+    "apiKey": "sk_...",
+    "voice": "JBFqnCBsd6RMkjVDRZzb"
+  }
 }
 ```
 Note: `voice` is the ElevenLabs voice ID (not a name). Default model: `eleven_multilingual_v2` (supports Russian and other languages).
@@ -313,7 +321,7 @@ await openCommand('Банковские выписки');
 await hideCaption();
 const video = await stopRecording();
 
-// Add narration with explicit provider options
+// Add narration (reads tts config from .v8-project.json)
 const narrated = await addNarration(video.file, { voice: 'ru-RU-DmitryNeural' });
 console.log(`Narrated: ${narrated.file}, ${narrated.duration}s`);
 ```

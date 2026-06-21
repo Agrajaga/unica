@@ -827,7 +827,9 @@
         {
           "skill": "web-test",
           "status": "still-local-script",
-          "notes": "Adapted from the cc-1c-skills command surface for the packaged Unica skill.",
+          "decision": "ported",
+          "baselineCommit": "ae8241237753850307d94b10df93e5293e29dc74",
+          "notes": "Regression runner, split CLI/DOM/engine modules, grid pagination, picture columns, spreadsheet drill-down, multi-context tests, and report formats were ported from cc-1c-skills and adapted for Unica packaging. URL/bootstrap guidance routes through autonomous-server instead of donor web-publish commands; donor URLs stay only in provenance.",
           "upstreamPaths": [
             ".claude/skills/web-test/**",
             "docs/web-test-guide.md",
