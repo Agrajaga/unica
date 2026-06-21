@@ -780,6 +780,55 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             self.assertNotIn("/web-publish", text)
             self.assertIn("autonomous-server", text)
 
+    def test_skd_skills_track_upstream_dsl_features_through_unica_boundary(self) -> None:
+        skd_compile = (self.skill_root() / "skd-compile" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        skd_edit = (self.skill_root() / "skd-edit" / "SKILL.md").read_text(encoding="utf-8")
+        skd_info = (self.skill_root() / "skd-info" / "SKILL.md").read_text(encoding="utf-8")
+        skd_dsl = (self.reference_root() / "specs" / "skd-dsl-spec.md").read_text(
+            encoding="utf-8"
+        )
+        dcs_spec = (self.reference_root() / "specs" / "1c-dcs-spec.md").read_text(
+            encoding="utf-8"
+        )
+
+        for text in [skd_compile, skd_edit, skd_info]:
+            self.assertIn("MCP `unica`", text)
+            self.assertNotIn("CLAUDE_SKILL_DIR", text)
+            self.assertNotIn("powershell.exe", text)
+            self.assertNotIn(".ps1", text)
+            self.assertNotIn(".py", text)
+
+        for token in [
+            "TypeSet",
+            "balanceGroupName",
+            "orderExpression",
+            "valueListAllowed",
+            "availableValues",
+            "dataSetLinks",
+            "additionalProperties",
+            "parameterListAllowed",
+            "startExpression",
+            "linkConditionExpression",
+            "viewMode",
+            "itemsViewMode",
+            "use: false",
+            "placement",
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, skd_dsl)
+
+        self.assertIn("Значение-список", dcs_spec)
+        self.assertIn("valueListAllowed", dcs_spec)
+        self.assertIn('"Raw": true', skd_info)
+        self.assertIn("сырой текст запроса целиком", skd_info)
+        self.assertIn("unica.skd.edit", skd_info)
+        self.assertIn("patch-query", skd_edit)
+        self.assertIn("@once", skd_edit)
+        self.assertIn("availableValue=", skd_edit)
+        self.assertIn("value=", skd_edit)
+
     def test_source_set_format_detection_contract_is_documented(self) -> None:
         docs = {
             "workspace-runtime": self.reference_root()

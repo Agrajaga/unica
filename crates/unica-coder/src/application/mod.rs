@@ -800,8 +800,9 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Compile Data Composition Schema XML from JSON DSL.",
             mutating: true,
             cache_access: cache_access_for("skd-compile", Some(DomainEventKind::SkdChanged)),
-            handler: ToolHandler::NativeOperation {
-                operation: "skd-compile",
+            handler: ToolHandler::LegacyScript {
+                skill: "skd-compile",
+                script: "skd-compile.py",
                 event: Some(DomainEventKind::SkdChanged),
             },
         },
@@ -810,8 +811,9 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Edit Data Composition Schema Template.xml.",
             mutating: true,
             cache_access: cache_access_for("skd-edit", Some(DomainEventKind::SkdChanged)),
-            handler: ToolHandler::NativeOperation {
-                operation: "skd-edit",
+            handler: ToolHandler::LegacyScript {
+                skill: "skd-edit",
+                script: "skd-edit.py",
                 event: Some(DomainEventKind::SkdChanged),
             },
         },
@@ -820,8 +822,9 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Inspect Data Composition Schema Template.xml.",
             mutating: false,
             cache_access: cache_access_for("skd-info", None),
-            handler: ToolHandler::NativeOperation {
-                operation: "skd-info",
+            handler: ToolHandler::LegacyScript {
+                skill: "skd-info",
+                script: "skd-info.py",
                 event: None,
             },
         },
@@ -830,8 +833,9 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Validate Data Composition Schema Template.xml.",
             mutating: false,
             cache_access: cache_access_for("skd-validate", None),
-            handler: ToolHandler::NativeOperation {
-                operation: "skd-validate",
+            handler: ToolHandler::LegacyScript {
+                skill: "skd-validate",
+                script: "skd-validate.py",
                 event: None,
             },
         },
@@ -956,6 +960,7 @@ fn cache_access_for(operation: &str, event: Option<DomainEventKind>) -> CacheAcc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::legacy_scripts::legacy_script_path;
     use serde_json::Map;
 
     #[test]
@@ -1092,14 +1097,11 @@ mod tests {
 
             match tool.handler {
                 ToolHandler::LegacyScript { skill, script, .. } => {
-                    let script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    let plugin_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                         .join("../..")
                         .join("plugins")
-                        .join("unica")
-                        .join("skills")
-                        .join(skill)
-                        .join("scripts")
-                        .join(script);
+                        .join("unica");
+                    let script_path = legacy_script_path(&plugin_root, skill, script);
                     assert!(
                         script_path.is_file(),
                         "{} routes to missing transitional script {}",
@@ -1116,6 +1118,52 @@ mod tests {
                     );
                 }
                 _ => panic!("{} routes through unexpected handler", tool.name),
+            }
+        }
+    }
+
+    #[test]
+    fn skd_tools_route_through_hidden_legacy_scripts_for_full_donor_contract() {
+        let expected = [
+            ("unica.skd.compile", "skd-compile", "skd-compile.py"),
+            ("unica.skd.edit", "skd-edit", "skd-edit.py"),
+            ("unica.skd.info", "skd-info", "skd-info.py"),
+            ("unica.skd.validate", "skd-validate", "skd-validate.py"),
+        ];
+        for (tool_name, expected_skill, expected_script) in expected {
+            let tool = tools()
+                .into_iter()
+                .find(|tool| tool.name == tool_name)
+                .expect("SKD tool exists");
+            match tool.handler {
+                ToolHandler::LegacyScript { skill, script, .. } => {
+                    assert_eq!(skill, expected_skill);
+                    assert_eq!(script, expected_script);
+                    let plugin_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../..")
+                        .join("plugins")
+                        .join("unica");
+                    let hidden_script = legacy_script_path(&plugin_root, skill, script);
+                    assert!(
+                        hidden_script.is_file(),
+                        "{tool_name} routes to missing hidden script {}",
+                        hidden_script.display()
+                    );
+                    let prompt_visible_script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../..")
+                        .join("plugins")
+                        .join("unica")
+                        .join("skills")
+                        .join(skill)
+                        .join("scripts")
+                        .join(script);
+                    assert!(
+                        !prompt_visible_script.exists(),
+                        "{tool_name} must not ship skill-local operation script {}",
+                        prompt_visible_script.display()
+                    );
+                }
+                other => panic!("{tool_name} should route through hidden legacy script, got {other:?}"),
             }
         }
     }

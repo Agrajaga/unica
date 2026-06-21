@@ -1,5 +1,4 @@
 # skd-edit v1.25 — Atomic 1C DCS editor (Python port)
-# Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 import argparse
 import os
 import re

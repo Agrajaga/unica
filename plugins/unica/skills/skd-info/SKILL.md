@@ -1,7 +1,7 @@
 ---
 name: skd-info
 description: Анализ структуры схемы компоновки данных 1С (СКД) — наборы, поля, параметры, варианты. Используй для понимания отчёта — источник данных (запрос), доступные поля, параметры
-argument-hint: <TemplatePath> [-Mode overview|query|fields|links|calculated|resources|params|variant|templates|trace|full] [-Name <dataset|variant|field|group>]
+argument-hint: <TemplatePath> [-Mode overview|query|fields|links|calculated|resources|params|variant|templates|trace|full] [-Name <dataset|variant|field|group>] [-Raw]
 allowed-tools:
   - Bash
   - Read
@@ -27,7 +27,8 @@ allowed-tools:
 | `Mode` | Режим анализа (по умолчанию `overview`) |
 | `Name` | Имя набора (query), поля (fields/calculated/resources/trace), варианта (variant) или группировки/поля (templates) |
 | `Batch` | Номер пакета запроса, 0 = все (только query) |
-| `Limit` / `Offset` | Пагинация (по умолчанию 150 строк) |
+| `Raw` | Только для `Mode=query`: сырой текст запроса целиком, без заголовков/оглавления/разделителей пакетов. Используй для выгрузки в SQL-файл и возврата через `unica.skd.edit` / `set-query @file` |
+| `Limit` / `Offset` | Пагинация (по умолчанию 150 строк; `Raw` не усекается) |
 | `OutFile` | Записать результат в файл (UTF-8 BOM) |
 
 ### Overview: точка входа
@@ -78,6 +79,26 @@ allowed-tools:
       "Mode": "query",
       "Name": "ДанныеТ13",
       "Batch": 3
+    }
+  }
+}
+```
+
+### Сырой текст запроса для round-trip правки
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "unica.skd.info",
+    "arguments": {
+      "cwd": "<workspace>",
+      "TemplatePath": "<путь>",
+      "Mode": "query",
+      "Name": "ДанныеТ13",
+      "Raw": true,
+      "OutFile": "query.sql"
     }
   }
 }
@@ -232,6 +253,10 @@ allowed-tools:
 2. `trace -Name <поле>` — узнать как считается колонка отчёта (от заголовка до запроса за один вызов)
 3. `query -Name <набор>` — посмотреть текст SQL-запроса
 4. `variant -Name <N>` — посмотреть группировки и фильтры варианта
+
+Переработка запроса (round-trip): `Mode=query`, `Name=<набор>`, `"Raw": true`, `OutFile=q.sql` ->
+правка `q.sql` -> `unica.skd.edit` с `Operation=set-query`, `Value="@q.sql"`.
+`Raw` отдаёт запрос целиком без декораций, поэтому выгрузка и возврат точны, включая многопакетные запросы с временными таблицами.
 
 Подробные примеры вывода каждого режима — в `modes-reference.md`.
 

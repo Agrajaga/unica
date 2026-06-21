@@ -66,6 +66,7 @@ const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "ProcessorName",
     "Purpose",
     "RightsPath",
+    "Raw",
     "Section",
     "SetDefault",
     "SetMainSKD",
@@ -138,6 +139,7 @@ const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "processorName",
     "purpose",
     "rightsPath",
+    "raw",
     "section",
     "setDefault",
     "setMainSKD",
@@ -507,9 +509,7 @@ pub fn validate_workspace_paths(
     if dry_run || !tool.mutating {
         return Ok(());
     }
-    if !matches!(tool.handler, ToolHandler::NativeOperation { .. })
-        && !matches!(tool.handler, ToolHandler::RuntimeAdapter)
-    {
+    if !is_native_xml_tool(tool) && !matches!(tool.handler, ToolHandler::RuntimeAdapter) {
         return Ok(());
     }
 
@@ -528,7 +528,7 @@ pub fn validate_native_source_set_format(
     dry_run: bool,
     context: &WorkspaceContext,
 ) -> Result<(), String> {
-    if dry_run || !matches!(tool.handler, ToolHandler::NativeOperation { .. }) {
+    if dry_run || !is_native_xml_tool(tool) {
         return Ok(());
     }
 
@@ -596,9 +596,25 @@ fn write_path_args(tool: ToolSpec) -> &'static [&'static str] {
             "cfe-borrow" | "cfe-patch-method" => &["ExtensionPath", "extensionPath"],
             _ => &[],
         },
+        ToolHandler::LegacyScript { skill, .. } => match skill {
+            "skd-compile" => &["OutputPath", "outputPath"],
+            "skd-edit" => &["TemplatePath", "templatePath"],
+            _ => &[],
+        },
         ToolHandler::RuntimeAdapter => &["config", "path", "output", "settings", "mcpConfig"],
         _ => &[],
     }
+}
+
+fn is_native_xml_tool(tool: ToolSpec) -> bool {
+    matches!(tool.handler, ToolHandler::NativeOperation { .. })
+        || matches!(
+            tool.handler,
+            ToolHandler::LegacyScript {
+                skill: "skd-compile" | "skd-edit" | "skd-info" | "skd-validate",
+                ..
+            }
+        )
 }
 
 fn native_source_path_args() -> &'static [&'static str] {
@@ -702,6 +718,10 @@ fn required_args(tool: &ToolSpec) -> Vec<&'static str> {
             "role-info" | "role-validate" => vec!["RightsPath"],
             _ => Vec::new(),
         },
+        ToolHandler::LegacyScript { skill, .. } => match skill {
+            "skd-info" | "skd-validate" | "skd-edit" => vec!["TemplatePath"],
+            _ => Vec::new(),
+        },
         ToolHandler::StandardsAdapter {
             operation: "search",
             ..
@@ -749,6 +769,8 @@ fn property_schema(name: &str) -> Value {
             | "noValidate"
             | "NoRole"
             | "noRole"
+            | "Raw"
+            | "raw"
             | "WithText"
             | "withText"
             | "CreateIfMissing"
@@ -875,6 +897,8 @@ fn expected_scalar_type(key: &str) -> Option<&'static str> {
             | "noValidate"
             | "NoRole"
             | "noRole"
+            | "Raw"
+            | "raw"
             | "WithText"
             | "withText"
             | "CreateIfMissing"
@@ -1085,6 +1109,26 @@ mod tests {
         let error = validate_tool_arguments(definition, &args, false).unwrap_err();
         assert!(error.contains("requires `name`"));
         validate_tool_arguments(definition, &args, true).unwrap();
+    }
+
+    #[test]
+    fn skd_info_contract_exposes_raw_query_export() {
+        let skd_info = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.skd.info")
+            .expect("unica.skd.info must be registered");
+
+        let schema = input_schema_for_tool(&skd_info);
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["Raw"]["type"], "boolean");
+        assert_eq!(schema["required"], json!(["TemplatePath"]));
+
+        let mut args = Map::new();
+        args.insert("TemplatePath".to_string(), json!("Reports/Sales/Templates/Main"));
+        args.insert("Mode".to_string(), json!("query"));
+        args.insert("Name".to_string(), json!("Sales"));
+        args.insert("Raw".to_string(), json!(true));
+        validate_tool_arguments(skd_info, &args, false).unwrap();
     }
 
     #[test]

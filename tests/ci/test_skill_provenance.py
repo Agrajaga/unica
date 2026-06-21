@@ -174,15 +174,26 @@ class SkillProvenanceTests(unittest.TestCase):
         self.assertNotIn("sha256", payload)
         self.assertNotIn("Digest", payload)
         self.assertEqual(upstreams["cc-1c-skills"]["commitsSinceBaseline"], 541)
-        self.assertEqual(upstreams["cc-1c-skills"]["changedWatchedPathCount"], 86)
+        self.assertEqual(upstreams["cc-1c-skills"]["changedWatchedPathCount"], 70)
         self.assertNotIn("web-test", upstreams["cc-1c-skills"]["affectedEntries"])
+        for skill in ("skd-compile", "skd-edit", "skd-info", "skd-validate"):
+            self.assertNotIn(skill, upstreams["cc-1c-skills"]["affectedEntries"])
         self.assertIn("web-test", upstreams["cc-1c-skills"]["reviewedEntries"])
+        for skill in ("skd-compile", "skd-edit", "skd-info", "skd-validate"):
+            self.assertIn(skill, upstreams["cc-1c-skills"]["reviewedEntries"])
         web_test_decision = next(
             item
             for item in upstreams["cc-1c-skills"]["entryDecisions"]
             if item["skill"] == "web-test"
         )
         self.assertEqual(web_test_decision["decision"], "ported")
+        for skill in ("skd-compile", "skd-edit", "skd-info", "skd-validate"):
+            decision = next(
+                item
+                for item in upstreams["cc-1c-skills"]["entryDecisions"]
+                if item["skill"] == skill
+            )
+            self.assertEqual(decision["decision"], "ported")
         self.assertEqual(upstreams["ai-rules-1c"]["commitsSinceBaseline"], 23)
         self.assertIn("code-search", upstreams["ai-rules-1c"]["affectedEntries"])
         self.assertEqual(upstreams["v8-runner-rust"]["commitsSinceBaseline"], 0)

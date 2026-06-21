@@ -1198,10 +1198,6 @@ NATIVE_PARITY_TOOLS = {
     "unica.mxl.decompile",
     "unica.mxl.info",
     "unica.mxl.validate",
-    "unica.skd.compile",
-    "unica.skd.edit",
-    "unica.skd.validate",
-    "unica.skd.info",
     "unica.role.compile",
     "unica.role.info",
     "unica.role.validate",
@@ -1512,6 +1508,16 @@ def normalize_text(text: str, workspace: Path) -> str:
     normalized = normalized.replace(str(workspace.resolve()), "<WORKSPACE>")
     normalized = normalized.replace(str(workspace), "<WORKSPACE>")
     normalized = normalized.replace(str(REPO_ROOT), "<REPO>")
+    normalized = re.sub(
+        r"<REPO>/tests/fixtures/unica_mcp_script_parity/reference_skills/([^/\s\"']+)/scripts/([^/\s\"']+)",
+        r"<REPO>/<SKILL_SCRIPT>/\1/\2",
+        normalized,
+    )
+    normalized = re.sub(
+        r"<REPO>/plugins/unica/scripts/legacy/([^/\s\"']+)/([^/\s\"']+)",
+        r"<REPO>/<SKILL_SCRIPT>/\1/\2",
+        normalized,
+    )
     normalized = UUID_RE.sub("<UUID>", normalized)
     return normalized
 

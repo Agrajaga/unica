@@ -530,6 +530,26 @@ DataCompositionSchema
 
 Стандартные варианты периодов (`v8:StandardPeriodVariant`): `Custom`, `Today`, `ThisWeek`, `ThisMonth`, `ThisQuarter`, `ThisYear`, `LastMonth`, `LastQuarter`, `LastYear` и др.
 
+#### Значение-список (несколько значений по умолчанию)
+
+Значением параметра может быть список — несколько элементов `<value>` подряд внутри
+`<parameter>`, при `<valueListAllowed>true</valueListAllowed>`:
+
+```xml
+<parameter>
+  <name>ВидыСубконто</name>
+  <valueType>
+    <v8:Type xmlns:d5p1="http://v8.1c.ru/8.1/data/enterprise/current-config">d5p1:ChartOfCharacteristicTypesRef.ВидыСубконтоХозрасчетные</v8:Type>
+  </valueType>
+  <value xsi:type="dcscor:DesignTimeValue">ПланВидовХарактеристик.ВидыСубконтоХозрасчетные.Контрагенты</value>
+  <value xsi:type="dcscor:DesignTimeValue">ПланВидовХарактеристик.ВидыСубконтоХозрасчетные.Договоры</value>
+  <useRestriction>true</useRestriction>
+  <valueListAllowed>true</valueListAllowed>
+</parameter>
+```
+
+Порядок элементов: `name, title, valueType, value*, useRestriction, …, valueListAllowed`.
+
 ---
 
 ## 9. Макеты областей (template)

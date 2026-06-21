@@ -20,11 +20,7 @@ impl LegacyScriptAdapter {
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root; set UNICA_PLUGIN_ROOT or run from a repository/package containing plugins/unica".to_string()
         })?;
-        let script = plugin_root
-            .join("skills")
-            .join(skill)
-            .join("scripts")
-            .join(script_name);
+        let script = legacy_script_path(&plugin_root, skill, script_name);
         let mut command = vec!["python3".to_string(), script.display().to_string()];
         command.extend(script_args(args));
 
@@ -94,6 +90,14 @@ impl LegacyScriptAdapter {
             command: Some(command),
         })
     }
+}
+
+pub fn legacy_script_path(plugin_root: &Path, skill: &str, script_name: &str) -> PathBuf {
+    plugin_root
+        .join("scripts")
+        .join("legacy")
+        .join(skill)
+        .join(script_name)
 }
 
 pub fn find_plugin_root(cwd: &Path) -> Option<PathBuf> {

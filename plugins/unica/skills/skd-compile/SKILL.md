@@ -123,11 +123,19 @@ allowed-tools:
 
 Многоязычный заголовок: `"title": { "ru": "...", "en": "..." }`. Применимо везде, где принимается title/presentation (поля, calculatedFields, parameters, settingsVariants, availableValues и пр.). Строка эквивалентна `{ "ru": "..." }`.
 
-Типы: `string`, `string(N)`, `decimal(D,F)`, `boolean`, `date`, `dateTime`, `CatalogRef.X`, `DocumentRef.X`, `EnumRef.X`, `StandardPeriod`. Ссылочные типы эмитируются с inline namespace `d5p1:` (`http://v8.1c.ru/8.1/data/enterprise/current-config`). Сборка EPF со ссылочными типами требует базу с соответствующей конфигурацией.
+Типы: `string`, `string(N)`, `decimal`, `decimal(D)`, `decimal(D,F)`, `boolean`, `date`, `dateTime`, `CatalogRef.X`, `DocumentRef.X`, `EnumRef.X`, `StandardPeriod`. Ссылочные типы эмитируются с inline namespace `d5p1:` (`http://v8.1c.ru/8.1/data/enterprise/current-config`). Сборка EPF со ссылочными типами требует базу с соответствующей конфигурацией.
 
-Составной тип (несколько типов значений) — массив в объектной форме: `"type": ["CatalogRef.A", "CatalogRef.B"]`. Квалификаторы (`(N)`, `(D,F)`) применяются к каждому элементу.
+`decimal` без скобок = `10,2`, `decimal(N)` = `N,0`; `,nonneg` в конце скобок -> `AllowedSign=Nonnegative`.
 
-Роли: `@dimension`, `@account`, `@balance`, `@period`.
+Составной тип (несколько типов значений) — массив в объектной форме: `"type": ["CatalogRef.A", "CatalogRef.B"]`. Квалификаторы (`(N)`, `(D,F)`) применяются к каждому элементу. Голое имя без точки компилируется как `TypeSet`, например `"type": "ВидыСубконтоХозрасчетные"`.
+
+Роли (shorthand или объект):
+- `@dimension`, `@account`, `@balance`, `@period`, `@required`, `@autoOrder`, `@ignoreNullValues`;
+- KV-поля `balanceGroupName`, `balanceType`, `parentDimension`, `accountTypeExpression`, `expression`, `orderType`, `periodNumber`, `periodType`.
+
+```
+"Сумма: decimal(15,2) @balance balanceGroupName=Сумма balanceType=OpeningBalance"
+```
 
 Ограничения: `#noField`, `#noFilter`, `#noGroup`, `#noOrder`.
 
@@ -136,6 +144,7 @@ allowed-tools:
 Дополнительные ключи объектной формы:
 - `"presentationExpression": "<выражение>"` — что показывать вместо значения поля. Исходное значение остаётся «под капотом» для перехода/расшифровки.
 - `"appearance": { "<параметр>": "<значение>" }` — оформление колонки по умолчанию (применяется во всех вариантах настроек). Ключи — параметры платформы (`ГоризонтальноеПоложение`, `МинимальнаяШирина`, `Формат`, `Текст` и т.п.).
+- `"orderExpression": { "expression": "<выражение>", "orderType": "Asc", "autoOrder": true }` — сортировка поля по выражению.
 
 ```json
 { "field": "Сумма", "title": "Сумма продажи", "type": "decimal(15,2)",
