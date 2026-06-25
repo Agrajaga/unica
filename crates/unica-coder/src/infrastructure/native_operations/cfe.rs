@@ -786,9 +786,18 @@ pub(crate) fn cfe_borrow_form_shell(
         fs::create_dir_all(parent)
             .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
     }
-    write_utf8_bom(&module_file, "")?;
-    stdout.push_str(&format!("[INFO]   Created: {}\n", module_file.display()));
-    Ok(vec![form_meta_target, form_xml_target, module_file])
+    let mut artifacts = vec![form_meta_target, form_xml_target];
+    if module_file.exists() {
+        stdout.push_str(&format!(
+            "[SKIP] Module.bsl already exists: {} - not overwriting\n",
+            module_file.display()
+        ));
+    } else {
+        write_utf8_bom(&module_file, "")?;
+        stdout.push_str(&format!("[INFO]   Created: {}\n", module_file.display()));
+        artifacts.push(module_file);
+    }
+    Ok(artifacts)
 }
 
 pub(crate) fn cfe_borrow_form_metadata_xml(
@@ -2985,5 +2994,159 @@ pub(crate) fn invoke_mutation(
         "cfe-init" => Some(create_extension_scaffold(args, context)),
         "cfe-patch-method" => Some(patch_extension_method(args, context)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::workspace::WorkspaceContext;
+    use serde_json::{json, Map, Value};
+    use std::fs;
+    use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_context(name: &str) -> WorkspaceContext {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("unica-cfe-borrow-{name}-{nanos}"));
+        fs::create_dir_all(&root).unwrap();
+        WorkspaceContext {
+            cwd: root.clone(),
+            workspace_root: root.clone(),
+            cache_root: root.join(".build").join("unica"),
+            workspace_epoch: 1,
+        }
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn borrow_cfe_preserves_existing_form_module_on_repeated_form_borrow() {
+        let context = temp_context("preserve-form-module");
+        let src = context.cwd.join("src");
+        let ext = context.cwd.join("ext");
+        write_file(
+            &src.join("Configuration.xml"),
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.17">
+	<Configuration uuid="55555555-5555-5555-5555-555555555555">
+		<Properties>
+			<Name>ParityConfiguration</Name>
+			<NamePrefix/>
+		</Properties>
+		<ChildObjects>
+			<Catalog>ParityCatalog</Catalog>
+		</ChildObjects>
+	</Configuration>
+</MetaDataObject>
+"#,
+        );
+        write_file(
+            &src.join("Catalogs")
+                .join("ParityCatalog")
+                .join("Forms")
+                .join("MainForm.xml"),
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.17">
+	<Form uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa">
+		<Properties>
+			<Name>MainForm</Name>
+			<FormType>Managed</FormType>
+		</Properties>
+	</Form>
+</MetaDataObject>
+"#,
+        );
+        write_file(
+            &src.join("Catalogs")
+                .join("ParityCatalog")
+                .join("Forms")
+                .join("MainForm")
+                .join("Ext")
+                .join("Form.xml"),
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.17">
+	<Attributes/>
+</Form>
+"#,
+        );
+        write_file(
+            &ext.join("Configuration.xml"),
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.17">
+	<Configuration uuid="66666666-6666-6666-6666-666666666666">
+		<Properties>
+			<Name>ParityExtension</Name>
+			<NamePrefix>PE_</NamePrefix>
+		</Properties>
+		<ChildObjects>
+			<Catalog>ParityCatalog</Catalog>
+		</ChildObjects>
+	</Configuration>
+</MetaDataObject>
+"#,
+        );
+        write_file(
+            &ext.join("Catalogs").join("ParityCatalog.xml"),
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.17">
+	<Catalog uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb">
+		<Properties>
+			<ObjectBelonging>Adopted</ObjectBelonging>
+			<Name>ParityCatalog</Name>
+			<ExtendedConfigurationObject>11111111-1111-1111-1111-111111111111</ExtendedConfigurationObject>
+		</Properties>
+		<ChildObjects>
+			<Form>MainForm</Form>
+		</ChildObjects>
+	</Catalog>
+</MetaDataObject>
+"#,
+        );
+        let module_path = ext
+            .join("Catalogs")
+            .join("ParityCatalog")
+            .join("Forms")
+            .join("MainForm")
+            .join("Ext")
+            .join("Form")
+            .join("Module.bsl");
+        let existing_module = "Procedure ExistingHandler()\nEndProcedure\n";
+        write_file(&module_path, existing_module);
+
+        let mut args = Map::new();
+        args.insert("ExtensionPath".to_string(), json!("ext"));
+        args.insert("ConfigPath".to_string(), json!("src"));
+        args.insert(
+            "Object".to_string(),
+            json!("Catalog.ParityCatalog.Form.MainForm"),
+        );
+        args.insert("BorrowMainAttribute".to_string(), json!("Form"));
+
+        let outcome = borrow_cfe(&args, &context);
+
+        assert!(outcome.ok, "{:?}", outcome.errors);
+        assert_eq!(fs::read_to_string(&module_path).unwrap(), existing_module);
+        let stdout = outcome.stdout.as_deref().unwrap_or_default();
+        assert!(
+            stdout.contains("[SKIP] Module.bsl already exists"),
+            "{stdout}"
+        );
+        let module_artifact = module_path.display().to_string();
+        assert!(!outcome.artifacts.contains(&module_artifact));
+        assert!(!outcome
+            .changes
+            .iter()
+            .any(|change| change.contains(&module_artifact)));
+
+        let _ = fs::remove_dir_all(&context.cwd);
     }
 }
