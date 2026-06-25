@@ -35,7 +35,7 @@ description: "Реализация интеграций 1С. Используй 
 - Input validation rejects malformed data before business writes.
 - Retries are idempotent or guarded by external ids.
 - Error responses are stable and do not leak internals.
-- Logs contain correlation ids but not secrets.
+- Logs use structured logging fields and contain correlation ids but not secrets.
 - Tests cover success, validation failure, duplicate/retry, and remote failure.
 
 ## MCP example

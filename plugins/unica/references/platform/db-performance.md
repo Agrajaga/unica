@@ -1,14 +1,15 @@
 # DB And Query Performance
 
-Use this reference when a slow 1C scenario may depend on query text, metadata
-shape, DBMS behavior, locks, or data volume.
+Use this reference when a slow 1C scenario may depend on query text, SKD/DCS
+settings, metadata shape, DBMS behavior, locks, or data volume.
 
 ## Cause-First Workflow
 
 - Identify the user/API scenario first, then the exact query or SKD dataset
   behind it.
 - Capture context: caller module, loop boundaries, transaction scope, virtual
-  table parameters, temporary table chain, and expected row count.
+  table parameters, temporary table chain, managed locks, lock order, and
+  expected row count.
 - Inspect metadata before rewriting: registers, dimensions, resources,
   реквизиты, tabular sections, periodicity, totals, and object type.
 - Compare platform query intent with DBMS evidence: generated SQL, plan, table
@@ -37,6 +38,13 @@ shape, DBMS behavior, locks, or data volume.
 - Long locks coincide with large writes, posting, exchange, or background jobs.
 - Temp storage or DB transaction log grows during a scenario that should be
   read-only.
+
+## Lock Diagnostics
+
+- Connect every wait or deadlock to holder, waiter, transaction, module path,
+  user/API scenario, and the exact lock order before proposing code changes.
+- Treat managed locks as part of behavior. Removing a lock to win a benchmark is
+  a data-consistency change and needs an explicit product decision.
 
 ## Verification
 

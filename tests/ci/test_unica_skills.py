@@ -229,6 +229,7 @@ SCENARIO_REQUIRED_TOKENS = {
         "Устаревшие процедуры и функции",
         "API-first",
     ],
+    "code-search": ["MCP-first", "what was tried"],
     "code-diagnostics": ["АПК", "EDT", "BSL LS", "отключ", "v8std"],
     "code-review": ["Findings first", "severity", "file/line"],
     "query-optimize": ["СКД", "virtual", "query-in-loop"],
@@ -565,6 +566,35 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                     self.assertIn(tool_name, text)
                 for token in SCENARIO_REQUIRED_TOKENS.get(skill, []):
                     self.assertIn(token, text)
+
+    def test_ai_rules_guidance_refresh_is_adapted_to_unica_surface(self) -> None:
+        docs = {
+            "code-search": self.skill_root() / "code-search" / "SKILL.md",
+            "code-diagnostics": self.skill_root() / "code-diagnostics" / "SKILL.md",
+            "test-authoring": self.skill_root() / "test-authoring" / "SKILL.md",
+            "background-jobs": self.skill_root() / "background-jobs" / "SKILL.md",
+            "db-performance": self.skill_root() / "db-performance" / "SKILL.md",
+            "integration-implement": self.skill_root() / "integration-implement" / "SKILL.md",
+            "platform-mechanics": self.reference_root() / "platform" / "platform-mechanics.md",
+            "runtime-diagnostics": self.reference_root() / "platform" / "runtime-diagnostics.md",
+            "db-performance-ref": self.reference_root() / "platform" / "db-performance.md",
+            "integration-contracts": self.reference_root() / "platform" / "integration-contracts.md",
+        }
+        joined = "\n".join(path.read_text(encoding="utf-8") for path in docs.values())
+
+        for token in [
+            "MCP-first",
+            "what was tried",
+            "verification gate",
+            "impact analysis",
+            "managed locks",
+            "lock order",
+            "structured logging",
+            "DCS",
+            "idempotency key",
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, joined)
 
     def test_all_skills_do_not_expose_internal_mcp_names(self) -> None:
         forbidden = [

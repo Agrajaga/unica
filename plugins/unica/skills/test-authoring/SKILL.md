@@ -20,6 +20,17 @@ description: "Проектирование и запуск тестов 1С: tes
 5. Run `unica.runtime.execute` with `operation=syntax` after adding test code, then `operation=test` with `testRunner=yaxunit` or `testRunner=va`.
 6. Report exact failing test, expected/actual behavior, and whether the failure is test setup or product behavior.
 
+## Verification gate
+
+- For implementation plans, every stated behavior gets either an executable test,
+  a syntax/diagnostic check, or an explicit residual risk.
+- For public API, integration, release, or metadata behavior, include impact
+  analysis evidence from the relevant `unica.*` tools before treating the test
+  plan as complete.
+- Do not call donor-specific check commands; route verification through
+  `unica.runtime.execute`, `unica.code.diagnostics`, and focused `unica.*.info`
+  tools.
+
 ## Scenario design
 
 - Read `references/platform/integration-contracts.md` when tests verify HTTP/API/OData/JSON/XML/file-exchange behavior.

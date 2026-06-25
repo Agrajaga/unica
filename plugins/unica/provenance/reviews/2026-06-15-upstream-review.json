@@ -7,7 +7,7 @@
     "cc-1c-skills reviewed through cbde49efdaeec190432fdf4a53201a87e83c69de; the raw 138 watched path count was EOL/raw-wrapper/docs-heavy and is now closed by per-entry baselines.",
     "Functional donor drift was ported for web-test, cfe-borrow, cfe-init, and form-validate through Unica boundaries.",
     "EOL normalization, donor-only db/epf-build/web-publish capabilities, generated port branches, and raw PowerShell wrapper churn were reviewed as outside the current packaged Unica surface.",
-    "ai-rules-1c guidance drift remains a separate prompt-guidance review: 23 commits, 36 watched changed paths, 17 affected Unica skills.",
+    "ai-rules-1c guidance drift reviewed through a421cf44eb1f5859cf2a2b74884f8fbcaefc4826: 16 skills adapted through public unica.* guidance, and api-design marked Unica-owned with ai-rules as secondary-only guidance.",
     "v8-runner-rust remains clean at the locked v0.5.1 baseline."
   ],
   "decisionPolicy": {
@@ -34,13 +34,8 @@
     {
       "id": "ai-rules-core-guidance",
       "priority": 2,
-      "skills": [
-        "code-search",
-        "platform-help",
-        "code-diagnostics",
-        "code-review",
-        "test-authoring"
-      ]
+      "skills": [],
+      "notes": "Closed by the ai-rules-1c guidance refresh; future drift should reopen only entries whose primary source is the donor or whose secondary guidance is intentionally tracked."
     },
     {
       "id": "cc-support-state-and-guard",
@@ -395,10 +390,12 @@
       "baselineReason": "Latest donor commit before local guidance adaptation commits 40d86774d8c21f41c1adeecec696abb039c9bda2 and e5b4eeab4dac92e0c9f60d3f886aa2bb7ef79f80 (2026-05-04).",
       "targetCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
       "commitsSinceBaseline": 23,
-      "changedWatchedPathCount": 36,
-      "reviewStatus": "needs-adaptation-decision",
-      "finding": "Guidance drift affects all tracked ai-rules-derived skills. Notable additions include MCP-first search guidance, verification/checkmcp/doctor commands, async jobs, locks and transactions, logging, DCS, extension patterns, and updated mcp-1c-tools docs.",
-      "affectedEntries": [
+      "changedWatchedPathCount": 0,
+      "reviewStatus": "reviewed",
+      "finding": "Guidance drift was reviewed. Unica-owned api-design is not donor-derived and is ignored with reason; the remaining affected skills were adapted through public unica.* MCP routing and local reference guidance without importing donor mcp-1c-tools, checkmcp, doctor, or raw donor MCP names.",
+      "affectedEntries": [],
+      "reviewedChangedWatchedPathCount": 36,
+      "reviewedEntries": [
         "api-design",
         "background-jobs",
         "bsp-patterns",
@@ -416,6 +413,111 @@
         "release-support",
         "security-auth-crypto",
         "test-authoring"
+      ],
+      "entryDecisions": [
+        {
+          "skill": "api-design",
+          "decision": "ignored-with-reason",
+          "primarySource": "unica",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Unica-owned skill based on the Infostart \"База по API\" model; ai-rules-1c is secondary guidance only and current donor architecture/core edits do not replace the local API model."
+        },
+        {
+          "skill": "background-jobs",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted ai-rules async, locks-and-transactions, logging, and verification guidance to public unica.* routing and local background-job review rules."
+        },
+        {
+          "skill": "bsp-patterns",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted platform-solutions, tooling-playbooks, integrations-add, and core standards guidance while keeping BSP usage behind public unica.* tools."
+        },
+        {
+          "skill": "code-diagnostics",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted checkmcp/doctor and verification-checklist guidance into a Unica verification gate using unica.code.diagnostics, unica.code.graph, unica.standards.*, and unica.runtime.execute."
+        },
+        {
+          "skill": "code-review",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted reviewer, anti-pattern, coding-standard, and verification guidance while preserving Findings-first review output and public Unica MCP routing."
+        },
+        {
+          "skill": "code-search",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted MCP-first search guidance: public unica.* project-index tools come before shell fallback, and fallback reports what was tried."
+        },
+        {
+          "skill": "data-exchange",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted integration, register-design, and architecture guidance for exchange contracts, tenant/external ids, diagnostics, and public Unica MCP routing."
+        },
+        {
+          "skill": "data-separation",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted architecture, core standards, register-design, and integration guidance for tenant boundaries, RLS, rights, and safe query checks."
+        },
+        {
+          "skill": "db-performance",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted performance, DCS, locks-and-transactions, and DBMS evidence guidance with managed locks, lock order, and Unica diagnostics."
+        },
+        {
+          "skill": "img-grid",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Reviewed img-grid-analysis drift; existing Unica local script surface remains valid and no donor-only MCP/tool surface was imported."
+        },
+        {
+          "skill": "integration-implement",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted integrations-add and SDD integration guidance for explicit contracts, idempotency keys, structured logging, secret handling, and public Unica MCP routing."
+        },
+        {
+          "skill": "log-analysis",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted logging-strategy and locks guidance into runtime evidence rules with structured logging fields and lock/deadlock correlation."
+        },
+        {
+          "skill": "platform-help",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted platform-solutions, core standards, and MCP docs guidance to require version/context checks through public unica.standards.* and Unica contract-gap reporting."
+        },
+        {
+          "skill": "query-optimize",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted performance, DCS, and locks guidance for exact query/SKD/DCS extraction, lock-order evidence, and DBMS-aware verification."
+        },
+        {
+          "skill": "release-support",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted extension-patterns, architecture, and verification guidance for support state, compatibility, migration, and release-readiness checks through Unica."
+        },
+        {
+          "skill": "security-auth-crypto",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted core standards, integration, and locks guidance for secrets, TLS/certificate/auth context, rights, tenant boundaries, and safe verification."
+        },
+        {
+          "skill": "test-authoring",
+          "decision": "ported",
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "evidence": "Adapted tester, deploy-and-test, checkmcp, and verification-checklist guidance into Unica runtime/test-runner verification and impact-analysis requirements."
+        }
       ]
     },
     {

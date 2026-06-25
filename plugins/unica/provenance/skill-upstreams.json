@@ -1079,7 +1079,7 @@
         {
           "skill": "api-design",
           "status": "adapted",
-          "notes": "Guidance adapted from ai-rules-1c and rewritten for Unica skill routing through public unica.* MCP tools.",
+          "notes": "Unica-owned skill based on the Infostart \"База по API\" model; ai-rules-1c is tracked only as possible secondary guidance for architecture/MCP-routing ideas.",
           "upstreamPaths": [
             "content/agents/architect.md",
             "content/agents/arch-reviewer.md",
@@ -1091,7 +1091,11 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "primarySource": "unica",
+          "decision": "ignored-with-reason",
+          "decisionReason": "Unica-owned skill; ai-rules-1c changes are secondary guidance only and do not replace the Infostart-based API model."
         },
         {
           "skill": "background-jobs",
@@ -1108,7 +1112,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "bsp-patterns",
@@ -1125,7 +1131,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "code-diagnostics",
@@ -1142,7 +1150,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "code-review",
@@ -1159,7 +1169,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "code-search",
@@ -1175,7 +1187,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "data-exchange",
@@ -1191,7 +1205,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "data-separation",
@@ -1208,7 +1224,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "db-performance",
@@ -1224,7 +1242,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "img-grid",
@@ -1238,7 +1258,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "integration-implement",
@@ -1254,7 +1276,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "log-analysis",
@@ -1270,7 +1294,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "platform-help",
@@ -1286,7 +1312,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "query-optimize",
@@ -1302,7 +1330,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "release-support",
@@ -1318,7 +1348,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "security-auth-crypto",
@@ -1334,7 +1366,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         },
         {
           "skill": "test-authoring",
@@ -1351,7 +1385,9 @@
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
-          ]
+          ],
+          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
+          "decision": "ported"
         }
       ],
       "lastAdaptedLocalCommit": "e5b4eeab4dac92e0c9f60d3f886aa2bb7ef79f80",

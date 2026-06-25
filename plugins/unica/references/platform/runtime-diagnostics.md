@@ -15,6 +15,9 @@ evidence, not from a final exception message alone.
   DBMS trace.
 - Prefer the first causative event over later consequences such as repeated
   retries, transaction rollback, or generic session termination.
+- Structured logging is evidence only when fields can be correlated: event name,
+  timestamp, metadata object, reference, correlation id, tenant/external id,
+  retry count, and sanitized error detail.
 
 ## Analysis Rules
 

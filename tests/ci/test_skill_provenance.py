@@ -117,6 +117,16 @@ class SkillProvenanceTests(unittest.TestCase):
             "e5b4eeab4dac92e0c9f60d3f886aa2bb7ef79f80",
         )
 
+    def test_api_design_is_unica_owned_not_ai_rules_primary_source(self) -> None:
+        data = self.load_provenance()
+        ai_rules = next(item for item in data["upstreams"] if item["id"] == "ai-rules-1c")
+        api_design = next(entry for entry in ai_rules["entries"] if entry["skill"] == "api-design")
+
+        self.assertEqual(api_design["primarySource"], "unica")
+        self.assertEqual(api_design["decision"], "ignored-with-reason")
+        self.assertIn("Unica-owned", api_design["decisionReason"])
+        self.assertIn("secondary guidance", api_design["notes"])
+
     def test_tool_lock_ref_uses_tools_lock_as_single_binary_baseline(self) -> None:
         data = self.load_provenance()
         tool_lock = json.loads(
@@ -237,7 +247,20 @@ class SkillProvenanceTests(unittest.TestCase):
             self.assertIn("EOL", decision["evidence"])
             self.assertIn("donor-only", decision["evidence"])
         self.assertEqual(upstreams["ai-rules-1c"]["commitsSinceBaseline"], 23)
-        self.assertIn("code-search", upstreams["ai-rules-1c"]["affectedEntries"])
+        self.assertEqual(upstreams["ai-rules-1c"]["changedWatchedPathCount"], 0)
+        self.assertEqual(upstreams["ai-rules-1c"]["affectedEntries"], [])
+        self.assertEqual(upstreams["ai-rules-1c"]["reviewStatus"], "reviewed")
+        self.assertIn("api-design", upstreams["ai-rules-1c"]["reviewedEntries"])
+        self.assertNotIn("api-design", upstreams["ai-rules-1c"]["affectedEntries"])
+        ai_rules_decisions = {
+            item["skill"]: item
+            for item in upstreams["ai-rules-1c"]["entryDecisions"]
+        }
+        self.assertEqual(ai_rules_decisions["api-design"]["decision"], "ignored-with-reason")
+        self.assertEqual(ai_rules_decisions["api-design"]["primarySource"], "unica")
+        self.assertIn("Unica-owned", ai_rules_decisions["api-design"]["evidence"])
+        self.assertEqual(ai_rules_decisions["code-search"]["decision"], "ported")
+        self.assertIn("MCP-first", ai_rules_decisions["code-search"]["evidence"])
         self.assertEqual(upstreams["v8-runner-rust"]["commitsSinceBaseline"], 0)
         self.assertEqual(upstreams["v8-runner-rust"]["reviewedCommits"], 3)
         self.assertEqual(upstreams["v8-runner-rust"]["reviewStatus"], "applied")
@@ -484,6 +507,69 @@ class SkillProvenanceTests(unittest.TestCase):
         self.assertEqual(entries["open-skill"]["baseline"], baseline)
         self.assertEqual(entries["open-skill"]["decision"], "needs-review")
         self.assertEqual(report.upstreams[0]["affectedEntries"], ["open-skill"])
+
+    def test_unica_primary_source_entry_can_ignore_secondary_guidance_drift(self) -> None:
+        module = load_upstream_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote"
+            clone = root / "clone"
+            module.run_git(["init", "--bare", str(remote)], cwd=root)
+            module.run_git(["clone", str(remote), str(clone)], cwd=root)
+            module.run_git(["config", "user.email", "test@example.invalid"], cwd=clone)
+            module.run_git(["config", "user.name", "Test User"], cwd=clone)
+            (clone / "api.md").write_text("baseline\n", encoding="utf-8")
+            module.run_git(["add", "api.md"], cwd=clone)
+            module.run_git(["commit", "-m", "baseline"], cwd=clone)
+            baseline = module.git_output(["rev-parse", "HEAD"], cwd=clone)
+            (clone / "api.md").write_text("donor update\n", encoding="utf-8")
+            module.run_git(["commit", "-am", "secondary guidance"], cwd=clone)
+            branch = module.git_output(["branch", "--show-current"], cwd=clone)
+            module.run_git(["push", "origin", "HEAD"], cwd=clone)
+
+            index_path = root / "skill-upstreams.json"
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "upstreams": [
+                            {
+                                "id": "donor",
+                                "repository": str(remote),
+                                "trackingRef": branch,
+                                "role": "guidance",
+                                "baselineCommit": baseline,
+                                "entries": [
+                                    {
+                                        "skill": "api-design",
+                                        "primarySource": "unica",
+                                        "localPaths": [],
+                                        "upstreamPaths": ["api.md"],
+                                        "contractPaths": [],
+                                        "status": "adapted",
+                                        "decision": "ignored-with-reason",
+                                        "decisionReason": "Unica-owned skill; donor update is secondary guidance only.",
+                                        "notes": "Unica-owned skill; donor is secondary guidance only.",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = module.check_upstreams(root, index_path, root / "cache")
+
+        self.assertEqual(report.errors, [])
+        upstream = report.upstreams[0]
+        entry = upstream["entries"][0]
+        self.assertEqual(entry["primarySource"], "unica")
+        self.assertEqual(entry["decision"], "ignored-with-reason")
+        self.assertFalse(entry["upstreamDrift"])
+        self.assertEqual(entry["changedPaths"], [])
+        self.assertEqual(upstream["affectedEntries"], [])
 
     def test_prepare_upstream_review_has_no_checksums(self) -> None:
         module = load_upstream_module()

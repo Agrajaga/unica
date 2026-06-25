@@ -187,6 +187,8 @@ def validate_index(
                 errors.append(f"{entry_label}: baselineCommit must not be set on entries for toolLockRef upstreams")
             if "baselineCommit" in entry and not isinstance(entry.get("baselineCommit"), str):
                 errors.append(f"{entry_label}: baselineCommit must be a string when set")
+            if "primarySource" in entry and not isinstance(entry.get("primarySource"), str):
+                errors.append(f"{entry_label}: primarySource must be a string when set")
 
             for key in ("localPaths", "upstreamPaths", "contractPaths"):
                 if key in entry and not isinstance(entry[key], list):
@@ -285,18 +287,21 @@ def upstream_report(upstream: dict, repo_dir: Path, baseline: str, baseline_sour
             for path in entry_changed_all_paths
             if path_matches(path, entry.get("upstreamPaths", []))
         ]
+        if entry.get("primarySource") == "unica" and entry.get("decision") == "ignored-with-reason":
+            entry_changed_paths = []
         watched_changes_by_path.update(entry_changed_paths)
-        entry_reports.append(
-            {
-                "skill": entry["skill"],
-                "status": entry["status"],
-                "baseline": entry_baseline,
-                "baselineSource": entry_baseline_source,
-                "decision": entry.get("decision", "needs-review" if entry_changed_paths else "ported"),
-                "upstreamDrift": bool(entry_changed_paths),
-                "changedPaths": entry_changed_paths,
-            }
-        )
+        entry_report = {
+            "skill": entry["skill"],
+            "status": entry["status"],
+            "baseline": entry_baseline,
+            "baselineSource": entry_baseline_source,
+            "decision": entry.get("decision", "needs-review" if entry_changed_paths else "ported"),
+            "upstreamDrift": bool(entry_changed_paths),
+            "changedPaths": entry_changed_paths,
+        }
+        if "primarySource" in entry:
+            entry_report["primarySource"] = entry["primarySource"]
+        entry_reports.append(entry_report)
 
     latest_tag = latest_semverish_tag(repo_dir)
     baseline_tag = upstream.get("baselineTag")
