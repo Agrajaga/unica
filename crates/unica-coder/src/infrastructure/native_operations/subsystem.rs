@@ -396,7 +396,7 @@ pub(crate) fn subsystem_edit_add_child(
     }
     let child_xml = child_subs_dir.join(format!("{child_name}.xml"));
     if !child_xml.exists() {
-        write_child_subsystem_stub(&child_xml, &child_name, &model.version, 71)?;
+        write_child_subsystem_stub(&child_xml, &child_name, &model.version)?;
         stdout.push_str(&format!("[INFO] Created stub: {}\n", child_xml.display()));
         artifacts.push(child_xml);
     }
@@ -1497,14 +1497,14 @@ pub(crate) fn compile_subsystem(
                 ));
             }
             let mut seen = Vec::<String>::new();
-            for (idx, child) in children.iter().enumerate() {
+            for child in &children {
                 if seen.iter().any(|value| value == child) {
                     continue;
                 }
                 seen.push(child.clone());
                 let child_xml = child_subs_dir.join(format!("{child}.xml"));
                 if !child_xml.exists() {
-                    write_child_subsystem_stub(&child_xml, child, &format_version, 61 + idx)?;
+                    write_child_subsystem_stub(&child_xml, child, &format_version)?;
                     stdout.push_str(&format!("[OK] Created stub: {}\n", child_xml.display()));
                     artifacts.push(child_xml);
                 }
@@ -1611,17 +1611,14 @@ pub(crate) fn write_child_subsystem_stub(
     child_path: &Path,
     child_name: &str,
     format_version: &str,
-    uuid_index: usize,
 ) -> Result<(), String> {
+    let subsystem_uuid = fresh_uuid();
     let mut lines = Vec::new();
     lines.push("<?xml version=\"1.0\" encoding=\"UTF-8\"?>".to_string());
     lines.push(format!(
         "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" xmlns:app=\"http://v8.1c.ru/8.2/managed-application/core\" xmlns:cfg=\"http://v8.1c.ru/8.1/data/enterprise/current-config\" xmlns:cmi=\"http://v8.1c.ru/8.2/managed-application/cmi\" xmlns:ent=\"http://v8.1c.ru/8.1/data/enterprise\" xmlns:lf=\"http://v8.1c.ru/8.2/managed-application/logform\" xmlns:style=\"http://v8.1c.ru/8.1/data/ui/style\" xmlns:sys=\"http://v8.1c.ru/8.1/data/ui/fonts/system\" xmlns:v8=\"http://v8.1c.ru/8.1/data/core\" xmlns:v8ui=\"http://v8.1c.ru/8.1/data/ui\" xmlns:web=\"http://v8.1c.ru/8.1/data/ui/colors/web\" xmlns:win=\"http://v8.1c.ru/8.1/data/ui/colors/windows\" xmlns:xen=\"http://v8.1c.ru/8.3/xcf/enums\" xmlns:xpr=\"http://v8.1c.ru/8.3/xcf/predef\" xmlns:xr=\"http://v8.1c.ru/8.3/xcf/readable\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" version=\"{format_version}\">"
     ));
-    lines.push(format!(
-        "\t<Subsystem uuid=\"{}\">",
-        stable_uuid(uuid_index)
-    ));
+    lines.push(format!("\t<Subsystem uuid=\"{}\">", subsystem_uuid));
     lines.push("\t\t<Properties>".to_string());
     lines.push(format!("\t\t\t<Name>{}</Name>", escape_xml(child_name)));
     lines.push("\t\t\t<Synonym/>".to_string());
@@ -1824,6 +1821,19 @@ mod tests {
         xml[start..end].to_string()
     }
 
+    fn child_subsystem_uuid(output_dir: &Path, parent: &str, child: &str) -> String {
+        let xml_path = output_dir
+            .join("Subsystems")
+            .join(parent)
+            .join("Subsystems")
+            .join(format!("{child}.xml"));
+        let xml = fs::read_to_string(&xml_path).unwrap();
+        let marker = "<Subsystem uuid=\"";
+        let start = xml.find(marker).unwrap() + marker.len();
+        let end = xml[start..].find('"').unwrap() + start;
+        xml[start..end].to_string()
+    }
+
     #[test]
     fn compile_subsystem_preserves_explicit_uuid() {
         let context = temp_context("explicit-uuid");
@@ -1863,6 +1873,31 @@ mod tests {
 
         let first_uuid = subsystem_uuid(&context.cwd, "GeneratedUuidA");
         let second_uuid = subsystem_uuid(&context.cwd, "GeneratedUuidB");
+        assert_ne!(first_uuid, second_uuid);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn compile_subsystem_generates_unique_child_stub_uuid_when_missing() {
+        let context = temp_context("generated-child-uuid");
+        for (parent, child) in [
+            ("GeneratedParentA", "GeneratedChildA"),
+            ("GeneratedParentB", "GeneratedChildB"),
+        ] {
+            let args = compile_args(
+                &context.cwd,
+                json!({
+                    "name": parent,
+                    "children": [child]
+                }),
+            );
+
+            let outcome = compile_subsystem(&args, &context);
+            assert!(outcome.ok, "{:?}", outcome.errors);
+        }
+
+        let first_uuid = child_subsystem_uuid(&context.cwd, "GeneratedParentA", "GeneratedChildA");
+        let second_uuid = child_subsystem_uuid(&context.cwd, "GeneratedParentB", "GeneratedChildB");
         assert_ne!(first_uuid, second_uuid);
         let _ = fs::remove_dir_all(&context.cwd);
     }
