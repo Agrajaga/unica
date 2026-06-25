@@ -133,6 +133,18 @@ log(...args)               // adds a line to ctx.testInfo's output (goes into JS
 assert.*                   // see "Assertions" below
 ```
 
+### Browser storage
+
+Every `browser.mjs` export is available on `ctx`, including storage helpers for current-origin state:
+
+```js
+await ctx.setStorage('web-test:lastScenario', ctx.testInfo.name);
+ctx.assert.equal(await ctx.getStorage('web-test:lastScenario'), ctx.testInfo.name);
+await ctx.removeStorage('web-test:lastScenario');
+```
+
+Use this only for browser-level state that the 1C web client itself stores. Do not replace application-level setup/cleanup with hidden storage mutations.
+
 ### `ctx.testInfo` (always set, read-only)
 
 ```js

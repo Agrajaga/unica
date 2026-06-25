@@ -751,6 +751,10 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         skill_doc = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
         regress_doc = (skill_dir / "regress.md").read_text(encoding="utf-8")
         run_script = (skill_dir / "scripts" / "run.mjs").read_text(encoding="utf-8")
+        browser_facade = (skill_dir / "scripts" / "browser.mjs").read_text(encoding="utf-8")
+        storage_helper = (skill_dir / "scripts" / "engine" / "storage" / "storage.mjs").read_text(
+            encoding="utf-8"
+        )
 
         required_files = [
             "scripts/cli/commands/test.mjs",
@@ -759,6 +763,7 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             "scripts/cli/test-runner/reporters.mjs",
             "scripts/engine/table/row-fill.mjs",
             "scripts/engine/spreadsheet/spreadsheet.mjs",
+            "scripts/engine/storage/storage.mjs",
             "scripts/dom/grid.mjs",
             "scripts/dom/forms.mjs",
         ]
@@ -774,6 +779,12 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertIn("hasMore", skill_doc)
         self.assertIn("Picture columns", skill_doc)
         self.assertIn("row: { col: val }", skill_doc)
+        self.assertIn("getStorage(key?", skill_doc)
+        self.assertIn("setStorage(key, value", skill_doc)
+        self.assertIn("Browser storage", regress_doc)
+        self.assertIn("page.localStorage", storage_helper)
+        self.assertIn("page.sessionStorage", storage_helper)
+        self.assertIn("getStorage, setStorage, removeStorage, clearStorage", browser_facade)
         self.assertIn("case 'test'", run_script)
 
         for text in [skill_doc, regress_doc]:
