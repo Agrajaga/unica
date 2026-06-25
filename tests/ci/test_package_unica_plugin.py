@@ -313,7 +313,14 @@ class PackageUnicaPluginTests(unittest.TestCase):
                 / "2026-06-15-upstream-review.json"
             )
             self.assertTrue(upstream_review.is_file())
-            self.assertIn("needs-adaptation-decision", upstream_review.read_text(encoding="utf-8"))
+            upstream_review_data = json.loads(upstream_review.read_text(encoding="utf-8"))
+            upstreams = {item["id"]: item for item in upstream_review_data["upstreams"]}
+            ai_rules = upstreams["ai-rules-1c"]
+            self.assertEqual(ai_rules["reviewStatus"], "reviewed")
+            self.assertEqual(ai_rules["affectedEntries"], [])
+            decisions = {item["skill"]: item for item in ai_rules["entryDecisions"]}
+            self.assertEqual(decisions["api-design"]["primarySource"], "unica")
+            self.assertEqual(decisions["api-design"]["decision"], "ignored-with-reason")
             product_backlog = (
                 out_dir
                 / "marketplace"
