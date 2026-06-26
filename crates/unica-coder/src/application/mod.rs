@@ -1978,6 +1978,461 @@ mod tests {
     }
 
     #[test]
+    fn meta_compile_supports_all_documented_pending_types() {
+        struct Case {
+            obj_type: &'static str,
+            name: &'static str,
+            plural: &'static str,
+            json: &'static str,
+            markers: &'static [&'static str],
+            ext_files: &'static [&'static str],
+        }
+
+        let root = temp_meta_compile_workspace("unica-meta-compile-documented-types");
+        let workspace = root.join("workspace");
+        let src = workspace.join("src");
+        let fixtures = workspace.join("fixtures");
+        std::fs::create_dir_all(&fixtures).unwrap();
+
+        let module_json = fixtures.join("event-handlers.json");
+        std::fs::write(
+            &module_json,
+            r#"{
+  "type": "CommonModule",
+  "name": "EventHandlers",
+  "context": "server"
+}"#,
+        )
+        .unwrap();
+        let module_result = call_meta_compile(&workspace, &module_json);
+        assert!(module_result.ok, "{:?}", module_result.stderr);
+        std::fs::write(
+            src.join("CommonModules")
+                .join("EventHandlers")
+                .join("Ext")
+                .join("Module.bsl"),
+            "\u{feff}Procedure RunJob() Export\nEndProcedure\n\nProcedure OnBeforeWrite(Source, Cancel, StandardProcessing) Export\nEndProcedure\n",
+        )
+        .unwrap();
+
+        let cases = [
+            Case {
+                obj_type: "Document",
+                name: "MetaCompileDocument",
+                plural: "Documents",
+                json: r#"{
+  "type": "Document",
+  "name": "MetaCompileDocument",
+  "numberLength": 8,
+  "attributes": ["Partner:CatalogRef.Partners|req,index"],
+  "tabularSections": {"Lines": ["Quantity:Number(10,2)"]}
+}"#,
+                markers: &[
+                    "<Document uuid=\"",
+                    "DocumentObject.MetaCompileDocument",
+                    "<xr:StandardAttribute name=\"Posted\">",
+                    "<Attribute uuid=\"",
+                    "<TabularSection uuid=\"",
+                ],
+                ext_files: &["ObjectModule.bsl"],
+            },
+            Case {
+                obj_type: "InformationRegister",
+                name: "MetaCompileInfoRegister",
+                plural: "InformationRegisters",
+                json: r#"{
+  "type": "InformationRegister",
+  "name": "MetaCompileInfoRegister",
+  "periodicity": "Month",
+  "dimensions": ["Item:CatalogRef.Items|master,index"],
+  "resources": ["Price:Number(15,2)"],
+  "attributes": ["Comment:String(100)"]
+}"#,
+                markers: &[
+                    "<InformationRegister uuid=\"",
+                    "InformationRegisterRecordSet.MetaCompileInfoRegister",
+                    "<InformationRegisterPeriodicity>Month</InformationRegisterPeriodicity>",
+                    "<Dimension uuid=\"",
+                    "<Resource uuid=\"",
+                ],
+                ext_files: &["RecordSetModule.bsl"],
+            },
+            Case {
+                obj_type: "AccumulationRegister",
+                name: "MetaCompileAccumulation",
+                plural: "AccumulationRegisters",
+                json: r#"{
+  "type": "AccumulationRegister",
+  "name": "MetaCompileAccumulation",
+  "registerType": "Balances",
+  "dimensions": ["Warehouse:CatalogRef.Warehouses|index"],
+  "resources": ["Quantity:Number(15,3)"],
+  "attributes": ["Batch:String(40)"]
+}"#,
+                markers: &[
+                    "<AccumulationRegister uuid=\"",
+                    "AccumulationRegisterRecordSet.MetaCompileAccumulation",
+                    "<RegisterType>Balance</RegisterType>",
+                    "<UseInTotals>true</UseInTotals>",
+                ],
+                ext_files: &["RecordSetModule.bsl"],
+            },
+            Case {
+                obj_type: "AccountingRegister",
+                name: "MetaCompileAccounting",
+                plural: "AccountingRegisters",
+                json: r#"{
+  "type": "AccountingRegister",
+  "name": "MetaCompileAccounting",
+  "chartOfAccounts": "ChartOfAccounts.MetaCompileAccounts",
+  "dimensions": ["Department:CatalogRef.Departments"],
+  "resources": ["Amount:Number(15,2)"],
+  "attributes": ["Description:String(50)"]
+}"#,
+                markers: &[
+                    "<AccountingRegister uuid=\"",
+                    "AccountingRegisterExtDimensions.MetaCompileAccounting",
+                    "<ChartOfAccounts>ChartOfAccounts.MetaCompileAccounts</ChartOfAccounts>",
+                    "<Resource uuid=\"",
+                ],
+                ext_files: &["RecordSetModule.bsl"],
+            },
+            Case {
+                obj_type: "CalculationRegister",
+                name: "MetaCompileCalculation",
+                plural: "CalculationRegisters",
+                json: r#"{
+  "type": "CalculationRegister",
+  "name": "MetaCompileCalculation",
+  "chartOfCalculationTypes": "ChartOfCalculationTypes.MetaCompileCalcTypes",
+  "periodicity": "Month",
+  "dimensions": ["Employee:CatalogRef.Employees"],
+  "resources": ["Result:Number(15,2)"],
+  "attributes": ["Comment:String(50)"]
+}"#,
+                markers: &[
+                    "<CalculationRegister uuid=\"",
+                    "CalculationRegisterRecordSet.MetaCompileCalculation",
+                    "<ChartOfCalculationTypes>ChartOfCalculationTypes.MetaCompileCalcTypes</ChartOfCalculationTypes>",
+                    "<Periodicity>Month</Periodicity>",
+                ],
+                ext_files: &["RecordSetModule.bsl"],
+            },
+            Case {
+                obj_type: "ChartOfAccounts",
+                name: "MetaCompileAccounts",
+                plural: "ChartsOfAccounts",
+                json: r#"{
+  "type": "ChartOfAccounts",
+  "name": "MetaCompileAccounts",
+  "extDimensionTypes": "ChartOfCharacteristicTypes.MetaCompileCharacteristics",
+  "accountingFlags": ["Tax"],
+  "extDimensionAccountingFlags": ["Department"],
+  "attributes": ["ExternalCode:String(20)"]
+}"#,
+                markers: &[
+                    "<ChartOfAccounts uuid=\"",
+                    "ChartOfAccountsExtDimensionTypes.MetaCompileAccounts",
+                    "<AccountingFlag uuid=\"",
+                    "<ExtDimensionAccountingFlag uuid=\"",
+                ],
+                ext_files: &["ObjectModule.bsl"],
+            },
+            Case {
+                obj_type: "ChartOfCharacteristicTypes",
+                name: "MetaCompileCharacteristics",
+                plural: "ChartsOfCharacteristicTypes",
+                json: r#"{
+  "type": "ChartOfCharacteristicTypes",
+  "name": "MetaCompileCharacteristics",
+  "valueTypes": ["String(50)", "Number(15,2)"],
+  "attributes": ["Group:String(20)"]
+}"#,
+                markers: &[
+                    "<ChartOfCharacteristicTypes uuid=\"",
+                    "ChartOfCharacteristicTypesCharacteristic.MetaCompileCharacteristics",
+                    "<v8:Type>xs:string</v8:Type>",
+                    "<Attribute uuid=\"",
+                ],
+                ext_files: &["ObjectModule.bsl"],
+            },
+            Case {
+                obj_type: "ChartOfCalculationTypes",
+                name: "MetaCompileCalcTypes",
+                plural: "ChartsOfCalculationTypes",
+                json: r#"{
+  "type": "ChartOfCalculationTypes",
+  "name": "MetaCompileCalcTypes",
+  "dependenceOnCalculationTypes": "OnActionPeriod",
+  "baseCalculationTypes": ["ChartOfCalculationTypes.BaseSalary"],
+  "attributes": ["Kind:String(20)"]
+}"#,
+                markers: &[
+                    "<ChartOfCalculationTypes uuid=\"",
+                    "BaseCalculationTypes.MetaCompileCalcTypes",
+                    "<DependenceOnCalculationTypes>OnActionPeriod</DependenceOnCalculationTypes>",
+                    "<BaseCalculationTypes>",
+                ],
+                ext_files: &["ObjectModule.bsl"],
+            },
+            Case {
+                obj_type: "BusinessProcess",
+                name: "MetaCompileProcess",
+                plural: "BusinessProcesses",
+                json: r#"{
+  "type": "BusinessProcess",
+  "name": "MetaCompileProcess",
+  "task": "Task.MetaCompileTask",
+  "attributes": ["Subject:String(100)"]
+}"#,
+                markers: &[
+                    "<BusinessProcess uuid=\"",
+                    "BusinessProcessRoutePointRef.MetaCompileProcess",
+                    "<Task>Task.MetaCompileTask</Task>",
+                    "<Attribute uuid=\"",
+                ],
+                ext_files: &["ObjectModule.bsl", "Flowchart.xml"],
+            },
+            Case {
+                obj_type: "Task",
+                name: "MetaCompileTask",
+                plural: "Tasks",
+                json: r#"{
+  "type": "Task",
+  "name": "MetaCompileTask",
+  "addressing": "CatalogRef.Users",
+  "mainAddressingAttribute": "Performer",
+  "addressingAttributes": [
+    {"name": "Performer", "type": "CatalogRef.Users", "addressingDimension": "Catalog.Users"}
+  ],
+  "attributes": ["Priority:Number(3,0)"]
+}"#,
+                markers: &[
+                    "<Task uuid=\"",
+                    "TaskObject.MetaCompileTask",
+                    "<AddressingAttribute uuid=\"",
+                    "<MainAddressingAttribute>Performer</MainAddressingAttribute>",
+                ],
+                ext_files: &["ObjectModule.bsl"],
+            },
+            Case {
+                obj_type: "ExchangePlan",
+                name: "MetaCompileExchange",
+                plural: "ExchangePlans",
+                json: r#"{
+  "type": "ExchangePlan",
+  "name": "MetaCompileExchange",
+  "distributedInfoBase": true,
+  "includeConfigurationExtensions": true,
+  "attributes": ["NodeKind:String(20)"]
+}"#,
+                markers: &[
+                    "<ExchangePlan uuid=\"",
+                    "<xr:ThisNode>",
+                    "ExchangePlanObject.MetaCompileExchange",
+                    "<DistributedInfoBase>true</DistributedInfoBase>",
+                ],
+                ext_files: &["ObjectModule.bsl", "Content.xml"],
+            },
+            Case {
+                obj_type: "DocumentJournal",
+                name: "MetaCompileJournal",
+                plural: "DocumentJournals",
+                json: r#"{
+  "type": "DocumentJournal",
+  "name": "MetaCompileJournal",
+  "registeredDocuments": ["Document.MetaCompileDocument"],
+  "columns": [
+    {"name": "Partner", "references": ["Document.MetaCompileDocument"]}
+  ]
+}"#,
+                markers: &[
+                    "<DocumentJournal uuid=\"",
+                    "DocumentJournalManager.MetaCompileJournal",
+                    "<RegisteredDocuments>",
+                    "<Column uuid=\"",
+                    "<References>",
+                ],
+                ext_files: &[],
+            },
+            Case {
+                obj_type: "Report",
+                name: "MetaCompileReport",
+                plural: "Reports",
+                json: r#"{
+  "type": "Report",
+  "name": "MetaCompileReport",
+  "attributes": ["Period:String(20)"],
+  "tabularSections": {"Settings": ["Key:String(40)", "Value:String(100)"]}
+}"#,
+                markers: &[
+                    "<Report uuid=\"",
+                    "ReportObject.MetaCompileReport",
+                    "<UseStandardCommands>true</UseStandardCommands>",
+                    "<TabularSection uuid=\"",
+                ],
+                ext_files: &["ObjectModule.bsl", "ManagerModule.bsl"],
+            },
+            Case {
+                obj_type: "DataProcessor",
+                name: "MetaCompileProcessor",
+                plural: "DataProcessors",
+                json: r#"{
+  "type": "DataProcessor",
+  "name": "MetaCompileProcessor",
+  "attributes": ["FileName:String(260)"],
+  "tabularSections": {"Rows": ["Value:String(100)"]}
+}"#,
+                markers: &[
+                    "<DataProcessor uuid=\"",
+                    "DataProcessorManager.MetaCompileProcessor",
+                    "<UseStandardCommands>false</UseStandardCommands>",
+                    "<Attribute uuid=\"",
+                ],
+                ext_files: &["ObjectModule.bsl", "ManagerModule.bsl"],
+            },
+            Case {
+                obj_type: "ScheduledJob",
+                name: "MetaCompileScheduledJob",
+                plural: "ScheduledJobs",
+                json: r#"{
+  "type": "ScheduledJob",
+  "name": "MetaCompileScheduledJob",
+  "methodName": "EventHandlers.RunJob",
+  "description": "Smoke job",
+  "key": "smoke",
+  "use": true,
+  "predefined": true
+}"#,
+                markers: &[
+                    "<ScheduledJob uuid=\"",
+                    "<MethodName>CommonModule.EventHandlers.RunJob</MethodName>",
+                    "<Use>true</Use>",
+                ],
+                ext_files: &[],
+            },
+            Case {
+                obj_type: "EventSubscription",
+                name: "MetaCompileSubscription",
+                plural: "EventSubscriptions",
+                json: r#"{
+  "type": "EventSubscription",
+  "name": "MetaCompileSubscription",
+  "source": ["DocumentRef.MetaCompileDocument"],
+  "event": "BeforeWrite",
+  "handler": "EventHandlers.OnBeforeWrite"
+}"#,
+                markers: &[
+                    "<EventSubscription uuid=\"",
+                    "<Source>",
+                    "<Event>BeforeWrite</Event>",
+                    "<Handler>CommonModule.EventHandlers.OnBeforeWrite</Handler>",
+                ],
+                ext_files: &[],
+            },
+            Case {
+                obj_type: "HTTPService",
+                name: "MetaCompileHTTP",
+                plural: "HTTPServices",
+                json: r#"{
+  "type": "HTTPService",
+  "name": "MetaCompileHTTP",
+  "rootURL": "meta",
+  "reuseSessions": "AutoUse",
+  "urlTemplates": {
+    "Items": {"template": "/items/{id}", "methods": {"Get": "GET", "Post": "POST"}}
+  }
+}"#,
+                markers: &[
+                    "<HTTPService uuid=\"",
+                    "<RootURL>meta</RootURL>",
+                    "<URLTemplate uuid=\"",
+                    "<Method uuid=\"",
+                    "<HTTPMethod>GET</HTTPMethod>",
+                ],
+                ext_files: &["Module.bsl"],
+            },
+            Case {
+                obj_type: "WebService",
+                name: "MetaCompileWeb",
+                plural: "WebServices",
+                json: r#"{
+  "type": "WebService",
+  "name": "MetaCompileWeb",
+  "namespace": "urn:meta-compile",
+  "reuseSessions": "AutoUse",
+  "operations": {
+    "Ping": {
+      "returnType": "xs:string",
+      "parameters": {"Text": "xs:string"}
+    }
+  }
+}"#,
+                markers: &[
+                    "<WebService uuid=\"",
+                    "<Namespace>urn:meta-compile</Namespace>",
+                    "<Operation uuid=\"",
+                    "<Parameter uuid=\"",
+                    "<ProcedureName>Ping</ProcedureName>",
+                ],
+                ext_files: &["Module.bsl"],
+            },
+        ];
+
+        for case in cases {
+            let json_path = fixtures.join(format!("{}.json", case.name));
+            std::fs::write(&json_path, case.json).unwrap();
+
+            let result = call_meta_compile(&workspace, &json_path);
+            assert!(result.ok, "{} failed: {:?}", case.obj_type, result.stderr);
+
+            let xml_path = src.join(case.plural).join(format!("{}.xml", case.name));
+            assert!(xml_path.is_file(), "missing {}", xml_path.display());
+            let xml = std::fs::read_to_string(&xml_path).unwrap();
+            for marker in case.markers {
+                assert!(
+                    xml.contains(marker),
+                    "{} XML missing marker {}",
+                    case.obj_type,
+                    marker
+                );
+            }
+            let config = std::fs::read_to_string(src.join("Configuration.xml")).unwrap();
+            assert!(
+                config.contains(&format!(
+                    "<{}>{}</{}>",
+                    case.obj_type, case.name, case.obj_type
+                )),
+                "Configuration.xml missing {}.{}",
+                case.obj_type,
+                case.name
+            );
+            for ext_file in case.ext_files {
+                let ext_path = src
+                    .join(case.plural)
+                    .join(case.name)
+                    .join("Ext")
+                    .join(ext_file);
+                assert!(ext_path.is_file(), "missing {}", ext_path.display());
+            }
+
+            let validate = call_meta_validate(
+                &workspace,
+                &format!("src/{}/{}.xml", case.plural, case.name),
+            );
+            assert!(
+                validate.ok,
+                "{} failed validation: {:?}\n{}",
+                case.obj_type,
+                validate.errors,
+                validate.stdout.unwrap_or_default()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn help_add_routes_through_unica_and_creates_help_files() {
         let root = std::env::temp_dir().join(format!("unica-help-add-{}", std::process::id()));
         let workspace = root.join("workspace");
@@ -2164,6 +2619,21 @@ mod tests {
         args.insert("OutputDir".to_string(), Value::String("src".to_string()));
         UnicaApplication::new()
             .call_tool("unica.meta.compile", &args)
+            .unwrap()
+    }
+
+    fn call_meta_validate(workspace: &std::path::Path, object_path: &str) -> OperationResult {
+        let mut args = Map::new();
+        args.insert(
+            "cwd".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        args.insert(
+            "ObjectPath".to_string(),
+            Value::String(object_path.to_string()),
+        );
+        UnicaApplication::new()
+            .call_tool("unica.meta.validate", &args)
             .unwrap()
     }
 
