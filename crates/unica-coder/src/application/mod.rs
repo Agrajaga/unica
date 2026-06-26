@@ -1288,6 +1288,7 @@ mod tests {
     use super::*;
     use crate::infrastructure::legacy_scripts::legacy_script_path;
     use serde_json::Map;
+    use std::collections::HashSet;
 
     #[test]
     fn lists_unica_orchestrator_scope() {
@@ -1841,7 +1842,7 @@ mod tests {
         let xml_path = src.join("Constants").join("DemoFlag.xml");
         assert!(xml_path.is_file());
         let xml = std::fs::read_to_string(&xml_path).unwrap();
-        assert!(xml.contains("<Constant uuid=\"00000000-0000-0000-0000-000000000001\">"));
+        assert_valid_root_uuid(&xml, "Constant");
         assert!(xml.contains("<Name>DemoFlag</Name>"));
         assert!(xml.contains("<v8:Type>xs:boolean</v8:Type>"));
         assert!(xml.contains("ConstantManager.DemoFlag"));
@@ -1915,7 +1916,7 @@ mod tests {
         assert!(xml_path.is_file());
         assert!(module_path.is_file());
         let xml = std::fs::read_to_string(&xml_path).unwrap();
-        assert!(xml.contains("<CommonModule uuid=\"00000000-0000-0000-0000-000000000001\">"));
+        assert_valid_root_uuid(&xml, "CommonModule");
         assert!(xml.contains("<Server>true</Server>"));
         assert!(xml.contains("<ServerCall>true</ServerCall>"));
         assert!(xml.contains("<ClientManagedApplication>false</ClientManagedApplication>"));
@@ -1967,12 +1968,45 @@ mod tests {
         assert!(enum_xml.contains("<Name>Closed</Name>"));
         let defined_xml =
             std::fs::read_to_string(src.join("DefinedTypes").join("DemoValue.xml")).unwrap();
-        assert!(defined_xml.contains("<DefinedType uuid=\"00000000-0000-0000-0000-000000000001\">"));
+        assert_valid_root_uuid(&defined_xml, "DefinedType");
         assert!(defined_xml.contains("<v8:Type>xs:string</v8:Type>"));
         assert!(defined_xml.contains("<v8:Type>cfg:CatalogRef.Products</v8:Type>"));
         let config = std::fs::read_to_string(src.join("Configuration.xml")).unwrap();
         assert!(config.contains("<Enum>DemoStatuses</Enum>"));
         assert!(config.contains("<DefinedType>DemoValue</DefinedType>"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn meta_compile_event_subscription_uses_documented_object_source_type() {
+        let root = temp_meta_compile_workspace("unica-meta-compile-event-source");
+        let workspace = root.join("workspace");
+        let src = workspace.join("src");
+        let fixtures = workspace.join("fixtures");
+        std::fs::create_dir_all(&fixtures).unwrap();
+        let json_path = fixtures.join("event-subscription.json");
+        std::fs::write(
+            &json_path,
+            r#"{
+  "type": "EventSubscription",
+  "name": "BeforeDocumentWrite",
+  "source": ["DocumentObject.SalesOrder"],
+  "event": "BeforeWrite",
+  "handler": "EventHandlers.OnBeforeWrite"
+}"#,
+        )
+        .unwrap();
+
+        let result = call_meta_compile(&workspace, &json_path);
+
+        assert!(result.ok, "{:?}", result.stderr);
+        let xml = std::fs::read_to_string(
+            src.join("EventSubscriptions")
+                .join("BeforeDocumentWrite.xml"),
+        )
+        .unwrap();
+        assert!(xml.contains("<v8:Type>cfg:DocumentObject.SalesOrder</v8:Type>"));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2318,13 +2352,14 @@ mod tests {
                 json: r#"{
   "type": "EventSubscription",
   "name": "MetaCompileSubscription",
-  "source": ["DocumentRef.MetaCompileDocument"],
+  "source": ["DocumentObject.MetaCompileDocument"],
   "event": "BeforeWrite",
   "handler": "EventHandlers.OnBeforeWrite"
 }"#,
                 markers: &[
                     "<EventSubscription uuid=\"",
                     "<Source>",
+                    "<v8:Type>cfg:DocumentObject.MetaCompileDocument</v8:Type>",
                     "<Event>BeforeWrite</Event>",
                     "<Handler>CommonModule.EventHandlers.OnBeforeWrite</Handler>",
                 ],
@@ -2379,6 +2414,8 @@ mod tests {
             },
         ];
 
+        let mut root_uuids = HashSet::new();
+
         for case in cases {
             let json_path = fixtures.join(format!("{}.json", case.name));
             std::fs::write(&json_path, case.json).unwrap();
@@ -2389,6 +2426,13 @@ mod tests {
             let xml_path = src.join(case.plural).join(format!("{}.xml", case.name));
             assert!(xml_path.is_file(), "missing {}", xml_path.display());
             let xml = std::fs::read_to_string(&xml_path).unwrap();
+            let root_uuid = metadata_root_uuid(&xml, case.obj_type);
+            assert!(
+                root_uuids.insert(root_uuid.clone()),
+                "duplicate root uuid {root_uuid} for {}.{}",
+                case.obj_type,
+                case.name
+            );
             for marker in case.markers {
                 assert!(
                     xml.contains(marker),
@@ -2635,6 +2679,27 @@ mod tests {
         UnicaApplication::new()
             .call_tool("unica.meta.validate", &args)
             .unwrap()
+    }
+
+    fn assert_valid_root_uuid(xml: &str, tag_name: &str) {
+        let uuid = metadata_root_uuid(xml, tag_name);
+        assert!(
+            crate::infrastructure::native_operations::meta::is_guid(&uuid),
+            "{tag_name} root uuid is invalid: {uuid}"
+        );
+    }
+
+    fn metadata_root_uuid(xml: &str, tag_name: &str) -> String {
+        let marker = format!("<{tag_name} uuid=\"");
+        let start = xml
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing root marker {marker}"))
+            + marker.len();
+        let end = xml[start..]
+            .find('"')
+            .unwrap_or_else(|| panic!("{tag_name} root uuid is not terminated"))
+            + start;
+        xml[start..end].to_string()
     }
 
     #[test]

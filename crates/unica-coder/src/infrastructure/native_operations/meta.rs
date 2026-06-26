@@ -8,12 +8,33 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::common::*;
 use super::{
     cf::*, cfe::*, form::*, interface::*, mxl::*, role::*, skd::*, subsystem::*, template::*,
 };
+
+static META_COMPILE_UUID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn fresh_meta_compile_uuid() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let sequence = META_COMPILE_UUID_SEQUENCE.fetch_add(1, Ordering::Relaxed) as u128;
+    let hex = format!("{:032x}", nanos.wrapping_add(sequence));
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
 #[derive(Clone)]
 pub(crate) struct MetaInfoAttr<'a, 'input> {
     pub(crate) name: String,
@@ -4565,7 +4586,8 @@ pub(crate) fn compile_meta(
                 .map_err(|err| format!("failed to create {}: {err}", obj_sub_dir.display()))?;
         }
         let format_version = detect_format_version(&output_dir);
-        let metadata_xml = meta_compile_object_xml(object, &obj_type, obj_name, &format_version)?;
+        let (metadata_xml, uid) =
+            meta_compile_object_xml(object, &obj_type, obj_name, &format_version)?;
         write_utf8_bom(&main_xml_path, &metadata_xml)?;
 
         let mut artifacts = vec![main_xml_path.clone()];
@@ -4617,7 +4639,6 @@ pub(crate) fn compile_meta(
             .get("columns")
             .and_then(Value::as_array)
             .map_or(0, Vec::len);
-        let uid = "00000000-0000-0000-0000-000000000001";
         let mut stdout = format!(
             "[OK] {obj_type} '{obj_name}' compiled\n     UUID: {uid}\n     File: {}/{type_plural}/{obj_name}.xml\n",
             output_dir_label.trim_end_matches(['/', '\\'])
@@ -4748,17 +4769,12 @@ pub(crate) fn meta_compile_object_xml(
     obj_type: &str,
     obj_name: &str,
     format_version: &str,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     if obj_type == "Catalog" {
         return meta_compile_catalog_xml(defn, obj_name, format_version);
     }
 
-    let mut uuid_counter = 1usize;
-    let mut next_uuid = || {
-        let uuid = stable_uuid(uuid_counter);
-        uuid_counter += 1;
-        uuid
-    };
+    let mut next_uuid = fresh_meta_compile_uuid;
     let obj_uuid = next_uuid();
     let synonym = meta_compile_synonym(defn, obj_name);
 
@@ -4842,20 +4858,15 @@ pub(crate) fn meta_compile_object_xml(
 
     lines.push(format!("\t</{obj_type}>"));
     lines.push("</MetaDataObject>".to_string());
-    Ok(format!("{}\n", lines.join("\n")))
+    Ok((format!("{}\n", lines.join("\n")), obj_uuid))
 }
 
 pub(crate) fn meta_compile_catalog_xml(
     defn: &Map<String, Value>,
     obj_name: &str,
     format_version: &str,
-) -> Result<String, String> {
-    let mut uuid_counter = 1usize;
-    let mut next_uuid = || {
-        let uuid = stable_uuid(uuid_counter);
-        uuid_counter += 1;
-        uuid
-    };
+) -> Result<(String, String), String> {
+    let mut next_uuid = fresh_meta_compile_uuid;
     let obj_uuid = next_uuid();
     let synonym = defn
         .get("synonym")
@@ -4899,7 +4910,7 @@ pub(crate) fn meta_compile_catalog_xml(
 
     lines.push("\t</Catalog>".to_string());
     lines.push("</MetaDataObject>".to_string());
-    Ok(format!("{}\n", lines.join("\n")))
+    Ok((format!("{}\n", lines.join("\n")), obj_uuid))
 }
 
 pub(crate) fn meta_xmlns_decl() -> &'static str {
@@ -7941,14 +7952,24 @@ pub(crate) fn emit_meta_type_content(lines: &mut Vec<String>, indent: &str, type
 pub(crate) fn meta_compile_is_config_type(type_name: &str) -> bool {
     [
         "CatalogRef.",
+        "CatalogObject.",
         "DocumentRef.",
+        "DocumentObject.",
         "EnumRef.",
         "ChartOfAccountsRef.",
+        "ChartOfAccountsObject.",
         "ChartOfCharacteristicTypesRef.",
+        "ChartOfCharacteristicTypesObject.",
         "ChartOfCalculationTypesRef.",
+        "ChartOfCalculationTypesObject.",
         "ExchangePlanRef.",
+        "ExchangePlanObject.",
         "BusinessProcessRef.",
+        "BusinessProcessObject.",
         "TaskRef.",
+        "TaskObject.",
+        "ReportObject.",
+        "DataProcessorObject.",
         "DefinedType.",
     ]
     .iter()
