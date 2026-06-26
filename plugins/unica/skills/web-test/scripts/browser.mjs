@@ -29,6 +29,11 @@ export {
   openCommand, switchTab, openFile, navigateLink,
 } from './engine/nav/navigation.mjs';
 
+// ── storage ───────────────────────────────────────────────────────────────
+export {
+  getStorage, setStorage, removeStorage, clearStorage,
+} from './engine/storage/storage.mjs';
+
 // ── forms ─────────────────────────────────────────────────────────────────
 export { selectValue } from './engine/forms/select-value.mjs';
 export { fillFields, fillField } from './engine/forms/fill.mjs';

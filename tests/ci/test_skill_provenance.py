@@ -117,6 +117,16 @@ class SkillProvenanceTests(unittest.TestCase):
             "e5b4eeab4dac92e0c9f60d3f886aa2bb7ef79f80",
         )
 
+    def test_api_design_is_unica_owned_not_ai_rules_primary_source(self) -> None:
+        data = self.load_provenance()
+        ai_rules = next(item for item in data["upstreams"] if item["id"] == "ai-rules-1c")
+        api_design = next(entry for entry in ai_rules["entries"] if entry["skill"] == "api-design")
+
+        self.assertEqual(api_design["primarySource"], "unica")
+        self.assertEqual(api_design["decision"], "ignored-with-reason")
+        self.assertIn("Unica-owned", api_design["decisionReason"])
+        self.assertIn("secondary guidance", api_design["notes"])
+
     def test_tool_lock_ref_uses_tools_lock_as_single_binary_baseline(self) -> None:
         data = self.load_provenance()
         tool_lock = json.loads(
@@ -133,7 +143,7 @@ class SkillProvenanceTests(unittest.TestCase):
         self.assertEqual(locked_tools["v8-runner"]["sourceTag"], "v0.5.1")
         self.assertEqual(locked_tools["v8-runner"]["sourceCommit"], "ad72f64222ab0a7e6dfd391adb437a956c0a2428")
 
-    def test_rlm_tools_are_locked_to_reviewed_1_24_0_pair(self) -> None:
+    def test_rlm_tools_are_locked_to_reviewed_1_25_0_pair(self) -> None:
         tool_lock = json.loads(
             (self.repo_root() / "plugins" / "unica" / "third-party" / "tools.lock.json").read_text(
                 encoding="utf-8"
@@ -142,14 +152,14 @@ class SkillProvenanceTests(unittest.TestCase):
         locked_tools = {tool["name"]: tool for tool in tool_lock["tools"]}
 
         for name in ("rlm-tools-bsl", "rlm-bsl-index"):
-            self.assertEqual(locked_tools[name]["version"], "1.24.0")
-            self.assertEqual(locked_tools[name]["sourceTag"], "v1.24.0")
+            self.assertEqual(locked_tools[name]["version"], "1.25.0")
+            self.assertEqual(locked_tools[name]["sourceTag"], "v1.25.0")
             self.assertEqual(
                 locked_tools[name]["sourceCommit"],
-                "28695871516319a8678f397244cb9ce3b20abfdb",
+                "3da3ca8ea27e1b893283e5053a7158765f3a01c6",
             )
 
-    def test_bsl_analyzer_is_locked_to_reviewed_0_2_37(self) -> None:
+    def test_bsl_analyzer_is_locked_to_reviewed_0_2_48(self) -> None:
         tool_lock = json.loads(
             (self.repo_root() / "plugins" / "unica" / "third-party" / "tools.lock.json").read_text(
                 encoding="utf-8"
@@ -157,11 +167,11 @@ class SkillProvenanceTests(unittest.TestCase):
         )
         locked_tools = {tool["name"]: tool for tool in tool_lock["tools"]}
 
-        self.assertEqual(locked_tools["bsl-analyzer"]["version"], "0.2.37")
-        self.assertEqual(locked_tools["bsl-analyzer"]["sourceTag"], "v0.2.37")
+        self.assertEqual(locked_tools["bsl-analyzer"]["version"], "0.2.48")
+        self.assertEqual(locked_tools["bsl-analyzer"]["sourceTag"], "v0.2.48")
         self.assertEqual(
             locked_tools["bsl-analyzer"]["sourceCommit"],
-            "a59fb3e2cc11e822723e2e42257f64d92267c084",
+            "12cce48b47999ff46c9afc01aec3b7cc438b63fc",
         )
 
     def test_all_local_and_contract_paths_exist(self) -> None:
@@ -199,225 +209,58 @@ class SkillProvenanceTests(unittest.TestCase):
 
         self.assertNotIn("sha256", payload)
         self.assertNotIn("Digest", payload)
-        self.assertEqual(review["lastRefreshedAt"], "2026-06-22")
+        self.assertEqual(review["lastRefreshedAt"], "2026-06-26")
         self.assertEqual(
             upstreams["cc-1c-skills"]["targetCommit"],
-            "3d36c2026916d2ae8915f0aca0836d55e1ccaabe",
+            "cbde49efdaeec190432fdf4a53201a87e83c69de",
         )
-        self.assertEqual(upstreams["cc-1c-skills"]["commitsSinceBaseline"], 564)
+        self.assertEqual(upstreams["cc-1c-skills"]["commitsSinceBaseline"], 589)
         self.assertEqual(upstreams["cc-1c-skills"]["changedWatchedPathCount"], 0)
         self.assertEqual(upstreams["cc-1c-skills"]["affectedEntries"], [])
-        self.assertNotIn("web-test", upstreams["cc-1c-skills"]["affectedEntries"])
-        self.assertNotIn("help-add", upstreams["cc-1c-skills"]["affectedEntries"])
-        for skill in (
-            "cf-edit",
-            "cf-info",
-            "cf-init",
-            "cf-validate",
-            "cfe-borrow",
-            "cfe-diff",
-            "cfe-init",
-            "cfe-patch-method",
-            "cfe-validate",
-            "form-add",
-            "form-compile",
-            "form-edit",
-            "form-info",
-            "img-grid",
-            "interface-edit",
-            "interface-validate",
-            "meta-compile",
-            "meta-edit",
-            "meta-info",
-            "meta-remove",
-            "meta-validate",
-            "mxl-compile",
-            "mxl-decompile",
-            "mxl-info",
-            "mxl-validate",
-            "role-compile",
-            "role-info",
-            "role-validate",
-            "skd-compile",
-            "skd-edit",
-            "skd-info",
-            "subsystem-info",
-            "subsystem-compile",
-            "subsystem-edit",
-            "subsystem-validate",
-            "template-add",
-            "template-remove",
-            "skd-validate",
-            "form-patterns",
-            "form-remove",
-            "form-validate",
-        ):
-            self.assertNotIn(skill, upstreams["cc-1c-skills"]["affectedEntries"])
-        self.assertIn("web-test", upstreams["cc-1c-skills"]["reviewedEntries"])
-        for skill in (
-            "skd-compile",
-            "skd-edit",
-            "skd-info",
-            "skd-validate",
-            "form-add",
-            "form-compile",
-            "form-edit",
-            "form-info",
-            "form-patterns",
-            "form-remove",
-            "form-validate",
-            "cf-init",
-            "cf-validate",
-            "cfe-borrow",
-            "cfe-diff",
-            "cfe-init",
-            "cfe-patch-method",
-            "cfe-validate",
-            "img-grid",
-            "interface-validate",
-            "meta-validate",
-            "help-add",
-            "mxl-decompile",
-            "mxl-validate",
-            "role-validate",
-            "subsystem-validate",
-        ):
-            self.assertIn(skill, upstreams["cc-1c-skills"]["reviewedEntries"])
-        web_test_decision = next(
-            item
+        target = "cbde49efdaeec190432fdf4a53201a87e83c69de"
+        functional_skills = {"web-test", "cfe-borrow", "cfe-init", "form-validate"}
+        decisions = {
+            item["skill"]: item
             for item in upstreams["cc-1c-skills"]["entryDecisions"]
-            if item["skill"] == "web-test"
-        )
-        self.assertEqual(web_test_decision["decision"], "ported")
-        for skill in (
-            "skd-compile",
-            "skd-edit",
-            "skd-info",
-            "skd-validate",
-            "form-add",
-            "form-compile",
-            "form-edit",
-            "form-info",
-            "form-patterns",
-            "form-remove",
-            "form-validate",
-            "meta-compile",
-            "meta-edit",
-            "meta-info",
-            "meta-remove",
-            "meta-validate",
-            "cf-info",
-            "cf-edit",
-            "cf-init",
-            "cf-validate",
-            "cfe-borrow",
-            "cfe-diff",
-            "cfe-init",
-            "cfe-patch-method",
-            "cfe-validate",
-            "img-grid",
-            "interface-validate",
-            "mxl-info",
-            "mxl-compile",
-            "mxl-decompile",
-            "mxl-validate",
-            "role-info",
-            "role-compile",
-            "role-validate",
-            "subsystem-info",
-            "subsystem-compile",
-            "subsystem-edit",
-            "subsystem-validate",
-            "interface-edit",
-            "template-add",
-            "template-remove",
-            "help-add",
-        ):
-            decision = next(
-                item
-                for item in upstreams["cc-1c-skills"]["entryDecisions"]
-                if item["skill"] == skill
-            )
-            if skill in (
-                "cf-init",
-                "cf-validate",
-                "cfe-borrow",
-                "cfe-diff",
-                "cfe-init",
-                "cfe-patch-method",
-                "cfe-validate",
-                "img-grid",
-                "interface-validate",
-                "mxl-decompile",
-                "mxl-validate",
-                "role-validate",
-                "subsystem-validate",
-                "template-remove",
-            ):
-                self.assertEqual(decision["decision"], "ignored-with-reason")
-                self.assertIn("raw", decision["evidence"])
-            else:
-                self.assertEqual(decision["decision"], "ported")
-            if skill in (
-                "cf-edit",
-                "form-add",
-                "form-compile",
-                "form-edit",
-                "interface-edit",
-                "meta-compile",
-                "meta-edit",
-                "meta-remove",
-                "mxl-compile",
-                "role-compile",
-                "skd-compile",
-                "skd-edit",
-                "subsystem-compile",
-                "subsystem-edit",
-                "template-add",
-                "template-remove",
-                "cf-init",
-                "cf-validate",
-                "cfe-borrow",
-                "cfe-diff",
-                "cfe-init",
-                "cfe-patch-method",
-                "cfe-validate",
-                "img-grid",
-                "interface-validate",
-                "meta-validate",
-                "help-add",
-                "mxl-decompile",
-                "mxl-validate",
-                "role-validate",
-                "subsystem-validate",
-            ):
-                self.assertEqual(
-                    decision["baselineCommit"],
-                    "3d36c2026916d2ae8915f0aca0836d55e1ccaabe",
-                )
-                if skill == "meta-validate":
-                    self.assertIn("batch", decision["evidence"])
-                elif skill == "help-add":
-                    self.assertIn("unica.help.add", decision["evidence"])
-                    self.assertIn("support guard", decision["evidence"])
-                elif decision["decision"] == "ported":
-                    self.assertIn("support-guard", decision["evidence"])
-            if skill in (
-                "cf-info",
-                "form-info",
-                "meta-info",
-                "mxl-info",
-                "role-info",
-                "skd-info",
-                "subsystem-info",
-            ):
-                self.assertEqual(
-                    decision["baselineCommit"],
-                    "3d36c2026916d2ae8915f0aca0836d55e1ccaabe",
-                )
-                self.assertIn("support-state", decision["evidence"])
+        }
+
+        self.assertGreaterEqual(len(decisions), 40)
+        for skill in functional_skills:
+            self.assertIn(skill, upstreams["cc-1c-skills"]["reviewedEntries"])
+            self.assertEqual(decisions[skill]["decision"], "ported")
+            self.assertEqual(decisions[skill]["baselineCommit"], target)
+
+        self.assertIn("visibleSample", decisions["web-test"]["evidence"])
+        self.assertIn("BorrowMainAttribute", decisions["cfe-borrow"]["evidence"])
+        self.assertIn("MDClasses format version", decisions["cfe-init"]["evidence"])
+        self.assertIn("type_error_count", decisions["form-validate"]["evidence"])
+
+        ignored_skills = set(decisions) - functional_skills
+        self.assertIn("cf-edit", ignored_skills)
+        self.assertIn("epf-bsp-init", ignored_skills)
+        self.assertIn("help-add", ignored_skills)
+        for skill in ignored_skills:
+            decision = decisions[skill]
+            self.assertIn(skill, upstreams["cc-1c-skills"]["reviewedEntries"])
+            self.assertEqual(decision["decision"], "ignored-with-reason")
+            self.assertEqual(decision["baselineCommit"], target)
+            self.assertIn("EOL", decision["evidence"])
+            self.assertIn("donor-only", decision["evidence"])
         self.assertEqual(upstreams["ai-rules-1c"]["commitsSinceBaseline"], 23)
-        self.assertIn("code-search", upstreams["ai-rules-1c"]["affectedEntries"])
+        self.assertEqual(upstreams["ai-rules-1c"]["changedWatchedPathCount"], 0)
+        self.assertEqual(upstreams["ai-rules-1c"]["affectedEntries"], [])
+        self.assertEqual(upstreams["ai-rules-1c"]["reviewStatus"], "reviewed")
+        self.assertIn("api-design", upstreams["ai-rules-1c"]["reviewedEntries"])
+        self.assertNotIn("api-design", upstreams["ai-rules-1c"]["affectedEntries"])
+        ai_rules_decisions = {
+            item["skill"]: item
+            for item in upstreams["ai-rules-1c"]["entryDecisions"]
+        }
+        self.assertEqual(ai_rules_decisions["api-design"]["decision"], "ignored-with-reason")
+        self.assertEqual(ai_rules_decisions["api-design"]["primarySource"], "unica")
+        self.assertIn("Unica-owned", ai_rules_decisions["api-design"]["evidence"])
+        self.assertEqual(ai_rules_decisions["code-search"]["decision"], "ported")
+        self.assertIn("MCP-first", ai_rules_decisions["code-search"]["evidence"])
         self.assertEqual(upstreams["v8-runner-rust"]["commitsSinceBaseline"], 0)
         self.assertEqual(upstreams["v8-runner-rust"]["reviewedCommits"], 3)
         self.assertEqual(upstreams["v8-runner-rust"]["reviewStatus"], "applied")
@@ -428,23 +271,26 @@ class SkillProvenanceTests(unittest.TestCase):
         backlog = self.load_product_backlog()
         products = {item["id"]: item for item in backlog["products"]}
 
-        self.assertEqual(backlog["generatedAt"], "2026-06-21")
-        self.assertEqual(products["bsl-analyzer"]["locked"], "v0.2.37")
-        self.assertEqual(products["bsl-analyzer"]["latest"], "v0.2.43")
-        self.assertEqual(products["bsl-analyzer"]["status"], "needs-review")
-        self.assertEqual(products["rlm-tools-bsl"]["locked"], "v1.24.0")
-        self.assertEqual(products["rlm-tools-bsl"]["latest"], "v1.24.0")
+        self.assertEqual(backlog["generatedAt"], "2026-06-26")
+        self.assertEqual(products["bsl-analyzer"]["locked"], "v0.2.48")
+        self.assertEqual(products["bsl-analyzer"]["latest"], "v0.2.48")
+        self.assertEqual(products["bsl-analyzer"]["status"], "applied")
+        self.assertEqual(products["rlm-tools-bsl"]["locked"], "v1.25.0")
+        self.assertEqual(products["rlm-tools-bsl"]["latest"], "v1.25.0")
         self.assertEqual(products["rlm-tools-bsl"]["status"], "applied")
-        self.assertEqual(products["rlm-bsl-index"]["locked"], "v1.24.0")
-        self.assertEqual(products["rlm-bsl-index"]["latest"], "v1.24.0")
+        self.assertEqual(products["rlm-bsl-index"]["locked"], "v1.25.0")
+        self.assertEqual(products["rlm-bsl-index"]["latest"], "v1.25.0")
         self.assertEqual(products["rlm-bsl-index"]["status"], "applied")
         self.assertEqual(products["v8-runner"]["locked"], "v0.5.1")
         self.assertEqual(products["v8-runner"]["latest"], "v0.5.1")
         self.assertEqual(products["v8-runner"]["status"], "applied")
-        self.assertEqual(products["playwright"]["latest"], "1.61.0")
+        self.assertEqual(products["playwright"]["locked"], "1.61.1")
+        self.assertEqual(products["playwright"]["latest"], "1.61.1")
         self.assertEqual(products["lxml"]["latest"], "6.1.1")
-        self.assertEqual(products["rust-compatible-lock-updates"]["updateCount"], 2)
-        self.assertEqual(products["rust-compatible-lock-updates"]["status"], "needs-review")
+        self.assertEqual(products["rust-compatible-lock-updates"]["updateCount"], 4)
+        self.assertEqual(products["rust-compatible-lock-updates"]["status"], "applied")
+        self.assertEqual(products["serde-yaml-replacement"]["status"], "deferred")
+        self.assertEqual(products["ureq-3"]["status"], "deferred")
         self.assertTrue(products["bsl-analyzer"]["contractGate"])
         self.assertTrue(products["rlm-bsl-index"]["contractGate"])
 
@@ -661,6 +507,69 @@ class SkillProvenanceTests(unittest.TestCase):
         self.assertEqual(entries["open-skill"]["baseline"], baseline)
         self.assertEqual(entries["open-skill"]["decision"], "needs-review")
         self.assertEqual(report.upstreams[0]["affectedEntries"], ["open-skill"])
+
+    def test_unica_primary_source_entry_can_ignore_secondary_guidance_drift(self) -> None:
+        module = load_upstream_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote"
+            clone = root / "clone"
+            module.run_git(["init", "--bare", str(remote)], cwd=root)
+            module.run_git(["clone", str(remote), str(clone)], cwd=root)
+            module.run_git(["config", "user.email", "test@example.invalid"], cwd=clone)
+            module.run_git(["config", "user.name", "Test User"], cwd=clone)
+            (clone / "api.md").write_text("baseline\n", encoding="utf-8")
+            module.run_git(["add", "api.md"], cwd=clone)
+            module.run_git(["commit", "-m", "baseline"], cwd=clone)
+            baseline = module.git_output(["rev-parse", "HEAD"], cwd=clone)
+            (clone / "api.md").write_text("donor update\n", encoding="utf-8")
+            module.run_git(["commit", "-am", "secondary guidance"], cwd=clone)
+            branch = module.git_output(["branch", "--show-current"], cwd=clone)
+            module.run_git(["push", "origin", "HEAD"], cwd=clone)
+
+            index_path = root / "skill-upstreams.json"
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "upstreams": [
+                            {
+                                "id": "donor",
+                                "repository": str(remote),
+                                "trackingRef": branch,
+                                "role": "guidance",
+                                "baselineCommit": baseline,
+                                "entries": [
+                                    {
+                                        "skill": "api-design",
+                                        "primarySource": "unica",
+                                        "localPaths": [],
+                                        "upstreamPaths": ["api.md"],
+                                        "contractPaths": [],
+                                        "status": "adapted",
+                                        "decision": "ignored-with-reason",
+                                        "decisionReason": "Unica-owned skill; donor update is secondary guidance only.",
+                                        "notes": "Unica-owned skill; donor is secondary guidance only.",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = module.check_upstreams(root, index_path, root / "cache")
+
+        self.assertEqual(report.errors, [])
+        upstream = report.upstreams[0]
+        entry = upstream["entries"][0]
+        self.assertEqual(entry["primarySource"], "unica")
+        self.assertEqual(entry["decision"], "ignored-with-reason")
+        self.assertFalse(entry["upstreamDrift"])
+        self.assertEqual(entry["changedPaths"], [])
+        self.assertEqual(upstream["affectedEntries"], [])
 
     def test_prepare_upstream_review_has_no_checksums(self) -> None:
         module = load_upstream_module()

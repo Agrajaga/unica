@@ -231,6 +231,20 @@ Commands of the current section.
 #### `getPageState()` → `{ activeSection, activeTab, sections, tabs }`
 Sections + all open tabs.
 
+### Browser storage
+
+#### `getStorage(key?, { kind: 'local' | 'session' })` → `string | null | Array<{ name, value }>`
+Read browser WebStorage for the current origin. Default `kind` is `'local'`; use `'session'` for `sessionStorage`.
+```js
+await setStorage('web-test:scenario', 'order-create');
+const current = await getStorage('web-test:scenario');
+const allLocalItems = await getStorage();
+const allSessionItems = await getStorage({ kind: 'session' });
+```
+
+#### `setStorage(key, value, { kind? })` / `removeStorage(key, { kind? })` / `clearStorage({ kind? })`
+Write, remove, or clear `localStorage` / `sessionStorage` through Playwright WebStorage APIs.
+
 ### Actions
 
 **Return shape convention.** All action functions return a **flat form state** (same shape as `getFormState()`) with action-specific extras: `clicked`, `focused`, `selected`, `filled`, `notFilled`, `closed`, `opened`, `navigated`, `deleted`, `filtered`, `unfiltered`. Errors always sit at the top level under `.errors` (when present) — the exec-wrapper automatically throws on `.errors.modal` / `.errors.balloon`.

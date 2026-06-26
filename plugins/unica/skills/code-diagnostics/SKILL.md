@@ -23,6 +23,18 @@ description: "Диагностика BSL и объяснение отключе�
 6. For each diagnostic id/code, call `unica.standards.explain` with `codes` when the code is explicit; otherwise search `unica.standards.search` by diagnostic name, APK/EDT/BSL LS token, or nearby snippet.
 7. Report fixes in cause-first order: source defect, impacted diagnostics, graph impact if relevant, standard reference, verification command.
 
+## Verification gate
+
+- The verification gate is part of the delivery contract, not an optional final
+  polish step.
+- Run diagnostics after syntax-sensitive edits and treat new `error` or `critical`
+  findings as blocking.
+- Run impact analysis with `unica.code.graph` when an exported method, metadata
+  handler, public API, query path, or shared module contract changes.
+- If public MCP `unica` cannot expose the required syntax, diagnostic, or impact
+  evidence, report that as a Unica MCP contract gap instead of claiming the
+  change is fully verified.
+
 ## Suppression and range-disable comments
 
 When comments disable diagnostics over a line or range, treat the exact marker as evidence, not as decoration.

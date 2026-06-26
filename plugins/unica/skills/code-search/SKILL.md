@@ -13,6 +13,10 @@ description: "Поиск и исследование BSL-кода и точек 
 
 ## Tool choice
 
+- MCP-first discipline: prefer the public `unica.*` project-index tools before
+  shell search for 1C source. Use shell search only after the relevant
+  `unica.code.*` / `unica.meta.*` attempts did not close the context gap, and
+  report what was tried when that fallback matters to the answer.
 - Use `unica.code.definition` for an exact procedure/function definition by name, especially exported methods.
 - Use `unica.code.outline` before reading a large module; it gives regions, header context, and method ranges.
 - Use `unica.code.grep` for arbitrary text, XML, query fragments, string literals, captions, and non-method tokens.
@@ -29,8 +33,9 @@ description: "Поиск и исследование BSL-кода и точек 
 5. Search exact identifiers next: object names, module names, event handlers, exported procedures, command names, URL templates.
 6. Use `unica.code.grep` for raw text fragments that are not BSL method names.
 7. Broaden only after exact search fails: synonyms, business terms, common module prefixes, form command captions.
-8. For every result, separate declaration, caller, handler, graph edge, and dead-looking match. Do not infer flow from one hit.
-9. Report concrete file paths and line anchors; include the query that produced each important hit when the search was non-obvious.
+8. Fall back to local `rg` only for repository files outside the public Unica index or after the MCP-first attempts above were insufficient.
+9. For every result, separate declaration, caller, handler, graph edge, and dead-looking match. Do not infer flow from one hit.
+10. Report concrete file paths and line anchors; include the query that produced each important hit when the search was non-obvious.
 
 ## Common searches
 

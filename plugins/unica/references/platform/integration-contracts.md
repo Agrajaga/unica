@@ -15,6 +15,9 @@ JSON/XML payloads, file exchange, webhooks, queues, or external API clients.
   remote failure, permanent remote failure, internal failure, and retry advice.
 - Define observability: correlation id, external id, sanitized request marker,
   response code, elapsed time, and business object ids.
+- Define structured logging fields before implementation. At minimum capture the
+  correlation id, external id, endpoint/method, response class, elapsed time,
+  retry count, and sanitized failure detail.
 
 ## Implementation Rules
 

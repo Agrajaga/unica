@@ -1,41 +1,41 @@
 {
   "schemaVersion": 1,
   "id": "2026-06-18-product-update-backlog",
-  "generatedAt": "2026-06-21",
+  "generatedAt": "2026-06-26",
   "purpose": "Product and dependency update backlog for Unica bundled tools, plugin package dependencies, and release-package inputs.",
   "products": [
     {
       "id": "bsl-analyzer",
       "kind": "bundled-tool",
-      "locked": "v0.2.37",
-      "latest": "v0.2.43",
+      "locked": "v0.2.48",
+      "latest": "v0.2.48",
       "risk": "high",
       "batch": "bsl-analyzer-contract",
-      "status": "needs-review",
+      "status": "applied",
       "contractGate": true,
-      "notes": "v0.2.37 was applied with typed graph/diagnostics through unica.code.*; upstream v0.2.39..v0.2.43 now adds extension merge/weaving diagnostics and IDE formatting changes, so a follow-up contract review is required before moving the lock."
+      "notes": "v0.2.48 applied after reviewing current release assets. v0.2.39..v0.2.48 add extension method weaving/checks, bare global common-module call resolution, diagnostics fixes, Windows MCP broker hardening, and IDE completion/template work; Unica continues to consume analyzer behavior only through typed unica.code.* graph/diagnostics gates."
     },
     {
       "id": "rlm-tools-bsl",
       "kind": "bundled-tool",
-      "locked": "v1.24.0",
-      "latest": "v1.24.0",
+      "locked": "v1.25.0",
+      "latest": "v1.25.0",
       "risk": "medium",
       "batch": "rlm-index-contract",
       "status": "applied",
       "contractGate": true,
-      "notes": "Updated together with rlm-bsl-index to v1.24.0. v1.23.0/v1.24.0 add read-only helper efficiency changes, get_object_profile, count_only, truncation metadata, and overrides_count; no raw RLM helper guidance is exposed through skills."
+      "notes": "Updated together with rlm-bsl-index to v1.25.0. v1.25.0 keeps index BUILDER_VERSION=14, fixes Cyrillic case folding and session reader cleanup, changes find_path ambiguous-name behavior, and tightens sandbox injection guards; raw RLM helper guidance remains hidden from skills."
     },
     {
       "id": "rlm-bsl-index",
       "kind": "bundled-tool",
-      "locked": "v1.24.0",
-      "latest": "v1.24.0",
+      "locked": "v1.25.0",
+      "latest": "v1.25.0",
       "risk": "medium",
       "batch": "rlm-index-contract",
       "status": "applied",
       "contractGate": true,
-      "notes": "v1.24.0 release states index schema and BUILDER_VERSION remain 14, so production index rebuild is not required. Contract gates verify build/info/update, schema tables used by Unica SQL, and generated package launchers."
+      "notes": "v1.25.0 release states index schema and BUILDER_VERSION remain 14, so production index rebuild is not required. Contract gates verify build/info/update, schema tables used by Unica SQL, and generated package launchers."
     },
     {
       "id": "v8-runner",
@@ -51,13 +51,13 @@
     {
       "id": "playwright",
       "kind": "npm-package-lock",
-      "locked": "1.58.2",
-      "latest": "1.61.0",
+      "locked": "1.61.1",
+      "latest": "1.61.1",
       "risk": "low",
       "batch": "low-risk-dependencies",
       "status": "applied",
       "contractGate": false,
-      "notes": "Update web-test package-lock and verify Playwright import/version."
+      "notes": "package.json/package-lock.json refreshed to 1.61.1. Playwright WebStorage is adopted through web-test getStorage/setStorage/removeStorage/clearStorage helpers after verifying the installed 1.61.1 types expose page.localStorage and page.sessionStorage. Passkeys, APIResponse network details, and video retention modes are not adopted in this batch because the 1C web-test engine has no matching workflow yet."
     },
     {
       "id": "lxml",
@@ -74,13 +74,35 @@
       "id": "rust-compatible-lock-updates",
       "kind": "cargo-lock",
       "locked": "current-compatible",
-      "latest": "cargo-update-dry-run-2026-06-21",
-      "updateCount": 2,
+      "latest": "cargo-update-dry-run-2026-06-26",
+      "updateCount": 4,
       "risk": "low",
       "batch": "low-risk-dependencies",
-      "status": "needs-review",
+      "status": "applied",
       "contractGate": false,
-      "notes": "cargo update --dry-run reports compatible patch updates: cc 1.2.64 -> 1.2.65 and log 0.4.32 -> 0.4.33; direct major updates stay out of this batch."
+      "notes": "Applied compatible lock-only updates: cc 1.2.64 -> 1.2.65, log 0.4.32 -> 0.4.33, quote 1.0.45 -> 1.0.46, and rustls 0.23.40 -> 0.23.41; direct major updates stay out of this batch."
+    },
+    {
+      "id": "serde-yaml-replacement",
+      "kind": "rust-direct-dependency",
+      "locked": "serde_yaml 0.9.34+deprecated",
+      "latest": "replace-with-yaml_serde-0.10.4",
+      "risk": "medium",
+      "batch": "rust-direct-dependencies",
+      "status": "deferred",
+      "contractGate": false,
+      "notes": "serde_yaml is deprecated, but replacing the YAML parser is a direct dependency migration rather than a lock refresh; defer to a separate focused PR with v8project.yaml fixture coverage."
+    },
+    {
+      "id": "ureq-3",
+      "kind": "rust-direct-dependency",
+      "locked": "2.12.1",
+      "latest": "3.3.0",
+      "risk": "medium",
+      "batch": "rust-msrv-decision",
+      "status": "deferred",
+      "contractGate": false,
+      "notes": "ureq 3.3.0 requires Rust 1.85. The repo does not currently publish an MSRV, so the dependency stays on ureq 2.12.1 until Rust 1.85 support is an explicit release-policy decision."
     }
   ]
 }

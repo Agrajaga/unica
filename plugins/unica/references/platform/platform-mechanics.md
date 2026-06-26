@@ -13,6 +13,26 @@ Use this reference when platform behavior matters more than local code shape.
 - Data history, full-text search, and exchange registration are platform
   subsystems with their own background processing and storage cost.
 
+## Managed Locks And Transactions
+
+- Use managed locks for write paths that read and then update shared registers
+  or state. Lock before the read, keep the transaction short, and do not wait for
+  user input or network calls while the transaction is open.
+- Define lock order for multi-register or multi-object scenarios before coding.
+  Deadlocks are usually a violated ordering contract, not a reason to add blind
+  retries.
+- Avoid nested transaction control inside object write/posting handlers; those
+  handlers already run inside platform-managed write transactions.
+
+## Structured Logging
+
+- Prefer structured logging fields over concatenated text: event name,
+  metadata object, reference, correlation id, tenant/external id, retry count,
+  elapsed time, and sanitized error detail.
+- Log the first causative failure, not only the final rollback or retry
+  exhaustion. Do not log secrets, auth headers, private keys, or full personal
+  payloads.
+
 ## Security Mechanics
 
 - Authentication, certificates, TLS, OpenID, and external crypto providers

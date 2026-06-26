@@ -229,6 +229,7 @@ SCENARIO_REQUIRED_TOKENS = {
         "Устаревшие процедуры и функции",
         "API-first",
     ],
+    "code-search": ["MCP-first", "what was tried"],
     "code-diagnostics": ["АПК", "EDT", "BSL LS", "отключ", "v8std"],
     "code-review": ["Findings first", "severity", "file/line"],
     "query-optimize": ["СКД", "virtual", "query-in-loop"],
@@ -566,6 +567,35 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 for token in SCENARIO_REQUIRED_TOKENS.get(skill, []):
                     self.assertIn(token, text)
 
+    def test_ai_rules_guidance_refresh_is_adapted_to_unica_surface(self) -> None:
+        docs = {
+            "code-search": self.skill_root() / "code-search" / "SKILL.md",
+            "code-diagnostics": self.skill_root() / "code-diagnostics" / "SKILL.md",
+            "test-authoring": self.skill_root() / "test-authoring" / "SKILL.md",
+            "background-jobs": self.skill_root() / "background-jobs" / "SKILL.md",
+            "db-performance": self.skill_root() / "db-performance" / "SKILL.md",
+            "integration-implement": self.skill_root() / "integration-implement" / "SKILL.md",
+            "platform-mechanics": self.reference_root() / "platform" / "platform-mechanics.md",
+            "runtime-diagnostics": self.reference_root() / "platform" / "runtime-diagnostics.md",
+            "db-performance-ref": self.reference_root() / "platform" / "db-performance.md",
+            "integration-contracts": self.reference_root() / "platform" / "integration-contracts.md",
+        }
+        joined = "\n".join(path.read_text(encoding="utf-8") for path in docs.values())
+
+        for token in [
+            "MCP-first",
+            "what was tried",
+            "verification gate",
+            "impact analysis",
+            "managed locks",
+            "lock order",
+            "structured logging",
+            "DCS",
+            "idempotency key",
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, joined)
+
     def test_all_skills_do_not_expose_internal_mcp_names(self) -> None:
         forbidden = [
             "unica-coder",
@@ -751,6 +781,17 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         skill_doc = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
         regress_doc = (skill_dir / "regress.md").read_text(encoding="utf-8")
         run_script = (skill_dir / "scripts" / "run.mjs").read_text(encoding="utf-8")
+        browser_facade = (skill_dir / "scripts" / "browser.mjs").read_text(encoding="utf-8")
+        storage_helper = (skill_dir / "scripts" / "engine" / "storage" / "storage.mjs").read_text(
+            encoding="utf-8"
+        )
+        grid_script = (skill_dir / "scripts" / "dom" / "grid.mjs").read_text(encoding="utf-8")
+        select_value = (
+            skill_dir / "scripts" / "engine" / "forms" / "select-value.mjs"
+        ).read_text(encoding="utf-8")
+        row_fill = (
+            skill_dir / "scripts" / "engine" / "table" / "row-fill.mjs"
+        ).read_text(encoding="utf-8")
 
         required_files = [
             "scripts/cli/commands/test.mjs",
@@ -759,6 +800,7 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             "scripts/cli/test-runner/reporters.mjs",
             "scripts/engine/table/row-fill.mjs",
             "scripts/engine/spreadsheet/spreadsheet.mjs",
+            "scripts/engine/storage/storage.mjs",
             "scripts/dom/grid.mjs",
             "scripts/dom/forms.mjs",
         ]
@@ -774,7 +816,19 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertIn("hasMore", skill_doc)
         self.assertIn("Picture columns", skill_doc)
         self.assertIn("row: { col: val }", skill_doc)
+        self.assertIn("getStorage(key?", skill_doc)
+        self.assertIn("setStorage(key, value", skill_doc)
+        self.assertIn("Browser storage", regress_doc)
+        self.assertIn("page.localStorage", storage_helper)
+        self.assertIn("page.sessionStorage", storage_helper)
+        self.assertIn("getStorage, setStorage, removeStorage, clearStorage", browser_facade)
         self.assertIn("case 'test'", run_script)
+        self.assertIn("visibleSample", grid_script)
+        self.assertIn("firstTextCell", grid_script)
+        self.assertIn("typeof searchSpec === 'object'", grid_script)
+        self.assertIn("columnSearch", select_value)
+        self.assertIn("visibleSample", select_value)
+        self.assertIn("[...pending.values()].every(p => p.filled)", row_fill)
 
         for text in [skill_doc, regress_doc]:
             self.assertNotIn("CLAUDE_SKILL_DIR", text)
