@@ -2,14 +2,17 @@ use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::legacy_scripts::find_plugin_root;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::fs::{self, OpenOptions};
-use std::io::ErrorKind;
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const INDEX_TIMEOUT: Duration = Duration::from_secs(30);
+const LOCK_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
+const LOCK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const LOCK_SCHEMA_VERSION: u32 = 1;
 const RLM_INDEX_DIR_NAME: &str = "rlm-tools-bsl";
 const STATUS_FILE_NAME: &str = "bsl_index_status.json";
 const LOCK_FILE_NAME: &str = "bsl_index.lock";
@@ -86,6 +89,18 @@ pub struct IndexBackgroundJob {
     pub lock_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BslIndexLock {
+    schema_version: u32,
+    owner_pid: u32,
+    action: String,
+    source_root: String,
+    started_at: u64,
+    updated_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    child_pid: Option<u32>,
+}
+
 pub trait IndexRunner {
     fn run(&self, command: &IndexCommand) -> Result<IndexOutput, String>;
 
@@ -129,7 +144,7 @@ impl<'a> WorkspaceIndexService<'a> {
             return IndexStartReport::default();
         };
 
-        if active_lock(context) {
+        if active_lock(context, &source_root) {
             return IndexStartReport {
                 warnings: vec!["rlm index building".to_string()],
             };
@@ -200,13 +215,13 @@ impl<'a> WorkspaceIndexService<'a> {
         context: &WorkspaceContext,
         args: &Map<String, Value>,
     ) -> IndexReadiness {
-        if active_lock(context) {
-            return IndexReadiness::Building;
-        }
-
         let Some(source_root) = resolve_source_root(context, args) else {
             return IndexReadiness::Unavailable("could not resolve 1C source root".to_string());
         };
+
+        if active_lock(context, &source_root) {
+            return IndexReadiness::Building;
+        }
 
         let commands = match self.commands(context, &source_root) {
             Ok(commands) => commands,
@@ -301,7 +316,18 @@ impl<'a> WorkspaceIndexService<'a> {
         }
 
         match OpenOptions::new().create_new(true).write(true).open(&lock) {
-            Ok(_) => {}
+            Ok(mut file) => {
+                if let Err(error) =
+                    write_lock_file(&mut file, &BslIndexLock::new(action, &source_root))
+                {
+                    let _ = fs::remove_file(&lock);
+                    let _ = write_status(
+                        context,
+                        BslIndexStatus::failed(error.as_str(), Some(&source_root)),
+                    );
+                    return IndexStartReport::default();
+                }
+            }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                 return IndexStartReport {
                     warnings: vec!["rlm index building".to_string()],
@@ -407,6 +433,26 @@ impl BslIndexStatus {
     }
 }
 
+impl BslIndexLock {
+    fn new(action: &str, source_root: &Path) -> Self {
+        let now = now_secs();
+        Self {
+            schema_version: LOCK_SCHEMA_VERSION,
+            owner_pid: std::process::id(),
+            action: action.to_string(),
+            source_root: source_root.display().to_string(),
+            started_at: now,
+            updated_at: now,
+            child_pid: None,
+        }
+    }
+
+    fn is_fresh(&self) -> bool {
+        self.schema_version == LOCK_SCHEMA_VERSION
+            && now_secs().saturating_sub(self.updated_at) <= LOCK_STALE_AFTER.as_secs()
+    }
+}
+
 impl BslIndexRunMetrics {
     fn from_output(action: &str, started_at: u64, finished_at: u64, output: &IndexOutput) -> Self {
         Self {
@@ -439,8 +485,11 @@ impl IndexRunner for SystemIndexRunner {
 }
 
 fn run_background_job(job: IndexBackgroundJob) {
+    let _lock_cleanup = LockCleanup {
+        path: job.lock_path.clone(),
+    };
     let started_at = now_secs();
-    let result = run_index_command(&job.primary);
+    let result = run_index_command_with_heartbeat(&job.primary, Some(&job.lock_path));
     let finished_at = now_secs();
     match result {
         Ok(output) if output.status_success => {
@@ -502,10 +551,16 @@ fn run_background_job(job: IndexBackgroundJob) {
             );
         }
     }
-    let _ = fs::remove_file(&job.lock_path);
 }
 
 fn run_index_command(command: &IndexCommand) -> Result<IndexOutput, String> {
+    run_index_command_with_heartbeat(command, None)
+}
+
+fn run_index_command_with_heartbeat(
+    command: &IndexCommand,
+    heartbeat_path: Option<&Path>,
+) -> Result<IndexOutput, String> {
     let mut child = Command::new(&command.program)
         .args(&command.args)
         .current_dir(&command.cwd)
@@ -515,7 +570,11 @@ fn run_index_command(command: &IndexCommand) -> Result<IndexOutput, String> {
         .spawn()
         .map_err(|error| format!("failed to execute RLM index process: {error}"))?;
 
-    let started = std::time::Instant::now();
+    let started = Instant::now();
+    let mut last_heartbeat = Instant::now();
+    if let Some(path) = heartbeat_path {
+        refresh_lock_heartbeat(path, child.id());
+    }
     loop {
         if child
             .try_wait()
@@ -535,6 +594,13 @@ fn run_index_command(command: &IndexCommand) -> Result<IndexOutput, String> {
             });
         }
 
+        if let Some(path) = heartbeat_path {
+            if last_heartbeat.elapsed() >= LOCK_HEARTBEAT_INTERVAL {
+                refresh_lock_heartbeat(path, child.id());
+                last_heartbeat = Instant::now();
+            }
+        }
+
         if started.elapsed() >= command.timeout {
             let _ = child.kill();
             let output = child.wait_with_output().map_err(|error| {
@@ -551,6 +617,16 @@ fn run_index_command(command: &IndexCommand) -> Result<IndexOutput, String> {
         }
 
         thread::sleep(Duration::from_millis(50));
+    }
+}
+
+struct LockCleanup {
+    path: PathBuf,
+}
+
+impl Drop for LockCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -627,8 +703,127 @@ fn lock_path(context: &WorkspaceContext) -> PathBuf {
     context.cache_root.join("locks").join(LOCK_FILE_NAME)
 }
 
-fn active_lock(context: &WorkspaceContext) -> bool {
-    lock_path(context).is_file()
+fn active_lock(context: &WorkspaceContext, source_root: &Path) -> bool {
+    let lock = lock_path(context);
+    if !lock.is_file() {
+        return false;
+    }
+    match read_lock_path(&lock) {
+        Ok(index_lock) if index_lock.is_fresh() => true,
+        Ok(index_lock) => {
+            recover_stale_lock(
+                context,
+                source_root,
+                format!(
+                    "RLM index {action} lock is stale",
+                    action = index_lock.action
+                )
+                .as_str(),
+            );
+            false
+        }
+        Err(error) => {
+            if invalid_lock_may_be_active(context, &lock) {
+                return true;
+            }
+            recover_stale_lock(
+                context,
+                source_root,
+                format!("RLM index lock is invalid: {error}").as_str(),
+            );
+            false
+        }
+    }
+}
+
+fn invalid_lock_may_be_active(context: &WorkspaceContext, lock: &Path) -> bool {
+    let lock_updated_at = file_modified_secs(lock).unwrap_or_else(now_secs);
+    if now_secs().saturating_sub(lock_updated_at) <= LOCK_STALE_AFTER.as_secs() {
+        return true;
+    }
+    if let Some(status) = read_bsl_index_status(context) {
+        if status.status == "building" {
+            return now_secs().saturating_sub(status.updated_at) <= LOCK_STALE_AFTER.as_secs();
+        }
+    }
+    false
+}
+
+fn recover_stale_lock(context: &WorkspaceContext, source_root: &Path, reason: &str) {
+    let lock = lock_path(context);
+    let _ = fs::remove_file(lock);
+    if read_bsl_index_status(context)
+        .map(|status| status.status == "building")
+        .unwrap_or(false)
+    {
+        let _ = write_status(
+            context,
+            BslIndexStatus::failed(
+                format!("stale RLM index build marker recovered: {reason}").as_str(),
+                Some(source_root),
+            ),
+        );
+    }
+}
+
+fn read_lock_path(path: &Path) -> Result<BslIndexLock, String> {
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&text).map_err(|error| error.to_string())
+}
+
+fn write_lock_path(path: &Path, index_lock: BslIndexLock) -> Result<(), String> {
+    let temp_path = lock_temp_path(path);
+    {
+        let mut temp = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .map_err(|error| format!("failed to create temporary RLM index lock: {error}"))?;
+        write_lock_file(&mut temp, &index_lock)?;
+    }
+    fs::rename(&temp_path, path).map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
+        format!("failed to replace RLM index lock atomically: {error}")
+    })
+}
+
+fn write_lock_file(file: &mut File, index_lock: &BslIndexLock) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(&index_lock).map_err(|error| error.to_string())?;
+    file.write_all(text.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.flush())
+        .map_err(|error| format!("failed to write RLM index lock: {error}"))
+}
+
+fn lock_temp_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("bsl_index.lock");
+    path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        now_nanos()
+    ))
+}
+
+fn refresh_lock_heartbeat(path: &Path, child_pid: u32) {
+    let Ok(mut index_lock) = read_lock_path(path) else {
+        return;
+    };
+    index_lock.updated_at = now_secs();
+    index_lock.child_pid = Some(child_pid);
+    let _ = write_lock_path(path, index_lock);
+}
+
+fn file_modified_secs(path: &Path) -> Option<u64> {
+    path.metadata()
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 fn write_status(context: &WorkspaceContext, status: BslIndexStatus) -> Result<(), String> {
@@ -717,6 +912,13 @@ fn now_secs() -> u64 {
         .unwrap_or_default()
 }
 
+fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,6 +974,49 @@ mod tests {
     fn repeated_detect_does_not_start_duplicate_indexing_while_lock_exists() {
         let context = test_context("lock");
         fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        write_fresh_lock(&context, "build");
+        let runner = RecordingIndexRunner::default();
+        let service = WorkspaceIndexService::with_runner(&runner);
+
+        let report = service.start_for_workspace(&context, &Map::new(), false);
+
+        assert_eq!(report.warnings, vec!["rlm index building".to_string()]);
+        assert!(runner.commands.borrow().is_empty());
+        assert!(runner.backgrounds.borrow().is_empty());
+        cleanup(&context);
+    }
+
+    #[test]
+    fn stale_legacy_lock_is_recovered_and_starts_missing_index_build() {
+        let context = test_context("stale-legacy-lock");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        fs::create_dir_all(lock_path(&context).parent().unwrap()).unwrap();
+        fs::write(lock_path(&context), "").unwrap();
+        write_old_building_status(&context, "build");
+        make_lock_file_old(&context);
+        let runner = RecordingIndexRunner {
+            outputs: RefCell::new(vec![IndexOutput::success(
+                "Index not found: /tmp/bsl_index.db",
+            )]),
+            ..Default::default()
+        };
+        let service = WorkspaceIndexService::with_runner(&runner);
+
+        let report = service.start_for_workspace(&context, &Map::new(), false);
+
+        assert_eq!(report.warnings, vec!["rlm index build started".to_string()]);
+        assert_eq!(runner.commands.borrow()[0].args[0..2], ["index", "info"]);
+        assert_eq!(
+            runner.backgrounds.borrow()[0].primary.args[0..2],
+            ["index", "build"]
+        );
+        cleanup(&context);
+    }
+
+    #[test]
+    fn invalid_lock_without_building_status_is_treated_as_active() {
+        let context = test_context("invalid-lock-active");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
         fs::create_dir_all(lock_path(&context).parent().unwrap()).unwrap();
         fs::write(lock_path(&context), "").unwrap();
         let runner = RecordingIndexRunner::default();
@@ -782,6 +1027,76 @@ mod tests {
         assert_eq!(report.warnings, vec!["rlm index building".to_string()]);
         assert!(runner.commands.borrow().is_empty());
         assert!(runner.backgrounds.borrow().is_empty());
+        cleanup(&context);
+    }
+
+    #[test]
+    fn fresh_invalid_lock_with_stale_status_is_treated_as_active() {
+        let context = test_context("invalid-lock-with-stale-status");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        fs::create_dir_all(lock_path(&context).parent().unwrap()).unwrap();
+        fs::write(lock_path(&context), "").unwrap();
+        write_old_building_status(&context, "build");
+        let runner = RecordingIndexRunner::default();
+        let service = WorkspaceIndexService::with_runner(&runner);
+
+        let report = service.start_for_workspace(&context, &Map::new(), false);
+
+        assert_eq!(report.warnings, vec!["rlm index building".to_string()]);
+        assert!(runner.commands.borrow().is_empty());
+        assert!(runner.backgrounds.borrow().is_empty());
+        cleanup(&context);
+    }
+
+    #[test]
+    fn stale_structured_lock_is_recovered_and_starts_missing_index_build() {
+        let context = test_context("stale-structured-lock");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        write_stale_lock(&context, "build");
+        write_old_building_status(&context, "build");
+        let runner = RecordingIndexRunner {
+            outputs: RefCell::new(vec![IndexOutput::success(
+                "Index not found: /tmp/bsl_index.db",
+            )]),
+            ..Default::default()
+        };
+        let service = WorkspaceIndexService::with_runner(&runner);
+
+        let report = service.start_for_workspace(&context, &Map::new(), false);
+
+        assert_eq!(report.warnings, vec!["rlm index build started".to_string()]);
+        assert_eq!(runner.commands.borrow()[0].args[0..2], ["index", "info"]);
+        assert_eq!(
+            runner.backgrounds.borrow()[0].primary.args[0..2],
+            ["index", "build"]
+        );
+        cleanup(&context);
+    }
+
+    #[test]
+    fn ready_index_recovers_stale_lock_and_reads_fresh_info() {
+        let context = test_context("stale-lock-ready");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        fs::create_dir_all(lock_path(&context).parent().unwrap()).unwrap();
+        fs::write(lock_path(&context), "").unwrap();
+        write_old_building_status(&context, "build");
+        make_lock_file_old(&context);
+        let db_path = context.cache_root.join("rlm-tools-bsl/a/bsl_index.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        fs::write(&db_path, "").unwrap();
+        let runner = RecordingIndexRunner {
+            outputs: RefCell::new(vec![IndexOutput::success(format!(
+                "Index: {}\n  Status:   fresh\n",
+                db_path.display()
+            ))]),
+            ..Default::default()
+        };
+        let service = WorkspaceIndexService::with_runner(&runner);
+
+        let readiness = service.ready_index(&context, &Map::new());
+
+        assert_eq!(readiness, IndexReadiness::Ready { db_path });
+        assert_eq!(runner.commands.borrow()[0].args[0..2], ["index", "info"]);
         cleanup(&context);
     }
 
@@ -987,6 +1302,57 @@ mod tests {
         fs::create_dir_all(plugin_root.join("skills")).unwrap();
         fs::create_dir_all(plugin_root.join("scripts")).unwrap();
         fs::write(plugin_root.join("scripts").join("run-rlm-bsl-index.sh"), "").unwrap();
+    }
+
+    fn write_fresh_lock(context: &WorkspaceContext, action: &str) {
+        fs::create_dir_all(lock_path(context).parent().unwrap()).unwrap();
+        let text = serde_json::json!({
+            "schema_version": 1,
+            "owner_pid": std::process::id(),
+            "action": action,
+            "source_root": context.workspace_root.join("src").display().to_string(),
+            "started_at": now_secs(),
+            "updated_at": now_secs()
+        });
+        fs::write(
+            lock_path(context),
+            serde_json::to_string_pretty(&text).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+
+    fn write_stale_lock(context: &WorkspaceContext, action: &str) {
+        fs::create_dir_all(lock_path(context).parent().unwrap()).unwrap();
+        let stale = now_secs().saturating_sub(LOCK_STALE_AFTER.as_secs() + 1);
+        let text = serde_json::json!({
+            "schema_version": 1,
+            "owner_pid": std::process::id(),
+            "action": action,
+            "source_root": context.workspace_root.join("src").display().to_string(),
+            "started_at": stale,
+            "updated_at": stale
+        });
+        fs::write(
+            lock_path(context),
+            serde_json::to_string_pretty(&text).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+
+    fn write_old_building_status(context: &WorkspaceContext, action: &str) {
+        let mut status =
+            BslIndexStatus::building(action, Some(&context.workspace_root.join("src")));
+        status.updated_at = now_secs().saturating_sub(LOCK_STALE_AFTER.as_secs() + 1);
+        write_status(context, status).unwrap();
+    }
+
+    fn make_lock_file_old(context: &WorkspaceContext) {
+        let status = std::process::Command::new("touch")
+            .args(["-t", "200001010000"])
+            .arg(lock_path(context))
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 
     fn cleanup(context: &WorkspaceContext) {
