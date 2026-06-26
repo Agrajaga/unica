@@ -20,7 +20,7 @@ pub struct ProcessCommand {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
-    pub timeout: Duration,
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,11 +176,12 @@ impl<'a> CliAdapter<'a> {
             .map(|part| (*part).to_string())
             .collect::<Vec<_>>();
         process_args.extend(execution_args);
+        let process_timeout = Some(DEFAULT_PROCESS_TIMEOUT);
         let output = self.runner.run(&ProcessCommand {
             program: launcher.clone(),
             args: process_args,
             cwd: context.cwd.clone(),
-            timeout: DEFAULT_PROCESS_TIMEOUT,
+            timeout: process_timeout,
         })?;
         let ok = output.status_success;
         Ok(AdapterOutcome {
@@ -211,11 +212,7 @@ impl<'a> CliAdapter<'a> {
             errors: if ok {
                 Vec::new()
             } else if output.stderr.trim().is_empty() && output.timed_out {
-                vec![format!(
-                    "internal {} adapter timed out after {} seconds",
-                    self.label,
-                    DEFAULT_PROCESS_TIMEOUT.as_secs()
-                )]
+                vec![process_timeout_error(self.label, process_timeout)]
             } else {
                 vec![output.stderr.trim().to_string()]
             },
@@ -289,11 +286,12 @@ impl<'a> RuntimeAdapter<'a> {
             ));
         }
 
+        let process_timeout = None;
         let output = self.runner.run(&ProcessCommand {
             program: launcher.clone(),
             args: execution_args,
             cwd: context.cwd.clone(),
-            timeout: DEFAULT_PROCESS_TIMEOUT,
+            timeout: process_timeout,
         })?;
         let ok = output.status_success;
         Ok(AdapterOutcome {
@@ -321,10 +319,7 @@ impl<'a> RuntimeAdapter<'a> {
             errors: if ok {
                 Vec::new()
             } else if output.stderr.trim().is_empty() && output.timed_out {
-                vec![format!(
-                    "internal v8-runner runtime adapter timed out after {} seconds",
-                    DEFAULT_PROCESS_TIMEOUT.as_secs()
-                )]
+                vec![process_timeout_error("v8-runner runtime", process_timeout)]
             } else {
                 vec![output.stderr.trim().to_string()]
             },
@@ -444,6 +439,16 @@ fn format_section(name: &str, text: &str) -> String {
         format!("=== {name} ===")
     } else {
         format!("=== {name} ===\n{body}")
+    }
+}
+
+fn process_timeout_error(label: &str, timeout: Option<Duration>) -> String {
+    match timeout {
+        Some(timeout) => format!(
+            "internal {label} adapter timed out after {} seconds",
+            timeout.as_secs()
+        ),
+        None => format!("internal {label} adapter timed out"),
     }
 }
 
@@ -656,7 +661,7 @@ impl<'a> CodeNavigationAdapter<'a> {
             program: PathBuf::from("git"),
             args: git_args.clone(),
             cwd: context.workspace_root.clone(),
-            timeout: DEFAULT_PROCESS_TIMEOUT,
+            timeout: Some(DEFAULT_PROCESS_TIMEOUT),
         })?;
         let limit = read_limit(args, 200);
         let body = grep_body(&output.stdout, mode, limit);
@@ -1847,18 +1852,20 @@ impl ProcessRunner for SystemProcessRunner {
                 });
             }
 
-            if started.elapsed() >= command.timeout {
-                let _ = child.kill();
-                let output = child
-                    .wait_with_output()
-                    .map_err(|err| format!("failed to collect timed-out process output: {err}"))?;
-                return Ok(ProcessOutput {
-                    status_success: false,
-                    status: "timeout".to_string(),
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                    timed_out: true,
-                });
+            if let Some(timeout) = command.timeout {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let output = child.wait_with_output().map_err(|err| {
+                        format!("failed to collect timed-out process output: {err}")
+                    })?;
+                    return Ok(ProcessOutput {
+                        status_success: false,
+                        status: "timeout".to_string(),
+                        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                        timed_out: true,
+                    });
+                }
             }
 
             std::thread::sleep(Duration::from_millis(25));
@@ -2432,6 +2439,35 @@ mod tests {
             commands[0].args,
             vec!["build", "--full-rebuild", "--source-set", "main"]
         );
+        assert!(commands[0].timeout.is_none());
+    }
+
+    #[test]
+    fn runtime_adapter_delegates_successful_build_without_wrapper_timeout() {
+        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let runner = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: "Designer build completed after 240 seconds".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("build"));
+
+        let outcome = RuntimeAdapter::with_runner(&runner)
+            .invoke("unica.runtime.execute", &args, &context, false, true)
+            .unwrap();
+
+        assert!(outcome.ok);
+        assert_eq!(
+            outcome.stdout.as_deref(),
+            Some("Designer build completed after 240 seconds")
+        );
+        assert!(runner.commands.borrow()[0].timeout.is_none());
     }
 
     #[test]
@@ -3151,6 +3187,32 @@ mod tests {
     }
 
     #[test]
+    fn cli_adapter_records_default_process_timeout() {
+        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let runner = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        };
+
+        let outcome =
+            CliAdapter::with_runner("run-v8-runner.sh", &["build"], "build/runtime", &runner)
+                .invoke("unica.build.load", &Map::new(), &context, false, true)
+                .unwrap();
+
+        assert!(outcome.ok);
+        assert_eq!(
+            runner.commands.borrow()[0].timeout,
+            Some(DEFAULT_PROCESS_TIMEOUT)
+        );
+    }
+
+    #[test]
     fn cli_adapter_reports_fake_process_timeout() {
         let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
         let runner = FakeProcessRunner {
@@ -3177,6 +3239,49 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("timed out after")));
+    }
+
+    #[test]
+    fn runtime_adapter_does_not_report_wrapper_timeout_seconds_without_local_timeout() {
+        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let runner = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: false,
+                status: "timeout".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: true,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("build"));
+
+        let outcome = RuntimeAdapter::with_runner(&runner)
+            .invoke("unica.runtime.execute", &args, &context, false, true)
+            .unwrap();
+
+        assert!(!outcome.ok);
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error == "internal v8-runner runtime adapter timed out"));
+        assert!(outcome.errors.iter().all(|error| !error.contains("120")));
+    }
+
+    #[test]
+    fn system_process_runner_does_not_timeout_when_timeout_is_none() {
+        let output = SYSTEM_PROCESS_RUNNER
+            .run(&ProcessCommand {
+                program: PathBuf::from("sh"),
+                args: vec!["-c".to_string(), "printf ok".to_string()],
+                cwd: std::env::current_dir().unwrap(),
+                timeout: None,
+            })
+            .unwrap();
+
+        assert!(output.status_success);
+        assert_eq!(output.stdout, "ok");
+        assert!(!output.timed_out);
     }
 
     #[test]

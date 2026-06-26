@@ -1055,6 +1055,7 @@ mod tests {
         assert!(schema["properties"].get("operation").is_some());
         assert!(schema["properties"].get("sourceSet").is_some());
         assert!(schema["properties"].get("args").is_none());
+        assert!(schema["properties"].get("timeoutMs").is_none());
         assert_eq!(schema["properties"]["fullRebuild"]["type"], "boolean");
         assert_eq!(schema["properties"]["mcpPort"]["type"], "integer");
         assert!(schema["properties"]["operation"]["enum"]
