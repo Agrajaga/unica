@@ -284,10 +284,11 @@ jobs:
           set -euo pipefail
 
           repo_url="https://github.com/${GITHUB_REPOSITORY}.git"
-          auth_header="AUTHORIZATION: bearer ${GITHUB_TOKEN}"
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 -w0)"
+          git_auth_config=(-c "http.https://github.com/.extraheader=${auth_header}")
 
-          if git -c "http.extraheader=${auth_header}" ls-remote --exit-code --heads "$repo_url" gh-pages >/dev/null 2>&1; then
-            git -c "http.extraheader=${auth_header}" clone --depth 1 --branch gh-pages "$repo_url" pages-site
+          if git "${git_auth_config[@]}" ls-remote --exit-code --heads "$repo_url" gh-pages >/dev/null 2>&1; then
+            git "${git_auth_config[@]}" clone --depth 1 --branch gh-pages "$repo_url" pages-site
           else
             mkdir -p pages-site
             git -C pages-site init
@@ -314,7 +315,7 @@ jobs:
             echo "No assessment page changes to publish."
           else
             git -C pages-site commit -m "docs: publish assessment ${GITHUB_REF_NAME}"
-            git -C pages-site -c "http.extraheader=${auth_header}" push origin HEAD:gh-pages
+            git "${git_auth_config[@]}" -C pages-site push origin HEAD:gh-pages
           fi
           rm -rf pages-site/.git
 

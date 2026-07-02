@@ -131,6 +131,8 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
         self.assertIn("uses: actions/deploy-pages@v4", text)
         self.assertIn("pages: write", text)
         self.assertIn("id-token: write", text)
+        self.assertIn("x-access-token:%s", text)
+        self.assertIn("http.https://github.com/.extraheader", text)
 
     def test_release_assets_wait_for_published_assessment_pages(self) -> None:
         text = self.workflow_text()
