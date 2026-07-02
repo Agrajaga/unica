@@ -32,7 +32,8 @@ The `skills/` directory contains operation skills and scenario references for 1C
 
 The source tree is for plugin and skill development. It does not commit bundled
 tool binaries. Source `.mcp.json` starts the Rust orchestrator with
-`cargo run --bin unica`; bundled tools such as `bsl-analyzer`, `v8-runner`, and
+`cargo run --manifest-path ../../Cargo.toml --bin unica` from the plugin root;
+bundled tools such as `bsl-analyzer`, `v8-runner`, and
 `rlm-*` work from generated marketplace archives where target-specific binaries
 exist.
 
@@ -82,7 +83,7 @@ scripts/dev/install-local-unica.sh --marketplace-name unica-dev
 | Operation skills and PowerShell scripts | Primary path | Available when PowerShell is installed | The source skills are Windows-first because 1C Designer automation is Windows-first. |
 | Python script ports | Available with Python | Available with `python3` | Used for XML/metadata operations where ports exist. |
 | Bundled binaries | Built by GitHub Actions into `bin/win-x64/` | Built by GitHub Actions into `bin/darwin-arm64/` | Linux x64 is built into `bin/linux-x64/`; the package manifest maps tools to target-specific binaries. Binaries are ignored in source control. |
-| MCP local tools | Rust runtime resolver launches packaged binaries directly | Rust runtime resolver launches packaged binaries directly | Source checkouts use `cargo run --bin unica`; generated packages use `bin/<target>/` binaries. External standards data is reached through the internal standards adapter. |
+| MCP local tools | Rust runtime resolver launches packaged binaries directly | Rust runtime resolver launches packaged binaries directly | Source checkouts use `cargo run --manifest-path ../../Cargo.toml --bin unica` from the plugin root; generated packages use `bin/<target>/` binaries. External standards data is reached through the internal standards adapter. |
 | 1C platform operations | Requires local 1C platform | Requires local 1C platform or compatible tooling | Skills resolve project/database context from `v8project.yaml` when present. |
 
 ## Bundled Tools
@@ -106,10 +107,10 @@ Internal MCP runtime launches resolve bundled tools directly from Rust:
 - execute the pinned `bin/<target>/<tool>` binary directly.
 
 Runtime shell and PowerShell wrappers are not shipped. Source checkouts use
-`cargo run --bin unica` for the orchestrator, and generated packages use the
-native `bin/<target>/unica` entrypoint plus Rust-side resolver calls for internal
-tools. This prevents Codex from accidentally using a different globally
-installed version.
+`cargo run --manifest-path ../../Cargo.toml --bin unica` for the orchestrator,
+and generated packages use the native `bin/<target>/unica` entrypoint plus
+Rust-side resolver calls for internal tools. This prevents Codex from
+accidentally using a different globally installed version.
 
 ## Release Pipeline
 
@@ -142,9 +143,10 @@ Unica is licensed under `LGPL-3.0-or-later`. See `LICENSE`.
 `unica` owns workspace discovery, cache coordination, and adapter orchestration.
 Build/runtime tooling, code analysis, standards lookup, and XML/JSON DSL
 fallback scripts are private implementation details behind this one MCP
-contract. Source checkout metadata uses `cargo run --bin unica` because
-generated binaries are absent from git; packaged archives rewrite `.mcp.json` to
-launch `./bin/<target>/unica` directly.
+contract. Source checkout metadata uses
+`cargo run --manifest-path ../../Cargo.toml --bin unica` because generated
+binaries are absent from git; packaged archives rewrite `.mcp.json` to launch
+`./bin/<target>/unica` directly.
 
 ## Verification
 

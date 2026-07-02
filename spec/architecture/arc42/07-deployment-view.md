@@ -2,9 +2,10 @@
 
 ## Source Checkout
 
-In the repository checkout, `.mcp.json` runs the Rust binary through
-`cargo run --bin unica`. This keeps local development possible without generated
-binary commits or shell wrapper files.
+In the repository checkout, `.mcp.json` runs the Rust binary from the plugin
+root through `cargo run --manifest-path ../../Cargo.toml --bin unica`. This
+keeps local development possible without generated binary commits or shell
+wrapper files.
 
 ## Generated Marketplace Package
 

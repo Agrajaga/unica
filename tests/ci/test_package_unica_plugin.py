@@ -54,7 +54,13 @@ class PackageUnicaPluginTests(unittest.TestCase):
         server = mcp["mcpServers"]["unica"]
 
         self.assertEqual(server["command"], "cargo")
-        self.assertEqual(server["args"], ["run", "--quiet", "--bin", "unica", "--"])
+        self.assertEqual(
+            server["args"],
+            ["run", "--quiet", "--manifest-path", "../../Cargo.toml", "--bin", "unica", "--"],
+        )
+        manifest_index = server["args"].index("--manifest-path") + 1
+        source_manifest = (repo_root / "plugins" / "unica" / server["args"][manifest_index]).resolve()
+        self.assertEqual(source_manifest, repo_root / "Cargo.toml")
         self.assertIn("orchestrator", server["note"])
         self.assertNotIn("bash", json.dumps(server))
         self.assertNotIn("run-unica.sh", json.dumps(server))

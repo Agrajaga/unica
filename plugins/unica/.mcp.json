@@ -5,11 +5,13 @@
       "args": [
         "run",
         "--quiet",
+        "--manifest-path",
+        "../../Cargo.toml",
         "--bin",
         "unica",
         "--"
       ],
-      "note": "Single public Unica stdio MCP orchestrator. Source checkouts start the Rust binary through cargo; packaged archives rewrite this to launch ./bin/<target>/unica directly."
+      "note": "Single public Unica stdio MCP orchestrator. Source checkouts start the Rust binary through cargo with a plugin-root-relative Cargo manifest path; packaged archives rewrite this to launch ./bin/<target>/unica directly."
     }
   }
 }

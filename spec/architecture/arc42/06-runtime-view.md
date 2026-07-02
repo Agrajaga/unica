@@ -2,7 +2,7 @@
 
 ## Initialize
 
-1. Source checkout `.mcp.json` starts `cargo run --bin unica`.
+1. Source checkout `.mcp.json` starts `cargo run --manifest-path ../../Cargo.toml --bin unica` from the plugin root.
 2. Packaged `.mcp.json` starts `./bin/<target>/unica` directly.
 3. The Rust runtime resolver starts internal bundled tools directly from
    `bin/<target>/<tool>`.

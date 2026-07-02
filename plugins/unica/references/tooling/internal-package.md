@@ -44,7 +44,7 @@ package binary and verifying SHA-256 before execution.
   target (`darwin-arm64`, `linux-x64`, or `win-x64`), verifies the binary, and
   launches `bin/<target>/<tool>` directly.
 - Source checkout `.mcp.json` starts the Rust orchestrator with
-  `cargo run --bin unica`.
+  `cargo run --manifest-path ../../Cargo.toml --bin unica` from the plugin root.
 - Generated marketplace packages rewrite `.mcp.json` to start
   `./bin/<target>/unica` directly.
 
@@ -93,8 +93,9 @@ Operation skills should route through `unica`. Build/runtime tools, code
 analysis, standards lookup, and XML/JSON DSL scripts are internal adapters
 owned by the orchestrator, so cache refresh and source-set invalidation happen
 inside one process instead of through LLM-visible coordination. The source
-checkout `.mcp.json` uses `cargo run --bin unica` because binaries are not
-committed; release packaging rewrites `.mcp.json` to launch the
+checkout `.mcp.json` uses
+`cargo run --manifest-path ../../Cargo.toml --bin unica` because binaries are
+not committed; release packaging rewrites `.mcp.json` to launch the
 platform-specific `./bin/<target>/unica` binary directly.
 
 ## Reference Material
