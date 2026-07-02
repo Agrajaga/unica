@@ -12,6 +12,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import time
 import zipfile
@@ -758,6 +759,20 @@ def write_report_files(report: dict[str, Any], out_dir: Path) -> None:
     (out_dir / "summary.md").write_text(render_summary_markdown(report), encoding="utf-8")
 
 
+def print_blocking_failure_summary(report: dict[str, Any]) -> None:
+    failures = [
+        scenario
+        for scenario in report.get("scenarios", [])
+        if scenario.get("blocking") and scenario.get("status") == "failed"
+    ]
+    if not failures:
+        return
+    print("blocking assessment failures:", file=sys.stderr)
+    for scenario in failures:
+        errors = "; ".join(str(error) for error in scenario.get("errors", [])) or "no error details"
+        print(f"- {scenario.get('id')}: {errors}", file=sys.stderr)
+
+
 def copytree_replace(source: Path, target: Path) -> None:
     if target.exists():
         shutil.rmtree(target)
@@ -809,6 +824,7 @@ def main() -> None:
     if args.pages_root:
         copy_versioned_pages(args.out_dir, args.pages_root, args.release_tag)
     if report["summary"]["blockingFailures"]:
+        print_blocking_failure_summary(report)
         raise SystemExit(1)
 
 
