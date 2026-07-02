@@ -1,12 +1,15 @@
 {
   "mcpServers": {
     "unica": {
-      "command": "bash",
+      "command": "cargo",
       "args": [
-        "-lc",
-        "for p in ./plugins/unica/scripts/run-unica.sh ./scripts/run-unica.sh; do if [ -x \"$p\" ]; then exec \"$p\"; fi; done; echo 'Unica orchestrator launcher not found' >&2; exit 127"
+        "run",
+        "--quiet",
+        "--bin",
+        "unica",
+        "--"
       ],
-      "note": "Single public Unica stdio MCP orchestrator. It owns workspace/cache coordination and uses bundled build, code-analysis, standards, and XML/JSON DSL adapters internally."
+      "note": "Single public Unica stdio MCP orchestrator. Source checkouts start the Rust binary through cargo; packaged archives rewrite this to launch ./bin/<target>/unica directly."
     }
   }
 }

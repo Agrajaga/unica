@@ -24,5 +24,6 @@ This file tracks open implementation work only.
 - The relevant ADR or invariant is updated if the public contract changes.
 - `python3.12 -m unittest discover -s tests/ci` and
   `cargo test --package unica-coder` pass.
-- `plugins/unica/scripts/run-unica.sh --help` still reports the public server as
-  `unica`.
+- `cargo run --quiet --bin unica -- --help` still reports the public server as
+  `unica`, and generated package metadata starts `./bin/<target>/unica`
+  directly.

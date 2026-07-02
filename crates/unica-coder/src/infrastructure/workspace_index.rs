@@ -1,4 +1,5 @@
 use crate::domain::workspace::WorkspaceContext;
+use crate::infrastructure::bundled_tools::resolve_bundled_tool;
 use crate::infrastructure::legacy_scripts::find_plugin_root;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -238,13 +239,7 @@ impl<'a> WorkspaceIndexService<'a> {
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root for internal RLM index adapter lookup".to_string()
         })?;
-        let launcher = plugin_root.join("scripts").join("run-rlm-bsl-index.sh");
-        if !launcher.exists() {
-            return Err(format!(
-                "internal RLM index launcher not found: {}",
-                launcher.display()
-            ));
-        }
+        let program = resolve_bundled_tool(&plugin_root, "rlm-bsl-index", true)?.program;
         let env = vec![(
             "RLM_INDEX_DIR".to_string(),
             context
@@ -256,21 +251,21 @@ impl<'a> WorkspaceIndexService<'a> {
         let root = source_root.display().to_string();
         Ok(IndexCommands {
             info: IndexCommand {
-                program: launcher.clone(),
+                program: program.clone(),
                 args: vec!["index".to_string(), "info".to_string(), root.clone()],
                 cwd: context.cwd.clone(),
                 env: env.clone(),
                 timeout: INDEX_TIMEOUT,
             },
             build: IndexCommand {
-                program: launcher.clone(),
+                program: program.clone(),
                 args: vec!["index".to_string(), "build".to_string(), root.clone()],
                 cwd: context.cwd.clone(),
                 env: env.clone(),
                 timeout: Duration::from_secs(24 * 60 * 60),
             },
             update: IndexCommand {
-                program: launcher,
+                program,
                 args: vec!["index".to_string(), "update".to_string(), root],
                 cwd: context.cwd.clone(),
                 env,
@@ -985,8 +980,38 @@ mod tests {
     fn create_fake_plugin_root(root: &Path) {
         let plugin_root = root.join("plugins").join("unica");
         fs::create_dir_all(plugin_root.join("skills")).unwrap();
-        fs::create_dir_all(plugin_root.join("scripts")).unwrap();
-        fs::write(plugin_root.join("scripts").join("run-rlm-bsl-index.sh"), "").unwrap();
+        fs::create_dir_all(plugin_root.join("third-party")).unwrap();
+        for target in ["darwin-arm64", "linux-x64"] {
+            fs::create_dir_all(plugin_root.join("bin").join(target)).unwrap();
+            fs::write(
+                plugin_root.join("bin").join(target).join("rlm-bsl-index"),
+                "rlm-index",
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(plugin_root.join("bin/win-x64")).unwrap();
+        fs::write(
+            plugin_root.join("bin/win-x64").join("rlm-bsl-index.exe"),
+            "rlm-index",
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("third-party/manifest.json"),
+            r#"{
+  "schemaVersion": 2,
+  "tools": [
+    {
+      "name": "rlm-bsl-index",
+      "binaries": {
+        "darwin-arm64": {"targetTriple": "aarch64-apple-darwin", "binaryPath": "bin/darwin-arm64/rlm-bsl-index", "sha256": "fa6a77fa531fa57e7781010a7cec69b7be4b7b58903365153bf1f66e851ab213"},
+        "linux-x64": {"targetTriple": "x86_64-unknown-linux-gnu", "binaryPath": "bin/linux-x64/rlm-bsl-index", "sha256": "fa6a77fa531fa57e7781010a7cec69b7be4b7b58903365153bf1f66e851ab213"},
+        "win-x64": {"targetTriple": "x86_64-pc-windows-msvc", "binaryPath": "bin/win-x64/rlm-bsl-index.exe", "sha256": "fa6a77fa531fa57e7781010a7cec69b7be4b7b58903365153bf1f66e851ab213"}
+      }
+    }
+  ]
+}"#,
+        )
+        .unwrap();
     }
 
     fn cleanup(context: &WorkspaceContext) {

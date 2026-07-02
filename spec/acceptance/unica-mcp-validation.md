@@ -14,21 +14,19 @@ Run from the repository root:
 python3.12 -m json.tool plugins/unica/.mcp.json >/dev/null
 python3.12 -m json.tool plugins/unica/third-party/tools.lock.json >/dev/null
 python3.12 -m json.tool plugins/unica/third-party/manifest.json >/dev/null
-bash -n plugins/unica/scripts/*.sh
-plugins/unica/scripts/run-unica.sh --help
+cargo run --quiet --bin unica -- --help
 ```
 
 Expected:
 
 - `.mcp.json` has exactly one key under `mcpServers`: `unica`.
-- `run-unica.sh --help` prints `unica <version>` and describes the stdio MCP
+- `cargo run --quiet --bin unica -- --help` prints `unica <version>` and describes the stdio MCP
   orchestrator.
 - Old adapter names are not public MCP registrations.
 - Hidden workspace analyzer services are internal implementation details and do
   not add keys under `mcpServers`.
 - Skill-local operation files are not a target execution path. The target path is
-  MCP `unica`; package wrapper scripts are launcher infrastructure and are
-  allowed.
+  MCP `unica`; runtime shell/PowerShell wrappers are not shipped.
 
 ## Mandatory MCP Smoke
 
@@ -66,7 +64,7 @@ with tempfile.TemporaryDirectory() as tmp:
     env = os.environ.copy()
     env["UNICA_CACHE_DIR"] = str(Path(tmp) / "cache")
     result = subprocess.run(
-        [str(repo / "plugins/unica/scripts/run-unica.sh")],
+        ["cargo", "run", "--quiet", "--bin", "unica", "--"],
         input="\n".join(json.dumps(message) for message in messages) + "\n",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -126,7 +124,7 @@ For a local host-target package, build the tool bundle and package marketplace
 with the normal CI scripts. A valid generated package must satisfy:
 
 - packaged `.mcp.json` exposes exactly `unica`;
-- packaged `scripts/run-unica.sh --help` starts the bundled `unica` binary;
+- packaged `.mcp.json` starts the bundled `bin/<target>/unica` binary directly;
 - generated `third-party/manifest.json` lists `unica` as a bundled tool and
   lists remote standards data only as an internal adapter.
 

@@ -90,6 +90,15 @@ archive_extension() {
   esac
 }
 
+tool_binary() {
+  tool="$1"
+  suffix=""
+  if [ "$TARGET" = "win-x64" ]; then
+    suffix=".exe"
+  fi
+  printf '%s\n' "$MARKETPLACE_DIR/plugins/unica/bin/$TARGET/${tool}${suffix}"
+}
+
 default_codex_home() {
   if [ -n "${HOME:-}" ]; then
     printf '%s\n' "$HOME/.codex"
@@ -225,8 +234,8 @@ rm -rf "$MARKETPLACE_DIR"
 mkdir -p "$(dirname "$MARKETPLACE_DIR")"
 cp -R "$EXTRACTED_MARKETPLACE_DIR" "$MARKETPLACE_DIR"
 
-"$MARKETPLACE_DIR/plugins/unica/scripts/run-v8-runner.sh" config init --help >/dev/null
-"$MARKETPLACE_DIR/plugins/unica/scripts/run-unica.sh" --help >/dev/null
+"$(tool_binary v8-runner)" config init --help >/dev/null
+"$(tool_binary unica)" --help >/dev/null
 PLUGIN_VERSION="$(read_plugin_version "$MARKETPLACE_DIR/plugins/unica/.codex-plugin/plugin.json")"
 CODEX_PLUGIN_CACHE_DIR="$CODEX_HOME_DIR/plugins/cache/$MARKETPLACE_NAME/unica"
 CODEX_PLUGIN_CACHE_VERSION_DIR="$CODEX_PLUGIN_CACHE_DIR/$PLUGIN_VERSION"

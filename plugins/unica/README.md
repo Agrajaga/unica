@@ -11,7 +11,7 @@ The public skills model developer operations, not infrastructure tools:
 - search, review, diagnose, test, and analyze BSL code inside those workflows.
 - bootstrap a new 1C repository workspace with `v8project.yaml`.
 
-Bundled tooling, wrappers, MCP server names, checksums, and third-party notices are internal package infrastructure. Project configuration is `v8project.yaml` / `V8TR_CONFIG`; database and build workflows should use the `v8-runner` skill, which calls MCP `unica.runtime.execute`. See `references/tooling/internal-package.md` when maintaining the plugin itself.
+Bundled tooling, MCP server names, checksums, and third-party notices are internal package infrastructure. Project configuration is `v8project.yaml` / `V8TR_CONFIG`; database and build workflows should use the `v8-runner` skill, which calls MCP `unica.runtime.execute`. See `references/tooling/internal-package.md` when maintaining the plugin itself.
 
 ## Skills
 
@@ -31,8 +31,10 @@ The `skills/` directory contains operation skills and scenario references for 1C
 ## Local Codex Install
 
 The source tree is for plugin and skill development. It does not commit bundled
-tool binaries, so local MCP wrappers that need `bsl-analyzer`, `v8-runner`, or
-`rlm-*` only work from a generated marketplace archive.
+tool binaries. Source `.mcp.json` starts the Rust orchestrator with
+`cargo run --bin unica`; bundled tools such as `bsl-analyzer`, `v8-runner`, and
+`rlm-*` work from generated marketplace archives where target-specific binaries
+exist.
 
 Register the repo-local marketplace from the repository root when you only need
 to inspect skills and metadata:
@@ -62,7 +64,7 @@ scripts/dev/install-local-unica.sh
 The script builds only the current host target, writes the generated marketplace
 under `.build/local-codex-unica/package/marketplace`, removes any previous
 `unica-local` marketplace, adds the new one, validates the bundled MCP metadata
-and launchers, and checks that fresh Codex sees `Unica`, `v8-runner`, and
+and native binaries, and checks that fresh Codex sees `Unica`, `v8-runner`, and
 `db-auth-check`.
 
 Useful development flags:
@@ -79,8 +81,8 @@ scripts/dev/install-local-unica.sh --marketplace-name unica-dev
 | --- | --- | --- | --- |
 | Operation skills and PowerShell scripts | Primary path | Available when PowerShell is installed | The source skills are Windows-first because 1C Designer automation is Windows-first. |
 | Python script ports | Available with Python | Available with `python3` | Used for XML/metadata operations where ports exist. |
-| Bundled binaries | Built by GitHub Actions into `bin/win-x64/` | Built by GitHub Actions into `bin/darwin-arm64/` | Linux x64 is built into `bin/linux-x64/`; each release artifact carries one target-specific manifest. Binaries are ignored in source control. |
-| MCP local tools | Direct PowerShell launcher is supported for packaged Windows binaries | Shell-first stdio MCP orchestrator is supported on macOS/Linux | External standards data is reached through the internal standards adapter. |
+| Bundled binaries | Built by GitHub Actions into `bin/win-x64/` | Built by GitHub Actions into `bin/darwin-arm64/` | Linux x64 is built into `bin/linux-x64/`; the package manifest maps tools to target-specific binaries. Binaries are ignored in source control. |
+| MCP local tools | Rust runtime resolver launches packaged binaries directly | Rust runtime resolver launches packaged binaries directly | Source checkouts use `cargo run --bin unica`; generated packages use `bin/<target>/` binaries. External standards data is reached through the internal standards adapter. |
 | 1C platform operations | Requires local 1C platform | Requires local 1C platform or compatible tooling | Skills resolve project/database context from `v8project.yaml` when present. |
 
 ## Bundled Tools
@@ -96,13 +98,18 @@ versions in CI scripts or docs.
 - `unica`
 - remote v8std MCP endpoint: `https://ai.v8std.ru/mcp`
 
-Every bundled binary launch goes through a wrapper:
+Internal MCP runtime launches resolve bundled tools directly from Rust:
 
-- `scripts/run-tool.sh` for macOS/Linux shell environments;
-- `scripts/run-tool.ps1` for PowerShell environments;
-- per-tool shell wrappers used by the `unica` orchestrator as internal adapters.
+- read `third-party/manifest.json`;
+- select the current host target (`darwin-arm64`, `linux-x64`, or `win-x64`);
+- verify SHA-256 before real execution;
+- execute the pinned `bin/<target>/<tool>` binary directly.
 
-Wrappers read `third-party/manifest.json`, check the host target, verify SHA-256, and then execute the pinned binary. This prevents Codex from accidentally using a global tool of another version.
+Runtime shell and PowerShell wrappers are not shipped. Source checkouts use
+`cargo run --bin unica` for the orchestrator, and generated packages use the
+native `bin/<target>/unica` entrypoint plus Rust-side resolver calls for internal
+tools. This prevents Codex from accidentally using a different globally
+installed version.
 
 ## Release Pipeline
 
@@ -132,7 +139,12 @@ Unica is licensed under `LGPL-3.0-or-later`. See `LICENSE`.
 
 - `unica`
 
-`unica` owns workspace discovery, cache coordination, and adapter orchestration. Build/runtime tooling, code analysis, standards lookup, and XML/JSON DSL fallback scripts are private implementation details behind this one MCP contract.
+`unica` owns workspace discovery, cache coordination, and adapter orchestration.
+Build/runtime tooling, code analysis, standards lookup, and XML/JSON DSL
+fallback scripts are private implementation details behind this one MCP
+contract. Source checkout metadata uses `cargo run --bin unica` because
+generated binaries are absent from git; packaged archives rewrite `.mcp.json` to
+launch `./bin/<target>/unica` directly.
 
 ## Verification
 
@@ -145,7 +157,6 @@ python3.12 -m json.tool plugins/unica/.codex-plugin/plugin.json >/dev/null
 python3.12 -m json.tool plugins/unica/.mcp.json >/dev/null
 python3.12 -m json.tool plugins/unica/third-party/tools.lock.json >/dev/null
 python3.12 -m json.tool plugins/unica/third-party/manifest.json >/dev/null
-bash -n plugins/unica/scripts/*.sh
 cargo fmt --all -- --check
 cargo clippy --package unica-coder --all-targets --all-features -- -D warnings
 cargo test --package unica-coder
@@ -154,14 +165,17 @@ git diff --check
 codex debug prompt-input 'test'
 ```
 
-For generated marketplace packages on macOS arm64, extract the archive and run:
+For generated marketplace packages, extract the archive and run native binaries
+from the package target directory:
 
 ```sh
-plugins/unica/scripts/run-bsl-analyzer.sh --version
-plugins/unica/scripts/run-v8-runner.sh config init --help
-plugins/unica/scripts/run-rlm-tools-bsl.sh --version
-plugins/unica/scripts/run-rlm-bsl-index.sh --version
-plugins/unica/scripts/run-unica.sh --help
+TARGET=darwin-arm64
+plugins/unica/bin/$TARGET/bsl-analyzer --version
+plugins/unica/bin/$TARGET/bsl-analyzer search --help
+plugins/unica/bin/$TARGET/v8-runner config init --help
+plugins/unica/bin/$TARGET/rlm-tools-bsl --version
+plugins/unica/bin/$TARGET/rlm-bsl-index --version
+plugins/unica/bin/$TARGET/unica --help
 ```
 
 ## Updating Pinned Tools
@@ -173,4 +187,4 @@ For every tool update:
 1. update pinned versions, tags, commits, upstream URLs, licenses, and target asset names in `third-party/tools.lock.json`;
 2. run the GitHub Actions release workflow;
 3. inspect the generated `third-party/manifest.json` inside the marketplace artifact;
-4. run JSON validation, script syntax checks, binary version/help checks, MCP smoke tests, and fresh Codex prompt-input verification against the generated artifact.
+4. run JSON validation, Python compile checks, binary version/help checks, MCP smoke tests, and fresh Codex prompt-input verification against the generated artifact.

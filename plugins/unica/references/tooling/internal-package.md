@@ -35,37 +35,32 @@ workflow generate binaries, SHA-256 entries, and marketplace archives.
 
 ## Launchers
 
-Bundled tools are launched through checksum-verifying wrappers instead of direct
-binary paths. This prevents accidental use of a globally installed tool with a
-different version.
+Internal MCP runtime launches bundled tools through the Rust manifest resolver,
+not through shell or PowerShell wrappers. The resolver prevents accidental use
+of a globally installed tool with a different version by selecting the pinned
+package binary and verifying SHA-256 before execution.
 
-- `scripts/run-tool.sh <tool-name> [args...]` is the macOS/Linux launcher.
-- `scripts/run-tool.ps1 <tool-name> [args...]` is the PowerShell launcher.
-- Per-tool shell wrappers call `run-tool.sh` for internal adapters.
-  The packaged MCP runtime is shell-first on macOS/Linux; Windows can run
-  bundled tools through PowerShell wrappers, but stdio MCP orchestration currently
-  require a shell-compatible launcher.
+- The Rust resolver reads `third-party/manifest.json`, selects the current
+  target (`darwin-arm64`, `linux-x64`, or `win-x64`), verifies the binary, and
+  launches `bin/<target>/<tool>` directly.
+- Source checkout `.mcp.json` starts the Rust orchestrator with
+  `cargo run --bin unica`.
+- Generated marketplace packages rewrite `.mcp.json` to start
+  `./bin/<target>/unica` directly.
 
-Launcher responsibilities:
+Runtime resolver responsibilities:
 
-- locate the plugin root from the launcher path;
+- locate the plugin root;
 - read `third-party/manifest.json`;
 - reject unsupported host triples;
 - verify the tool binary exists;
 - verify SHA-256 before every execution;
 - forward all remaining arguments unchanged.
 
-Runtime script inventory in `plugins/unica/scripts/` is intentionally small:
-
-- `run-tool.sh`: common macOS/Linux manifest and checksum launcher;
-- `run-tool.ps1`: common PowerShell manifest and checksum launcher;
-- `run-bsl-analyzer.sh`, `run-v8-runner.sh`, `run-rlm-tools-bsl.sh`, `run-rlm-bsl-index.sh`: direct per-tool shell entrypoints for smoke tests and manual use;
-- `run-bsl-reference.sh`, `run-bsl-workspace.sh`, `run-v8-runner-mcp.sh`: MCP profile launchers where one binary exposes several task-specific server modes.
-
-That is nine runtime scripts: two common launchers, four direct tool wrappers,
-and three MCP profile wrappers. Dependency versions must not be copied into
-these scripts; they come from `third-party/tools.lock.json` and the generated
-manifest.
+Runtime shell/PowerShell wrapper files are intentionally absent from
+`plugins/unica/scripts/`. Dependency versions must stay in
+`third-party/tools.lock.json` and the generated manifest, not in executable
+launcher scripts.
 
 ## Release Packaging
 
@@ -97,7 +92,10 @@ The plugin declares exactly one public MCP server in `.mcp.json`:
 Operation skills should route through `unica`. Build/runtime tools, code
 analysis, standards lookup, and XML/JSON DSL scripts are internal adapters
 owned by the orchestrator, so cache refresh and source-set invalidation happen
-inside one process instead of through LLM-visible coordination.
+inside one process instead of through LLM-visible coordination. The source
+checkout `.mcp.json` uses `cargo run --bin unica` because binaries are not
+committed; release packaging rewrites `.mcp.json` to launch the
+platform-specific `./bin/<target>/unica` binary directly.
 
 ## Reference Material
 
@@ -122,7 +120,6 @@ python3 -m json.tool plugins/unica/.codex-plugin/plugin.json >/dev/null
 python3 -m json.tool plugins/unica/.mcp.json >/dev/null
 python3 -m json.tool plugins/unica/third-party/tools.lock.json >/dev/null
 python3 -m json.tool plugins/unica/third-party/manifest.json >/dev/null
-bash -n plugins/unica/scripts/*.sh
 python3 -m py_compile scripts/ci/*.py
 rg 'unica-(bsl|v8-runner|v8std|rlm-tools-bsl|coder)' plugins/unica/skills
 codex debug prompt-input 'test'

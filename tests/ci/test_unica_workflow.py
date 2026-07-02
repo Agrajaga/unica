@@ -47,7 +47,6 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
             "python -m json.tool plugins/unica/.mcp.json >/dev/null",
             "python -m json.tool plugins/unica/third-party/tools.lock.json >/dev/null",
             "python -m json.tool plugins/unica/third-party/manifest.json >/dev/null",
-            "bash -n plugins/unica/scripts/*.sh",
             "cargo fmt --all -- --check",
             "cargo clippy --package unica-coder --all-targets --all-features -- -D warnings",
             "cargo test --package unica-coder",
@@ -56,6 +55,9 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
         for token in required_tokens:
             with self.subTest(token=token):
                 self.assertIn(token, text)
+
+        self.assertNotIn("bash -n plugins/unica/scripts/*.sh", text)
+        self.assertNotIn("Check shell launchers", text)
 
     def test_pull_request_runs_cancel_stale_commits(self) -> None:
         text = self.workflow_text()

@@ -2,9 +2,10 @@
 
 ## Initialize
 
-1. Codex starts `plugins/unica/scripts/run-unica.sh`.
-2. Source checkout path runs `cargo run --package unica-coder --bin unica`.
-3. Packaged path runs `scripts/run-tool.sh unica`.
+1. Source checkout `.mcp.json` starts `cargo run --bin unica`.
+2. Packaged `.mcp.json` starts `./bin/<target>/unica` directly.
+3. The Rust runtime resolver starts internal bundled tools directly from
+   `bin/<target>/<tool>`.
 4. MCP `initialize` returns `serverInfo.name = "unica"`.
 
 ## Tool List

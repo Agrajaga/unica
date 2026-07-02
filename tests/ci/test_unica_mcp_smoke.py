@@ -18,7 +18,7 @@ class UnicaMcpSmokeTests(unittest.TestCase):
             env["UNICA_CACHE_DIR"] = str(cache_dir)
         payload = "\n".join(json.dumps(message) for message in messages) + "\n"
         result = subprocess.run(
-            [str(self.repo_root() / "plugins" / "unica" / "scripts" / "run-unica.sh")],
+            ["cargo", "run", "--quiet", "--bin", "unica", "--"],
             input=payload,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -98,4 +98,7 @@ class UnicaMcpSmokeTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["cache"]["mode"], "dry-run")
         self.assertIn("SourceSetChanged", payload["cache"]["events"])
-        self.assertIn("run-v8-runner.sh", " ".join(payload["command"]))
+        command = " ".join(payload["command"])
+        self.assertIn("bin/", command)
+        self.assertIn("v8-runner", command)
+        self.assertNotIn("run-v8-runner.sh", command)

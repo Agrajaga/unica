@@ -352,7 +352,7 @@ fn call_tool(spec: ToolSpec, args: &Map<String, Value>) -> Result<OperationResul
         ToolHandler::ProjectStatus => project_status(&context),
         ToolHandler::ProjectMap => project_map(&context),
         ToolHandler::BuildRuntime { command, .. } => CliAdapter::new(
-            "run-v8-runner.sh",
+            "v8-runner",
             command,
             "build/runtime",
         )
@@ -370,7 +370,7 @@ fn call_tool(spec: ToolSpec, args: &Map<String, Value>) -> Result<OperationResul
             command: ["graph"] | ["analyze"],
         } => BslAnalyzerMcpAdapter::new().invoke(spec.name, args, &context, dry_run)?,
         ToolHandler::CodeAdapter { command } => CliAdapter::new(
-            "run-bsl-analyzer.sh",
+            "bsl-analyzer",
             command,
             "code analysis",
         )

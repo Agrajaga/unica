@@ -12,29 +12,29 @@ from pathlib import Path
 TOOL_HELP_CHECKS = [
     (
         "bsl-analyzer analyze source-dir/jsonl",
-        "run-bsl-analyzer.sh",
+        "bsl-analyzer",
         ["analyze", "--help"],
         ["--source-dir", "--format", "jsonl"],
     ),
-    ("bsl-analyzer search namespace", "run-bsl-analyzer.sh", ["search", "--help"], ["baseline"]),
+    ("bsl-analyzer search namespace", "bsl-analyzer", ["search", "--help"], ["baseline"]),
     (
         "bsl-analyzer mcp workspace stdio",
-        "run-bsl-analyzer.sh",
+        "bsl-analyzer",
         ["mcp", "serve", "--help"],
         ["--profile", "--source-dir", "--mode", "stdio"],
     ),
-    ("bsl-analyzer smoke", "run-bsl-analyzer.sh", ["smoke", "--help"], ["--scenarios", "--json"]),
-    ("rlm-bsl-index build", "run-rlm-bsl-index.sh", ["index", "build", "--help"], ["build"]),
-    ("rlm-bsl-index update", "run-rlm-bsl-index.sh", ["index", "update", "--help"], ["update"]),
-    ("rlm-bsl-index info", "run-rlm-bsl-index.sh", ["index", "info", "--help"], ["info"]),
+    ("bsl-analyzer smoke", "bsl-analyzer", ["smoke", "--help"], ["--scenarios", "--json"]),
+    ("rlm-bsl-index build", "rlm-bsl-index", ["index", "build", "--help"], ["build"]),
+    ("rlm-bsl-index update", "rlm-bsl-index", ["index", "update", "--help"], ["update"]),
+    ("rlm-bsl-index info", "rlm-bsl-index", ["index", "info", "--help"], ["info"]),
     (
         "rlm-tools-bsl server",
-        "run-rlm-tools-bsl.sh",
+        "rlm-tools-bsl",
         ["--help"],
         ["--transport", "stdio", "streamable-http"],
     ),
-    ("v8-runner version", "run-v8-runner.sh", ["--version"], ["v8-runner"]),
-    ("v8-runner build", "run-v8-runner.sh", ["build", "--help"], ["build"]),
+    ("v8-runner version", "v8-runner", ["--version"], ["v8-runner"]),
+    ("v8-runner build", "v8-runner", ["build", "--help"], ["build"]),
 ]
 
 RLM_SCHEMA_COLUMNS = {
@@ -83,17 +83,42 @@ def run_command(command: list[str], cwd: Path) -> tuple[int, str]:
     return result.returncode, result.stdout + result.stderr
 
 
-def check_tool_contracts(scripts_dir: Path) -> list[str]:
-    scripts_dir = scripts_dir.resolve()
+def detect_target() -> str:
+    import platform
+
+    system = platform.system()
+    machine = platform.machine().lower()
+    if system == "Darwin" and machine in {"arm64", "aarch64"}:
+        return "darwin-arm64"
+    if system == "Linux" and machine in {"x86_64", "amd64"}:
+        return "linux-x64"
+    if system == "Windows" and machine in {"x86_64", "amd64"}:
+        return "win-x64"
+    raise SystemExit(f"unsupported Unica tool target: {system}-{machine}")
+
+
+def tool_executable(tools_dir: Path, tool_name: str, target: str | None) -> Path:
+    suffix = ".exe" if target == "win-x64" else ""
+    candidate = tools_dir / f"{tool_name}{suffix}"
+    if candidate.exists() or suffix:
+        return candidate
+    exe_candidate = tools_dir / f"{tool_name}.exe"
+    if exe_candidate.exists():
+        return exe_candidate
+    return candidate
+
+
+def check_tool_contracts(tools_dir: Path, target: str | None = None) -> list[str]:
+    tools_dir = tools_dir.resolve()
     errors: list[str] = []
-    for label, script_name, args, expected_tokens in TOOL_HELP_CHECKS:
-        script = scripts_dir / script_name
-        if not script.exists():
-            errors.append(f"{label}: launcher not found: {script}")
+    for label, tool_name, args, expected_tokens in TOOL_HELP_CHECKS:
+        tool = tool_executable(tools_dir, tool_name, target)
+        if not tool.exists():
+            errors.append(f"{label}: binary not found: {tool}")
             continue
-        status, output = run_command([str(script), *args], scripts_dir)
+        status, output = run_command([str(tool), *args], tools_dir)
         if status != 0:
-            errors.append(f"{label}: command exited with {status}: {' '.join([script_name, *args])}")
+            errors.append(f"{label}: command exited with {status}: {' '.join([tool.name, *args])}")
             continue
         for token in expected_tokens:
             if token not in output:
@@ -133,11 +158,14 @@ def check_rlm_schema(db_path: Path) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scripts-dir", type=Path, default=Path("plugins/unica/scripts"))
+    parser.add_argument("--target", default=None)
+    parser.add_argument("--tools-dir", type=Path)
     parser.add_argument("--rlm-db", type=Path)
     args = parser.parse_args()
 
-    errors = check_tool_contracts(args.scripts_dir)
+    target = args.target or detect_target()
+    tools_dir = args.tools_dir or Path("plugins/unica/bin") / target
+    errors = check_tool_contracts(tools_dir, target)
     if args.rlm_db:
         errors.extend(check_rlm_schema(args.rlm_db))
 

@@ -27,7 +27,7 @@ class PackageUnicaPluginTests(unittest.TestCase):
             "schemaVersion": 1,
             "targets": {
                 "darwin-arm64": {"targetTriple": "aarch64-apple-darwin"},
-                "linux-x64": {"targetTriple": "x86_64-unknown-linux-musl"},
+                "linux-x64": {"targetTriple": "x86_64-unknown-linux-gnu"},
             },
             "tools": [
                 {
@@ -53,21 +53,133 @@ class PackageUnicaPluginTests(unittest.TestCase):
 
         server = mcp["mcpServers"]["unica"]
 
-        self.assertEqual(server["command"], "bash")
-        self.assertIn("run-unica.sh", " ".join(server["args"]))
+        self.assertEqual(server["command"], "cargo")
+        self.assertEqual(server["args"], ["run", "--quiet", "--bin", "unica", "--"])
         self.assertIn("orchestrator", server["note"])
-        self.assertNotIn("unica-coder", json.dumps(server))
+        self.assertNotIn("bash", json.dumps(server))
+        self.assertNotIn("run-unica.sh", json.dumps(server))
 
-    def test_packaged_launcher_exports_plugin_root_for_workspace_sidecars(self) -> None:
+    def test_source_tree_does_not_ship_runtime_shell_wrappers(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
-        launcher = repo_root / "plugins" / "unica" / "scripts" / "run-tool.sh"
-        text = launcher.read_text(encoding="utf-8")
+        scripts_dir = repo_root / "plugins" / "unica" / "scripts"
 
-        self.assertIn('export UNICA_PLUGIN_ROOT="$PLUGIN_ROOT"', text)
-        self.assertLess(
-            text.index('export UNICA_PLUGIN_ROOT="$PLUGIN_ROOT"'),
-            text.index('exec "$BINARY" "$@"'),
+        wrappers = sorted(
+            {
+                path.relative_to(repo_root).as_posix()
+                for pattern in ("run-*.sh", "run-*.cmd", "run-*.ps1", "run-tool.*")
+                for path in scripts_dir.glob(pattern)
+            }
         )
+
+        self.assertEqual(wrappers, [])
+
+    def test_source_mcp_does_not_use_runtime_shell_wrappers(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        mcp = json.loads((repo_root / "plugins" / "unica" / ".mcp.json").read_text(encoding="utf-8"))
+        serialized = json.dumps(mcp)
+
+        forbidden = sorted(
+            {
+                pattern
+                for pattern in ("bash", "cmd.exe", "powershell", ".sh", ".cmd", ".ps1", "run-tool", "run-unica")
+                if pattern in serialized
+            }
+        )
+
+        self.assertEqual(forbidden, [])
+
+    def test_packaged_mcp_does_not_use_runtime_shell_wrappers(self) -> None:
+        module = load_package_module()
+        repo_root = Path(__file__).resolve().parents[2]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_dir = Path(tmp) / "plugins" / "unica"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / ".mcp.json").write_text(
+                (repo_root / "plugins" / "unica" / ".mcp.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            module.write_packaged_mcp_launcher(
+                plugin_dir,
+                {
+                    "unica": {
+                        "binaries": {
+                            "linux-x64": {
+                                "binaryPath": "bin/linux-x64/unica",
+                            }
+                        }
+                    }
+                },
+            )
+            mcp = json.loads((plugin_dir / ".mcp.json").read_text(encoding="utf-8"))
+
+        serialized = json.dumps(mcp)
+        forbidden = sorted(
+            {
+                pattern
+                for pattern in ("bash", "cmd.exe", "powershell", ".sh", ".cmd", ".ps1", "run-tool", "run-unica")
+                if pattern in serialized
+            }
+        )
+
+        self.assertEqual(forbidden, [])
+        self.assertEqual(mcp["mcpServers"]["unica"]["command"], "./bin/linux-x64/unica")
+
+    def test_source_tree_does_not_reference_deleted_runtime_shell_wrappers_in_active_docs(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        active_paths = [
+            repo_root / "README.md",
+            repo_root / "plugins" / "unica" / "README.md",
+            repo_root / "plugins" / "unica" / "references" / "tooling" / "internal-package.md",
+            repo_root / "spec" / "acceptance" / "unica-mcp-validation.md",
+            repo_root / "spec" / "architecture" / "arc42" / "06-runtime-view.md",
+            repo_root / "spec" / "architecture" / "arc42" / "07-deployment-view.md",
+            repo_root / "spec" / "architecture" / "change-checklist.md",
+            repo_root / "spec" / "decisions" / "0001-edinyy-publichnyy-mcp-unica.md",
+            repo_root / "spec" / "decisions" / "0004-legacy-skill-scripts-are-migration-debt.md",
+        ]
+        forbidden = ("run-unica.sh", "run-tool.sh", "run-tool.ps1", "run-bsl-analyzer.sh", "run-v8-runner.sh")
+
+        matches = [
+            f"{path.relative_to(repo_root)}:{needle}"
+            for path in active_paths
+            for needle in forbidden
+            if needle in path.read_text(encoding="utf-8")
+        ]
+
+        self.assertEqual(matches, [])
+
+    def test_packaged_mcp_launches_unica_binary_directly(self) -> None:
+        module = load_package_module()
+        repo_root = Path(__file__).resolve().parents[2]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_dir = Path(tmp) / "plugins" / "unica"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / ".mcp.json").write_text(
+                (repo_root / "plugins" / "unica" / ".mcp.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            module.write_packaged_mcp_launcher(
+                plugin_dir,
+                {
+                    "unica": {
+                        "binaries": {
+                            "win-x64": {
+                                "binaryPath": "bin/win-x64/unica.exe",
+                            }
+                        }
+                    }
+                },
+            )
+
+            mcp = json.loads((plugin_dir / ".mcp.json").read_text(encoding="utf-8"))
+
+        server = mcp["mcpServers"]["unica"]
+        self.assertEqual(server["command"], "./bin/win-x64/unica.exe")
+        self.assertEqual(server["args"], [])
+        self.assertNotIn("bash", server["command"])
+        self.assertNotIn("run-unica.sh", json.dumps(server))
 
     def write_bundle(self, root: Path, target: str, module) -> Path:
         bundle = root / f"unica-tools-{target}"
@@ -77,7 +189,7 @@ class PackageUnicaPluginTests(unittest.TestCase):
         binary.write_text(f"binary for {target}", encoding="utf-8")
         target_triples = {
             "darwin-arm64": "aarch64-apple-darwin",
-            "linux-x64": "x86_64-unknown-linux-musl",
+            "linux-x64": "x86_64-unknown-linux-gnu",
         }
         (bundle / "tools.json").write_text(
             json.dumps(
@@ -202,8 +314,8 @@ class PackageUnicaPluginTests(unittest.TestCase):
             copied_mode = (dest / "v8-runner").stat().st_mode
             self.assertTrue(copied_mode & stat.S_IXUSR)
 
-    @unittest.skipIf(os.name == "nt", "generated shell launcher smoke is POSIX-only")
-    def test_generated_marketplace_runs_packaged_unica_help(self) -> None:
+    @unittest.skipIf(os.name == "nt", "generated native binary smoke is POSIX-only")
+    def test_generated_marketplace_runs_packaged_unica_help_natively(self) -> None:
         module = load_package_module()
         repo_root = Path(__file__).resolve().parents[2]
         target = "darwin-arm64" if os.uname().sysname == "Darwin" else "linux-x64"
@@ -300,6 +412,11 @@ class PackageUnicaPluginTests(unittest.TestCase):
                 )
             )
             self.assertEqual(sorted(packaged_mcp["mcpServers"]), ["unica"])
+            self.assertEqual(
+                packaged_mcp["mcpServers"]["unica"]["command"],
+                f"./bin/{target}/unica",
+            )
+            self.assertEqual(packaged_mcp["mcpServers"]["unica"]["args"], [])
             provenance = out_dir / "marketplace" / "plugins" / "unica" / "provenance" / "skill-upstreams.json"
             self.assertTrue(provenance.is_file())
             self.assertIn("v8-runner-rust", provenance.read_text(encoding="utf-8"))
@@ -340,8 +457,9 @@ class PackageUnicaPluginTests(unittest.TestCase):
                         / "marketplace"
                         / "plugins"
                         / "unica"
-                        / "scripts"
-                        / "run-unica.sh"
+                        / "bin"
+                        / target
+                        / "unica"
                     ),
                     "--help",
                 ],

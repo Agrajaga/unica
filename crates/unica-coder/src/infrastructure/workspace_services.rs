@@ -1,5 +1,6 @@
 use crate::domain::events::DomainEvent;
 use crate::domain::workspace::WorkspaceContext;
+use crate::infrastructure::bundled_tools::resolve_bundled_tool;
 use crate::infrastructure::legacy_scripts::find_plugin_root;
 use crate::infrastructure::workspace_index::{IndexReadiness, WorkspaceIndexService};
 use serde::{Deserialize, Serialize};
@@ -672,9 +673,9 @@ impl BslMcpSession {
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root for workspace bsl-analyzer service".to_string()
         })?;
-        let launcher = plugin_root.join("scripts").join("run-bsl-analyzer.sh");
+        let program = resolve_bundled_tool(&plugin_root, "bsl-analyzer", true)?.program;
         let source_arg = source_root.display().to_string();
-        let mut child = Command::new(&launcher)
+        let mut child = Command::new(&program)
             .args([
                 "mcp",
                 "serve",

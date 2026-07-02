@@ -87,9 +87,6 @@ jobs:
           python -m json.tool plugins/unica/third-party/tools.lock.json >/dev/null
           python -m json.tool plugins/unica/third-party/manifest.json >/dev/null
 
-      - name: Check shell launchers
-        run: bash -n plugins/unica/scripts/*.sh
-
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 

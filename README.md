@@ -8,7 +8,7 @@ Unica - это плагин для Codex, который помогает раб
 
 - `plugins/unica/skills/` - прикладные навыки Codex: формы, метаданные, EPF/ERF, базы, роли, СКД, веб-публикация и другие задачи 1С.
 - `plugins/unica/.mcp.json` - MCP-подключения для поиска кода, работы с инструментами 1С и справочными материалами.
-- `plugins/unica/scripts/` - безопасные запускатели bundled-инструментов.
+- `plugins/unica/scripts/legacy/` - временные legacy-реализации операций, которые еще мигрируют в Rust MCP.
 - `plugins/unica/third-party/tools.lock.json` - единый список версий внешних инструментов.
 - `.github/workflows/unica-plugin-release.yml` - сборка готового пакета плагина для установки.
 
@@ -70,8 +70,7 @@ scripts/dev/install-local-unica.sh
 
 - Установленный Codex CLI.
 - Для реальных операций с базами и конфигурациями - установленная платформа 1С.
-- Для Windows-сценариев - PowerShell.
-- Для macOS/Linux MCP-сценариев - shell-окружение.
+- Для Windows-сценариев 1С - PowerShell, пока соответствующие legacy-операции не мигрированы.
 
 ## Где смотреть детали
 

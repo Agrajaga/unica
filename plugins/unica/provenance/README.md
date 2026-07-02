@@ -64,10 +64,10 @@ Product update backlogs live in the same `reviews/` directory. They are package
 metadata, not prompt-visible skill routing guidance.
 
 After updating bundled tools, run the contract smoke against the packaged or
-locally installed launchers:
+locally installed native binaries:
 
 ```sh
-python3.12 scripts/ci/check-tool-contracts.py --scripts-dir plugins/unica/scripts
+python3.12 scripts/ci/check-tool-contracts.py --target darwin-arm64 --tools-dir plugins/unica/bin/darwin-arm64
 ```
 
 Pass `--rlm-db <path/to/bsl_index.db>` when validating an actual

@@ -105,7 +105,7 @@ Required checks:
 ```bash
 python3.12 scripts/ci/build-unica-tools.py --target darwin-arm64 --out-dir .build/unica-tools-smoke
 python3.12 scripts/ci/package-unica-plugin.py --tools-root .build/unica-tools-smoke --out-dir .build/unica-package-smoke --allow-partial-targets --no-archives --target darwin-arm64
-python3.12 scripts/ci/check-tool-contracts.py --scripts-dir .build/unica-package-smoke/marketplace/plugins/unica/scripts
+python3.12 scripts/ci/check-tool-contracts.py --tools-dir .build/unica-package-smoke/marketplace/plugins/unica/bin/darwin-arm64
 ```
 
 Expected: existing index schema still reports `builder_version=14`, `methods_fts`, `methods`, `modules`, `regions`, and `module_headers`.
@@ -115,9 +115,9 @@ Expected: existing index schema still reports `builder_version=14`, `methods_fts
 Build/update/info a small fixture:
 
 ```bash
-.build/unica-package-smoke/marketplace/plugins/unica/scripts/run-rlm-bsl-index.sh index build tests/fixtures/unica_mcp_script_parity/meta-remove
-.build/unica-package-smoke/marketplace/plugins/unica/scripts/run-rlm-bsl-index.sh index info tests/fixtures/unica_mcp_script_parity/meta-remove
-.build/unica-package-smoke/marketplace/plugins/unica/scripts/run-rlm-bsl-index.sh index update tests/fixtures/unica_mcp_script_parity/meta-remove
+.build/unica-package-smoke/marketplace/plugins/unica/bin/darwin-arm64/rlm-bsl-index index build tests/fixtures/unica_mcp_script_parity/meta-remove
+.build/unica-package-smoke/marketplace/plugins/unica/bin/darwin-arm64/rlm-bsl-index index info tests/fixtures/unica_mcp_script_parity/meta-remove
+.build/unica-package-smoke/marketplace/plugins/unica/bin/darwin-arm64/rlm-bsl-index index update tests/fixtures/unica_mcp_script_parity/meta-remove
 ```
 
 Expected: `builder_version` remains `14`; update does not demand full rebuild solely due to `v1.24.0`.
@@ -226,8 +226,8 @@ Use current `v0.2.37` as control and `v0.2.43` as candidate. Required gates:
 ```bash
 python3.12 scripts/ci/build-unica-tools.py --target darwin-arm64 --out-dir .build/unica-tools-smoke
 python3.12 scripts/ci/package-unica-plugin.py --tools-root .build/unica-tools-smoke --out-dir .build/unica-package-smoke --allow-partial-targets --no-archives --target darwin-arm64
-.build/unica-package-smoke/marketplace/plugins/unica/scripts/run-bsl-analyzer.sh analyze -s tests/fixtures/unica_mcp_script_parity/meta-remove --format=jsonl
-python3.12 scripts/ci/check-tool-contracts.py --scripts-dir .build/unica-package-smoke/marketplace/plugins/unica/scripts
+.build/unica-package-smoke/marketplace/plugins/unica/bin/darwin-arm64/bsl-analyzer analyze -s tests/fixtures/unica_mcp_script_parity/meta-remove --format=jsonl
+python3.12 scripts/ci/check-tool-contracts.py --tools-dir .build/unica-package-smoke/marketplace/plugins/unica/bin/darwin-arm64
 ```
 
 - [ ] **Step 3: Decide skill adaptation scope**

@@ -25,13 +25,14 @@ target architecture.
 3. Migrated skills must reference MCP `unica` tools only.
 4. After parity, migrated skill-local operation files must be removed from
    `plugins/unica/skills`.
-5. Package launchers and CI scripts remain infrastructure and are not covered by
-   this removal rule.
+5. Package metadata, generated native binaries, and CI scripts remain
+   infrastructure and are not covered by this skill-local removal rule.
 
 ## Неграницы
 
 1. This ADR does not delete existing files immediately.
-2. This ADR does not ban package wrapper scripts such as `run-unica.sh`.
+2. This ADR does not require replacing source checkout `cargo run` or packaged
+   native binary entrypoints.
 3. This ADR does not require replacing bundled external engines that remain
    behind internal adapters.
 
@@ -53,5 +54,5 @@ target architecture.
 ## Верификация
 
 - [x] ADR states that skill-local operation files are not target architecture.
-- [x] ADR distinguishes package launchers from skill-local operation files.
+- [x] ADR distinguishes package/runtime entrypoints from skill-local operation files.
 - [x] ADR requires MCP implementation and parity tests before deletion.

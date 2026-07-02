@@ -94,6 +94,15 @@ detect_target() {
   esac
 }
 
+tool_binary() {
+  local tool="$1"
+  local suffix=""
+  if [ "$TARGET" = "win-x64" ]; then
+    suffix=".exe"
+  fi
+  printf '%s\n' "$MARKETPLACE_DIR/plugins/unica/bin/$TARGET/${tool}${suffix}"
+}
+
 PYTHON_BIN="$(select_python)"
 TARGET="$(detect_target)"
 BUILD_ROOT="$(cd "$REPO_ROOT" && mkdir -p "$BUILD_ROOT" && cd "$BUILD_ROOT" && pwd)"
@@ -188,8 +197,8 @@ rm -rf "$PACKAGE_OUT"
 "$PYTHON_BIN" -m json.tool "$MARKETPLACE_DIR/plugins/unica/.mcp.json" >/dev/null
 "$PYTHON_BIN" -m json.tool "$MARKETPLACE_DIR/plugins/unica/third-party/manifest.json" >/dev/null
 
-"$MARKETPLACE_DIR/plugins/unica/scripts/run-v8-runner.sh" config init --help >/dev/null
-"$MARKETPLACE_DIR/plugins/unica/scripts/run-unica.sh" --help >/dev/null
+"$(tool_binary v8-runner)" config init --help >/dev/null
+"$(tool_binary unica)" --help >/dev/null
 PLUGIN_VERSION="$("$PYTHON_BIN" -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' "$MARKETPLACE_DIR/plugins/unica/.codex-plugin/plugin.json")"
 CODEX_PLUGIN_CACHE_VERSION_DIR="$CODEX_PLUGIN_CACHE_DIR/$PLUGIN_VERSION"
 

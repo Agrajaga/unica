@@ -18,8 +18,8 @@ def load_contract_module():
 
 
 class ProductContractTests(unittest.TestCase):
-    def write_script(self, scripts_dir: Path, name: str, body: str) -> None:
-        path = scripts_dir / name
+    def write_executable(self, tools_dir: Path, name: str, body: str) -> None:
+        path = tools_dir / name
         path.write_text(body, encoding="utf-8")
         path.chmod(path.stat().st_mode | 0o755)
 
@@ -27,63 +27,63 @@ class ProductContractTests(unittest.TestCase):
         module = load_contract_module()
 
         with tempfile.TemporaryDirectory() as tmp:
-            scripts_dir = Path(tmp)
-            self.write_script(
-                scripts_dir,
-                "run-bsl-analyzer.sh",
+            tools_dir = Path(tmp)
+            self.write_executable(
+                tools_dir,
+                "bsl-analyzer",
                 "#!/usr/bin/env sh\n"
                 "printf '%s\\n' '--source-dir --format jsonl baseline --profile workspace reference "
                 "--mode stdio --scenarios --json mcp serve analyze search smoke'\n",
             )
-            self.write_script(
-                scripts_dir,
-                "run-rlm-bsl-index.sh",
+            self.write_executable(
+                tools_dir,
+                "rlm-bsl-index",
                 "#!/usr/bin/env sh\nprintf '%s\\n' 'index build update info'\n",
             )
-            self.write_script(
-                scripts_dir,
-                "run-rlm-tools-bsl.sh",
+            self.write_executable(
+                tools_dir,
+                "rlm-tools-bsl",
                 "#!/usr/bin/env sh\nprintf '%s\\n' '--transport stdio streamable-http service'\n",
             )
-            self.write_script(
-                scripts_dir,
-                "run-v8-runner.sh",
+            self.write_executable(
+                tools_dir,
+                "v8-runner",
                 "#!/usr/bin/env sh\nprintf '%s\\n' 'v8-runner 0.5.1 version build'\n",
             )
 
-            errors = module.check_tool_contracts(scripts_dir)
+            errors = module.check_tool_contracts(tools_dir)
 
         self.assertEqual(errors, [])
 
-    def test_tool_help_contracts_accept_relative_scripts_dir(self) -> None:
+    def test_tool_help_contracts_accept_relative_tools_dir(self) -> None:
         module = load_contract_module()
 
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp:
-            scripts_dir = Path(tmp)
-            self.write_script(
-                scripts_dir,
-                "run-bsl-analyzer.sh",
+            tools_dir = Path(tmp)
+            self.write_executable(
+                tools_dir,
+                "bsl-analyzer",
                 "#!/usr/bin/env sh\n"
                 "printf '%s\\n' '--source-dir --format jsonl baseline --profile workspace reference "
                 "--mode stdio --scenarios --json mcp serve analyze search smoke'\n",
             )
-            self.write_script(
-                scripts_dir,
-                "run-rlm-bsl-index.sh",
+            self.write_executable(
+                tools_dir,
+                "rlm-bsl-index",
                 "#!/usr/bin/env sh\nprintf '%s\\n' 'index build update info'\n",
             )
-            self.write_script(
-                scripts_dir,
-                "run-rlm-tools-bsl.sh",
+            self.write_executable(
+                tools_dir,
+                "rlm-tools-bsl",
                 "#!/usr/bin/env sh\nprintf '%s\\n' '--transport stdio streamable-http service'\n",
             )
-            self.write_script(
-                scripts_dir,
-                "run-v8-runner.sh",
+            self.write_executable(
+                tools_dir,
+                "v8-runner",
                 "#!/usr/bin/env sh\nprintf '%s\\n' 'v8-runner 0.5.1 version build'\n",
             )
 
-            errors = module.check_tool_contracts(scripts_dir.relative_to(Path.cwd()))
+            errors = module.check_tool_contracts(tools_dir.relative_to(Path.cwd()))
 
         self.assertEqual(errors, [])
 
@@ -91,17 +91,17 @@ class ProductContractTests(unittest.TestCase):
         module = load_contract_module()
 
         with tempfile.TemporaryDirectory() as tmp:
-            scripts_dir = Path(tmp)
-            self.write_script(scripts_dir, "run-bsl-analyzer.sh", "#!/usr/bin/env sh\nprintf '%s\\n' 'analyze'\n")
-            self.write_script(scripts_dir, "run-rlm-bsl-index.sh", "#!/usr/bin/env sh\nprintf '%s\\n' 'index build update info'\n")
-            self.write_script(
-                scripts_dir,
-                "run-rlm-tools-bsl.sh",
+            tools_dir = Path(tmp)
+            self.write_executable(tools_dir, "bsl-analyzer", "#!/usr/bin/env sh\nprintf '%s\\n' 'analyze'\n")
+            self.write_executable(tools_dir, "rlm-bsl-index", "#!/usr/bin/env sh\nprintf '%s\\n' 'index build update info'\n")
+            self.write_executable(
+                tools_dir,
+                "rlm-tools-bsl",
                 "#!/usr/bin/env sh\nprintf '%s\\n' '--transport stdio streamable-http service'\n",
             )
-            self.write_script(scripts_dir, "run-v8-runner.sh", "#!/usr/bin/env sh\nprintf '%s\\n' 'v8-runner version build'\n")
+            self.write_executable(tools_dir, "v8-runner", "#!/usr/bin/env sh\nprintf '%s\\n' 'v8-runner version build'\n")
 
-            errors = module.check_tool_contracts(scripts_dir)
+            errors = module.check_tool_contracts(tools_dir)
 
         self.assertTrue(any("--source-dir" in error for error in errors), errors)
 
@@ -109,19 +109,19 @@ class ProductContractTests(unittest.TestCase):
         module = load_contract_module()
 
         with tempfile.TemporaryDirectory() as tmp:
-            scripts_dir = Path(tmp)
-            self.write_script(
-                scripts_dir,
-                "run-bsl-analyzer.sh",
+            tools_dir = Path(tmp)
+            self.write_executable(
+                tools_dir,
+                "bsl-analyzer",
                 "#!/usr/bin/env sh\n"
                 "printf '%s\\n' '--source-dir --format jsonl baseline --profile workspace reference "
                 "--mode stdio --scenarios --json mcp serve analyze search smoke'\n",
             )
-            self.write_script(scripts_dir, "run-rlm-bsl-index.sh", "#!/usr/bin/env sh\nprintf '%s\\n' 'index build update info'\n")
-            self.write_script(scripts_dir, "run-rlm-tools-bsl.sh", "#!/usr/bin/env sh\nprintf '%s\\n' 'service'\n")
-            self.write_script(scripts_dir, "run-v8-runner.sh", "#!/usr/bin/env sh\nprintf '%s\\n' 'v8-runner version build'\n")
+            self.write_executable(tools_dir, "rlm-bsl-index", "#!/usr/bin/env sh\nprintf '%s\\n' 'index build update info'\n")
+            self.write_executable(tools_dir, "rlm-tools-bsl", "#!/usr/bin/env sh\nprintf '%s\\n' 'service'\n")
+            self.write_executable(tools_dir, "v8-runner", "#!/usr/bin/env sh\nprintf '%s\\n' 'v8-runner version build'\n")
 
-            errors = module.check_tool_contracts(scripts_dir)
+            errors = module.check_tool_contracts(tools_dir)
 
         self.assertTrue(any("rlm-tools-bsl server" in error and "--transport" in error for error in errors), errors)
 

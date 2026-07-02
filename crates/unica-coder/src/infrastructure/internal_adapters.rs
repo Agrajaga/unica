@@ -1,4 +1,5 @@
 use crate::domain::workspace::WorkspaceContext;
+use crate::infrastructure::bundled_tools::resolve_bundled_tool;
 use crate::infrastructure::legacy_scripts::{find_plugin_root, value_to_cli_string};
 use crate::infrastructure::workspace_index::{
     IndexReadiness, IndexRunner, WorkspaceIndexService, SYSTEM_INDEX_RUNNER,
@@ -64,7 +65,7 @@ static SYSTEM_PROCESS_RUNNER: SystemProcessRunner = SystemProcessRunner;
 static SYSTEM_BSL_MCP_RUNNER: SystemBslMcpRunner = SystemBslMcpRunner;
 
 pub struct CliAdapter<'a> {
-    launcher: &'static str,
+    tool_name: &'static str,
     default_command: &'static [&'static str],
     label: &'static str,
     runner: &'a dyn ProcessRunner,
@@ -75,6 +76,8 @@ pub struct RuntimeAdapter<'a> {
 }
 
 pub struct CodeSearchAdapter<'a> {
+    bsl_runner: &'a dyn ProcessRunner,
+    grep_runner: &'a dyn ProcessRunner,
     index_runner: &'a dyn IndexRunner,
     use_workspace_service: bool,
 }
@@ -89,14 +92,21 @@ pub struct BslAnalyzerMcpAdapter<'a> {
     runner: &'a dyn BslMcpRunner,
 }
 
+struct SearchBackendResult {
+    section: String,
+    ok: bool,
+    diagnostics: Vec<String>,
+    artifacts: Vec<String>,
+}
+
 impl<'a> CliAdapter<'a> {
     pub fn new(
-        launcher: &'static str,
+        tool_name: &'static str,
         default_command: &'static [&'static str],
         label: &'static str,
     ) -> Self {
         Self {
-            launcher,
+            tool_name,
             default_command,
             label,
             runner: &SYSTEM_PROCESS_RUNNER,
@@ -104,13 +114,13 @@ impl<'a> CliAdapter<'a> {
     }
 
     pub fn with_runner(
-        launcher: &'static str,
+        tool_name: &'static str,
         default_command: &'static [&'static str],
         label: &'static str,
         runner: &'a dyn ProcessRunner,
     ) -> Self {
         Self {
-            launcher,
+            tool_name,
             default_command,
             label,
             runner,
@@ -128,11 +138,12 @@ impl<'a> CliAdapter<'a> {
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root for internal adapter lookup".to_string()
         })?;
-        let launcher = plugin_root.join("scripts").join(self.launcher);
-        let mut command = vec![launcher.display().to_string()];
-        command.extend(self.default_command.iter().map(|part| (*part).to_string()));
-        command.extend(cli_args(args, true)?);
+        let reported_args = cli_args(args, true)?;
         let execution_args = cli_args(args, false)?;
+        let bundled_tool = resolve_bundled_tool(&plugin_root, self.tool_name, !dry_run)?;
+        let mut command = vec![bundled_tool.program.display().to_string()];
+        command.extend(self.default_command.iter().map(|part| (*part).to_string()));
+        command.extend(reported_args);
 
         if dry_run {
             return Ok(AdapterOutcome {
@@ -146,27 +157,13 @@ impl<'a> CliAdapter<'a> {
                 } else {
                     Vec::new()
                 },
-                warnings: if launcher.exists() {
-                    Vec::new()
-                } else {
-                    vec![format!(
-                        "internal adapter launcher not found: {}",
-                        launcher.display()
-                    )]
-                },
+                warnings: bundled_tool.warnings,
                 errors: Vec::new(),
                 artifacts: Vec::new(),
                 stdout: None,
                 stderr: None,
                 command: Some(command),
             });
-        }
-
-        if !launcher.exists() {
-            return Err(format!(
-                "internal adapter launcher not found: {}",
-                launcher.display()
-            ));
         }
 
         let mut process_args = self
@@ -177,7 +174,7 @@ impl<'a> CliAdapter<'a> {
         process_args.extend(execution_args);
         let process_timeout = Some(DEFAULT_PROCESS_TIMEOUT);
         let output = self.runner.run(&ProcessCommand {
-            program: launcher.clone(),
+            program: bundled_tool.program.clone(),
             args: process_args,
             cwd: context.cwd.clone(),
             timeout: process_timeout,
@@ -245,10 +242,10 @@ impl<'a> RuntimeAdapter<'a> {
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root for internal adapter lookup".to_string()
         })?;
-        let launcher = plugin_root.join("scripts").join("run-v8-runner.sh");
         let report_args = runtime_args(args, true)?;
         let execution_args = runtime_args(args, false)?;
-        let mut command = vec![launcher.display().to_string()];
+        let bundled_tool = resolve_bundled_tool(&plugin_root, "v8-runner", !dry_run)?;
+        let mut command = vec![bundled_tool.program.display().to_string()];
         command.extend(report_args);
 
         if dry_run {
@@ -262,14 +259,7 @@ impl<'a> RuntimeAdapter<'a> {
                 } else {
                     Vec::new()
                 },
-                warnings: if launcher.exists() {
-                    Vec::new()
-                } else {
-                    vec![format!(
-                        "internal adapter launcher not found: {}",
-                        launcher.display()
-                    )]
-                },
+                warnings: bundled_tool.warnings,
                 errors: Vec::new(),
                 artifacts: Vec::new(),
                 stdout: None,
@@ -278,16 +268,9 @@ impl<'a> RuntimeAdapter<'a> {
             });
         }
 
-        if !launcher.exists() {
-            return Err(format!(
-                "internal adapter launcher not found: {}",
-                launcher.display()
-            ));
-        }
-
         let process_timeout = None;
         let output = self.runner.run(&ProcessCommand {
-            program: launcher.clone(),
+            program: bundled_tool.program.clone(),
             args: execution_args,
             cwd: context.cwd.clone(),
             timeout: process_timeout,
@@ -339,16 +322,33 @@ impl<'a> Default for RuntimeAdapter<'a> {
 impl<'a> CodeSearchAdapter<'a> {
     pub fn new() -> Self {
         Self {
+            bsl_runner: &SYSTEM_PROCESS_RUNNER,
+            grep_runner: &SYSTEM_PROCESS_RUNNER,
             index_runner: &SYSTEM_INDEX_RUNNER,
             use_workspace_service: true,
         }
     }
 
     pub fn with_runners(
-        _analyzer_runner: &'a dyn ProcessRunner,
+        analyzer_runner: &'a dyn ProcessRunner,
         index_runner: &'a dyn IndexRunner,
     ) -> Self {
         Self {
+            bsl_runner: analyzer_runner,
+            grep_runner: analyzer_runner,
+            index_runner,
+            use_workspace_service: false,
+        }
+    }
+
+    pub fn with_backend_runners(
+        bsl_runner: &'a dyn ProcessRunner,
+        grep_runner: &'a dyn ProcessRunner,
+        index_runner: &'a dyn IndexRunner,
+    ) -> Self {
+        Self {
+            bsl_runner,
+            grep_runner,
             index_runner,
             use_workspace_service: false,
         }
@@ -364,7 +364,7 @@ impl<'a> CodeSearchAdapter<'a> {
         if dry_run {
             return Ok(AdapterOutcome {
                 ok: true,
-                summary: format!("dry run: {tool_name} would search the internal RLM index"),
+                summary: format!("dry run: {tool_name} would use typed code search"),
                 changes: Vec::new(),
                 warnings: Vec::new(),
                 errors: Vec::new(),
@@ -375,63 +375,133 @@ impl<'a> CodeSearchAdapter<'a> {
             });
         }
 
-        if args
-            .get("query")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|query| !query.is_empty())
-            .is_none()
-        {
-            return Ok(AdapterOutcome {
-                ok: true,
-                summary: format!("{tool_name} skipped RLM search"),
-                changes: Vec::new(),
-                warnings: vec!["rlm search skipped: missing non-empty query".to_string()],
-                errors: Vec::new(),
-                artifacts: Vec::new(),
-                stdout: None,
-                stderr: None,
-                command: None,
-            });
-        }
+        let sections = [
+            self.bsl_search(context, args),
+            self.rlm_search(context, args),
+            self.git_grep_search(tool_name, args, context),
+        ];
+        let ok = sections.iter().any(|section| section.ok);
+        let warnings = sections
+            .iter()
+            .flat_map(|section| section.diagnostics.clone())
+            .collect::<Vec<_>>();
+        let errors = if ok { Vec::new() } else { warnings.clone() };
+        let artifacts = sections
+            .iter()
+            .flat_map(|section| section.artifacts.clone())
+            .collect::<Vec<_>>();
+        let stdout = sections
+            .iter()
+            .map(|section| section.section.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        Ok(AdapterOutcome {
+            ok,
+            summary: if ok {
+                format!("{tool_name} completed through typed code search")
+            } else {
+                format!("{tool_name} failed through typed code search")
+            },
+            changes: Vec::new(),
+            warnings,
+            errors,
+            artifacts,
+            stdout: Some(stdout),
+            stderr: None,
+            command: None,
+        })
+    }
 
+    fn bsl_search(
+        &self,
+        context: &WorkspaceContext,
+        args: &Map<String, Value>,
+    ) -> SearchBackendResult {
+        let plugin_root = match find_plugin_root(&context.cwd) {
+            Some(plugin_root) => plugin_root,
+            None => {
+                return unavailable_backend(
+                    "bsl-analyzer",
+                    "could not locate Unica plugin root for bsl-analyzer search",
+                )
+            }
+        };
+        let bundled_tool = match resolve_bundled_tool(&plugin_root, "bsl-analyzer", true) {
+            Ok(bundled_tool) => bundled_tool,
+            Err(error) => return unavailable_backend("bsl-analyzer", error),
+        };
+        let mut process_args = vec!["search".to_string()];
+        match cli_args(args, false) {
+            Ok(args) => process_args.extend(args),
+            Err(error) => return failed_backend("bsl-analyzer", error),
+        }
+        match self.bsl_runner.run(&ProcessCommand {
+            program: bundled_tool.program,
+            args: process_args,
+            cwd: context.cwd.clone(),
+            timeout: Some(DEFAULT_PROCESS_TIMEOUT),
+        }) {
+            Ok(output) if output.status_success => {
+                let body = non_empty_body(&output.stdout, "No bsl-analyzer matches.");
+                successful_backend("bsl-analyzer", body, Vec::new())
+            }
+            Ok(output) => {
+                let reason = failed_process_reason("bsl-analyzer search", &output);
+                failed_backend("bsl-analyzer", reason)
+            }
+            Err(error) => unavailable_backend("bsl-analyzer", error),
+        }
+    }
+
+    fn rlm_search(
+        &self,
+        context: &WorkspaceContext,
+        args: &Map<String, Value>,
+    ) -> SearchBackendResult {
         match self.rlm_readiness(context, args) {
             IndexReadiness::Ready { db_path } => match search_rlm_index(&db_path, args) {
-                Ok(Some(rlm_stdout)) => Ok(AdapterOutcome {
-                    ok: true,
-                    summary: format!("{tool_name} completed through internal RLM index"),
-                    changes: Vec::new(),
-                    warnings: Vec::new(),
-                    errors: Vec::new(),
-                    artifacts: vec![db_path.display().to_string()],
-                    stdout: Some(format_section("rlm", &rlm_stdout)),
-                    stderr: None,
-                    command: None,
-                }),
-                Ok(None) => Ok(AdapterOutcome {
-                    ok: true,
-                    summary: format!("{tool_name} skipped RLM search"),
-                    changes: Vec::new(),
-                    warnings: vec!["rlm search skipped: missing non-empty query".to_string()],
-                    errors: Vec::new(),
-                    artifacts: vec![db_path.display().to_string()],
-                    stdout: None,
-                    stderr: None,
-                    command: None,
-                }),
-                Err(error) => Ok(AdapterOutcome {
-                    ok: true,
-                    summary: format!("{tool_name} could not search RLM index"),
-                    changes: Vec::new(),
-                    warnings: vec![format!("rlm search failed: {error}")],
-                    errors: Vec::new(),
-                    artifacts: vec![db_path.display().to_string()],
-                    stdout: None,
-                    stderr: None,
-                    command: None,
-                }),
+                Ok(Some(rlm_stdout)) => {
+                    successful_backend("rlm", rlm_stdout, vec![db_path.display().to_string()])
+                }
+                Ok(None) => unavailable_backend("rlm", "missing required `query` argument"),
+                Err(error) => failed_backend("rlm", error),
             },
-            readiness => Ok(index_unavailable_outcome(tool_name, readiness)),
+            other => unavailable_backend("rlm", readiness_warning(other)),
+        }
+    }
+
+    fn git_grep_search(
+        &self,
+        tool_name: &str,
+        args: &Map<String, Value>,
+        context: &WorkspaceContext,
+    ) -> SearchBackendResult {
+        let grep_adapter = CodeNavigationAdapter {
+            index_runner: self.index_runner,
+            grep_runner: self.grep_runner,
+            use_workspace_service: self.use_workspace_service,
+        };
+        match grep_adapter.grep(tool_name, args, context) {
+            Ok(grep) if grep.ok => {
+                let body = grep
+                    .stdout
+                    .as_deref()
+                    .map(|stdout| section_body(stdout, "git-grep"))
+                    .filter(|body| !body.trim().is_empty())
+                    .unwrap_or_else(|| "No git grep matches.".to_string());
+                let mut result = successful_backend("git grep", body, Vec::new());
+                result.diagnostics.extend(grep.warnings);
+                result
+            }
+            Ok(grep) => {
+                let reason = if grep.errors.is_empty() {
+                    "git grep failed".to_string()
+                } else {
+                    grep.errors.join("; ")
+                };
+                failed_backend("git grep", reason)
+            }
+            Err(error) => unavailable_backend("git grep", error),
         }
     }
 
@@ -466,6 +536,75 @@ fn format_section(name: &str, text: &str) -> String {
     } else {
         format!("=== {name} ===\n{body}")
     }
+}
+
+fn successful_backend(
+    name: &'static str,
+    body: impl Into<String>,
+    artifacts: Vec<String>,
+) -> SearchBackendResult {
+    SearchBackendResult {
+        section: format_section(name, &body.into()),
+        ok: true,
+        diagnostics: Vec::new(),
+        artifacts,
+    }
+}
+
+fn unavailable_backend(name: &'static str, reason: impl Into<String>) -> SearchBackendResult {
+    let reason = reason.into();
+    SearchBackendResult {
+        section: format_section(name, &format!("unavailable: {reason}")),
+        ok: false,
+        diagnostics: vec![format!("{name} unavailable: {reason}")],
+        artifacts: Vec::new(),
+    }
+}
+
+fn failed_backend(name: &'static str, reason: impl Into<String>) -> SearchBackendResult {
+    let reason = reason.into();
+    SearchBackendResult {
+        section: format_section(name, &format!("failed: {reason}")),
+        ok: false,
+        diagnostics: vec![format!("{name} failed: {reason}")],
+        artifacts: Vec::new(),
+    }
+}
+
+fn non_empty_body(stdout: &str, empty_message: &'static str) -> String {
+    let body = stdout.trim();
+    if body.is_empty() {
+        empty_message.to_string()
+    } else {
+        body.to_string()
+    }
+}
+
+fn section_body(stdout: &str, section_name: &str) -> String {
+    let expected_header = format!("=== {section_name} ===");
+    let text = stdout.trim();
+    text.strip_prefix(&expected_header)
+        .map(str::trim)
+        .filter(|body| !body.is_empty())
+        .unwrap_or(text)
+        .to_string()
+}
+
+fn failed_process_reason(label: &str, output: &ProcessOutput) -> String {
+    if output.timed_out {
+        return process_timeout_error(label, Some(DEFAULT_PROCESS_TIMEOUT));
+    }
+    let stderr = output.stderr.trim();
+    if stderr.is_empty() {
+        format!("{label} exited with status {}", output.status)
+    } else {
+        stderr.to_string()
+    }
+}
+
+fn process_exit_code_is(status: &str, code: i32) -> bool {
+    let status = status.trim();
+    status == code.to_string() || status.ends_with(&format!(": {code}"))
 }
 
 fn process_timeout_error(label: &str, timeout: Option<Duration>) -> String {
@@ -691,7 +830,10 @@ impl<'a> CodeNavigationAdapter<'a> {
         })?;
         let limit = read_limit(args, 200);
         let body = grep_body(&output.stdout, mode, limit);
-        let no_matches = body.is_empty() && !output.status_success;
+        let no_matches = body.is_empty()
+            && !output.status_success
+            && !output.timed_out
+            && process_exit_code_is(&output.status, 1);
         if !output.status_success && !no_matches {
             return Ok(AdapterOutcome {
                 ok: false,
@@ -806,17 +948,24 @@ impl<'a> BslAnalyzerMcpAdapter<'a> {
     ) -> Result<AdapterOutcome, String> {
         if tool_name == "unica.code.diagnostics" && diagnostics_mode(args) == "analyze" {
             let cli_args = diagnostics_analyze_args(args);
-            return CliAdapter::new("run-bsl-analyzer.sh", &["analyze"], "code analysis")
+            return CliAdapter::new("bsl-analyzer", &["analyze"], "code analysis")
                 .invoke(tool_name, &cli_args, context, dry_run, false);
         }
 
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root for bsl-analyzer MCP adapter lookup".to_string()
         })?;
-        let launcher = plugin_root.join("scripts").join("run-bsl-analyzer.sh");
         let source_dir = resolve_source_dir(context, args)?;
-        let command = bsl_mcp_command(&launcher, &source_dir, context, tool_name, args)?;
-        let mut reported_command = vec![launcher.display().to_string()];
+        let (remote_tool, tool_args) = bsl_mcp_tool_request(tool_name, args)?;
+        let bundled_tool = resolve_bundled_tool(&plugin_root, "bsl-analyzer", !dry_run)?;
+        let command = bsl_mcp_command(
+            &bundled_tool.program,
+            &source_dir,
+            context,
+            remote_tool,
+            tool_args,
+        );
+        let mut reported_command = vec![bundled_tool.program.display().to_string()];
         reported_command.extend(command.args.clone());
 
         if dry_run {
@@ -824,27 +973,13 @@ impl<'a> BslAnalyzerMcpAdapter<'a> {
                 ok: true,
                 summary: format!("dry run: {tool_name} would call typed bsl-analyzer MCP adapter"),
                 changes: Vec::new(),
-                warnings: if launcher.exists() {
-                    Vec::new()
-                } else {
-                    vec![format!(
-                        "internal adapter launcher not found: {}",
-                        launcher.display()
-                    )]
-                },
+                warnings: bundled_tool.warnings,
                 errors: Vec::new(),
                 artifacts: vec![source_dir.display().to_string()],
                 stdout: None,
                 stderr: None,
                 command: Some(reported_command),
             });
-        }
-
-        if !launcher.exists() {
-            return Err(format!(
-                "internal adapter launcher not found: {}",
-                launcher.display()
-            ));
         }
 
         let output = self.runner.call(&command)?;
@@ -1672,22 +1807,26 @@ fn diagnostics_analyze_args(args: &Map<String, Value>) -> Map<String, Value> {
     let mut filtered = Map::new();
     for key in ["cwd", "dryRun", "confirm", "sourceDir", "config", "format"] {
         if let Some(value) = args.get(key) {
-            filtered.insert(key.to_string(), value.clone());
+            let value = if key == "format" && value.as_str() == Some("json") {
+                json!("jsonl")
+            } else {
+                value.clone()
+            };
+            filtered.insert(key.to_string(), value);
         }
     }
     filtered
 }
 
 fn bsl_mcp_command(
-    launcher: &Path,
+    program: &Path,
     source_dir: &Path,
     context: &WorkspaceContext,
-    tool_name: &str,
-    args: &Map<String, Value>,
-) -> Result<BslMcpCommand, String> {
-    let (remote_tool, tool_args) = bsl_mcp_tool_request(tool_name, args)?;
-    Ok(BslMcpCommand {
-        program: launcher.to_path_buf(),
+    remote_tool: &'static str,
+    tool_args: Value,
+) -> BslMcpCommand {
+    BslMcpCommand {
+        program: program.to_path_buf(),
         args: vec![
             "mcp".to_string(),
             "serve".to_string(),
@@ -1703,7 +1842,7 @@ fn bsl_mcp_command(
         timeout: DEFAULT_PROCESS_TIMEOUT,
         tool_name: remote_tool,
         tool_args,
-    })
+    }
 }
 
 fn bsl_mcp_tool_request(
@@ -2423,23 +2562,26 @@ mod tests {
 
     #[test]
     fn build_runtime_adapter_dry_run_builds_v8_runner_command() {
-        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let context = temp_context("build-runtime-dry-run");
         let mut args = Map::new();
         args.insert("sourceSet".to_string(), json!("main"));
 
-        let outcome = CliAdapter::new("run-v8-runner.sh", &["build"], "build/runtime")
+        let outcome = CliAdapter::new("v8-runner", &["build"], "build/runtime")
             .invoke("unica.build.load", &args, &context, true, true)
             .unwrap();
 
         let command = outcome.command.unwrap().join(" ");
-        assert!(command.contains("run-v8-runner.sh"));
+        assert!(command.contains("bin/"));
+        assert!(command.contains("v8-runner"));
+        assert!(!command.contains("run-v8-runner.sh"));
         assert!(command.contains("build"));
         assert!(command.contains("--source-set main"));
+        cleanup_context(&context);
     }
 
     #[test]
     fn runtime_adapter_maps_build_to_allowlisted_v8_runner_argv() {
-        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let context = temp_context("runtime-build-argv");
         let runner = RecordingProcessRunner {
             commands: RefCell::new(Vec::new()),
             output: ProcessOutput {
@@ -2466,11 +2608,18 @@ mod tests {
             vec!["build", "--full-rebuild", "--source-set", "main"]
         );
         assert!(commands[0].timeout.is_none());
+        assert!(commands[0].program.to_string_lossy().contains("bin/"));
+        assert!(!commands[0]
+            .program
+            .to_string_lossy()
+            .contains("run-v8-runner.sh"));
+        drop(commands);
+        cleanup_context(&context);
     }
 
     #[test]
     fn runtime_adapter_delegates_successful_build_without_wrapper_timeout() {
-        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let context = temp_context("runtime-build-success");
         let runner = RecordingProcessRunner {
             commands: RefCell::new(Vec::new()),
             output: ProcessOutput {
@@ -2494,6 +2643,7 @@ mod tests {
             Some("Designer build completed after 240 seconds")
         );
         assert!(runner.commands.borrow()[0].timeout.is_none());
+        cleanup_context(&context);
     }
 
     #[test]
@@ -2663,10 +2813,29 @@ mod tests {
     }
 
     #[test]
-    fn code_search_adapter_dry_run_does_not_build_process_command() {
+    fn code_adapter_dry_run_builds_bsl_analyzer_command() {
+        let context = temp_context("code-adapter-dry-run");
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("ОбщийМодуль"));
+
+        let outcome = CliAdapter::new("bsl-analyzer", &["search"], "code analysis")
+            .invoke("unica.code.search", &args, &context, true, false)
+            .unwrap();
+
+        let command = outcome.command.unwrap().join(" ");
+        assert!(command.contains("bin/"));
+        assert!(command.contains("bsl-analyzer"));
+        assert!(!command.contains("run-bsl-analyzer.sh"));
+        assert!(command.contains("search"));
+        assert!(command.contains("--query"));
+        assert!(command.contains("ОбщийМодуль"));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn code_search_adapter_dry_run_reports_typed_code_search() {
         let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
-        let analyzer = RecordingProcessRunner {
-            commands: RefCell::new(Vec::new()),
+        let grep = FakeProcessRunner {
             output: ProcessOutput {
                 status_success: true,
                 status: "exit status: 0".to_string(),
@@ -2679,27 +2848,28 @@ mod tests {
         let mut args = Map::new();
         args.insert("query".to_string(), json!("ОбработкаПроведения"));
 
-        let outcome = CodeSearchAdapter::with_runners(&analyzer, &index)
+        let outcome = CodeSearchAdapter::with_runners(&grep, &index)
             .invoke("unica.code.search", &args, &context, true)
             .unwrap();
 
         assert!(outcome.ok);
+        assert_eq!(
+            outcome.summary,
+            "dry run: unica.code.search would use typed code search"
+        );
         assert!(outcome.command.is_none());
-        assert!(outcome.stdout.is_none());
-        assert!(analyzer.commands.borrow().is_empty());
-        assert!(index.commands.borrow().is_empty());
     }
 
     #[test]
-    fn code_search_adapter_warns_when_rlm_index_is_missing() {
+    fn code_search_adapter_falls_back_to_git_grep_when_rlm_index_is_missing() {
         let context = temp_context("search-missing");
         fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
-        let analyzer = RecordingProcessRunner {
-            commands: RefCell::new(Vec::new()),
+        let grep = FakeProcessRunner {
             output: ProcessOutput {
                 status_success: true,
                 status: "exit status: 0".to_string(),
-                stdout: "analyzer hit".to_string(),
+                stdout: "CommonModules/SmokeModule/Ext/Module.bsl:2:ОбработкаПроведения\n"
+                    .to_string(),
                 stderr: String::new(),
                 timed_out: false,
             },
@@ -2711,33 +2881,33 @@ mod tests {
         let mut args = Map::new();
         args.insert("query".to_string(), json!("ОбработкаПроведения"));
 
-        let outcome = CodeSearchAdapter::with_runners(&analyzer, &index)
+        let outcome = CodeSearchAdapter::with_runners(&grep, &index)
             .invoke("unica.code.search", &args, &context, false)
             .unwrap();
 
         assert!(outcome.ok);
-        assert!(outcome.stdout.is_none());
-        assert!(outcome.command.is_none());
+        assert!(outcome
+            .stdout
+            .as_deref()
+            .is_some_and(|stdout| stdout.contains("=== git grep ===")));
         assert!(outcome
             .warnings
             .iter()
             .any(|warning| warning.contains("rlm index unavailable")));
-        assert!(analyzer.commands.borrow().is_empty());
         cleanup_context(&context);
     }
 
     #[test]
-    fn code_search_adapter_returns_rlm_section_when_index_is_ready() {
-        let context = temp_context("search-ready");
+    fn code_search_adapter_returns_three_backend_sections_in_order() {
+        let context = temp_context("search-three-backends");
         fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
         let db_path = context.cache_root.join("rlm-tools-bsl/test/bsl_index.db");
         create_rlm_search_db(&db_path);
-        let analyzer = RecordingProcessRunner {
-            commands: RefCell::new(Vec::new()),
+        let runner = FakeProcessRunner {
             output: ProcessOutput {
                 status_success: true,
                 status: "exit status: 0".to_string(),
-                stdout: "analyzer hit".to_string(),
+                stdout: "CommonModules/Проведение.bsl:42:ОбработкаПроведения\n".to_string(),
                 stderr: String::new(),
                 timed_out: false,
             },
@@ -2753,50 +2923,248 @@ mod tests {
         args.insert("query".to_string(), json!("ОбработкаПроведения"));
         args.insert("limit".to_string(), json!(5));
 
-        let outcome = CodeSearchAdapter::with_runners(&analyzer, &index)
-            .invoke("unica.code.search", &args, &context, false)
-            .unwrap();
-
-        let stdout = outcome.stdout.unwrap();
-        assert!(stdout.starts_with("=== rlm ==="));
-        assert!(!stdout.contains("bsl-analyzer"));
-        assert!(stdout.contains("CommonModules/Проведение.bsl:42"));
-        assert!(stdout.contains("Procedure ОбработкаПроведения() export"));
-        assert!(analyzer.commands.borrow().is_empty());
-        cleanup_context(&context);
-    }
-
-    #[test]
-    fn code_search_adapter_skips_empty_query_without_external_calls() {
-        let context = temp_context("search-empty-query");
-        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
-        let analyzer = RecordingProcessRunner {
-            commands: RefCell::new(Vec::new()),
-            output: ProcessOutput {
-                status_success: true,
-                status: "exit status: 0".to_string(),
-                stdout: "analyzer hit".to_string(),
-                stderr: String::new(),
-                timed_out: false,
-            },
-        };
-        let index = FakeIndexRunner::default();
-        let mut args = Map::new();
-        args.insert("query".to_string(), json!(" "));
-
-        let outcome = CodeSearchAdapter::with_runners(&analyzer, &index)
+        let outcome = CodeSearchAdapter::with_runners(&runner, &index)
             .invoke("unica.code.search", &args, &context, false)
             .unwrap();
 
         assert!(outcome.ok);
-        assert!(outcome.stdout.is_none());
         assert!(outcome.command.is_none());
+        let stdout = outcome.stdout.unwrap();
+        let bsl_pos = stdout.find("=== bsl-analyzer ===").unwrap();
+        let rlm_pos = stdout.find("=== rlm ===").unwrap();
+        let grep_pos = stdout.find("=== git grep ===").unwrap();
+        assert!(bsl_pos < rlm_pos);
+        assert!(rlm_pos < grep_pos);
+        assert!(stdout.contains("CommonModules/Проведение.bsl:42"));
+        assert!(stdout.contains("Procedure ОбработкаПроведения() export"));
+        assert!(!stdout.contains("=== git-grep ==="));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn code_search_adapter_runs_bsl_analyzer_search_natively() {
+        let context = temp_context("search-bsl-command");
+        let bsl = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: "bsl result\n".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        };
+        let grep = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: "CommonModules/Проведение.bsl:42:ОбработкаПроведения\n".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        };
+        let index = FakeIndexRunner {
+            outputs: RefCell::new(vec![index_success("Index not found: /tmp/bsl_index.db")]),
+            ..Default::default()
+        };
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("ОбработкаПроведения"));
+
+        let outcome = CodeSearchAdapter::with_backend_runners(&bsl, &grep, &index)
+            .invoke("unica.code.search", &args, &context, false)
+            .unwrap();
+
+        assert!(outcome.ok);
+        assert!(outcome.command.is_none());
+        let bsl_commands = bsl.commands.borrow();
+        assert_eq!(bsl_commands.len(), 1);
+        assert!(bsl_commands[0].program.to_string_lossy().contains("bin/"));
+        assert!(!bsl_commands[0]
+            .program
+            .to_string_lossy()
+            .contains("run-bsl-analyzer.sh"));
+        assert_eq!(bsl_commands[0].args[0], "search");
+        assert!(bsl_commands[0].args.contains(&"--query".to_string()));
+        let grep_commands = grep.commands.borrow();
+        assert_eq!(grep_commands[0].program, PathBuf::from("git"));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn code_search_adapter_keeps_unavailable_sections_when_git_grep_succeeds() {
+        let context = temp_context("search-unavailable");
+        fs::remove_file(
+            context
+                .workspace_root
+                .join("plugins/unica/bin/darwin-arm64/bsl-analyzer"),
+        )
+        .ok();
+        fs::remove_file(
+            context
+                .workspace_root
+                .join("plugins/unica/bin/linux-x64/bsl-analyzer"),
+        )
+        .ok();
+        fs::remove_file(
+            context
+                .workspace_root
+                .join("plugins/unica/bin/win-x64/bsl-analyzer.exe"),
+        )
+        .ok();
+        let grep = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: "CommonModules/SmokeModule/Ext/Module.bsl:2:ОбработкаПроведения\n"
+                    .to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        };
+        let index = FakeIndexRunner {
+            outputs: RefCell::new(vec![index_success("Index not found: /tmp/bsl_index.db")]),
+            ..Default::default()
+        };
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("ОбработкаПроведения"));
+
+        let outcome = CodeSearchAdapter::with_runners(&grep, &index)
+            .invoke("unica.code.search", &args, &context, false)
+            .unwrap();
+
+        assert!(outcome.ok);
+        let stdout = outcome.stdout.unwrap();
+        assert!(stdout.contains("=== bsl-analyzer ===\nunavailable:"));
+        assert!(stdout.contains("=== rlm ===\nunavailable: rlm index unavailable"));
+        assert!(stdout.contains("=== git grep ==="));
+        assert!(stdout.contains("CommonModules/SmokeModule/Ext/Module.bsl:2"));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn code_search_adapter_returns_three_failed_sections_when_no_backend_runs() {
+        let context = temp_context("search-all-failed");
+        fs::remove_file(
+            context
+                .workspace_root
+                .join("plugins/unica/bin/darwin-arm64/bsl-analyzer"),
+        )
+        .ok();
+        fs::remove_file(
+            context
+                .workspace_root
+                .join("plugins/unica/bin/linux-x64/bsl-analyzer"),
+        )
+        .ok();
+        fs::remove_file(
+            context
+                .workspace_root
+                .join("plugins/unica/bin/win-x64/bsl-analyzer.exe"),
+        )
+        .ok();
+        let grep = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: false,
+                status: "exit status: 128".to_string(),
+                stdout: String::new(),
+                stderr: "fatal: not a git repository (or any of the parent directories): .git\n"
+                    .to_string(),
+                timed_out: false,
+            },
+        };
+        let index = FakeIndexRunner {
+            outputs: RefCell::new(vec![index_success("Index not found: /tmp/bsl_index.db")]),
+            ..Default::default()
+        };
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("SmokeProcedure"));
+
+        let outcome = CodeSearchAdapter::with_runners(&grep, &index)
+            .invoke("unica.code.search", &args, &context, false)
+            .unwrap();
+
+        assert!(!outcome.ok);
+        let stdout = outcome.stdout.unwrap();
+        assert!(stdout.contains("=== bsl-analyzer ===\nunavailable:"));
+        assert!(stdout.contains("=== rlm ===\nunavailable: rlm index unavailable"));
+        assert!(stdout.contains("=== git grep ===\nfailed: fatal: not a git repository"));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn code_search_adapter_reports_git_grep_fatal_error_instead_of_no_matches() {
+        let context = temp_context("search-grep-fatal");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        let grep = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: false,
+                status: "exit status: 128".to_string(),
+                stdout: String::new(),
+                stderr: "fatal: not a git repository (or any of the parent directories): .git\n"
+                    .to_string(),
+                timed_out: false,
+            },
+        };
+        let index = FakeIndexRunner {
+            outputs: RefCell::new(vec![index_success("Index not found: /tmp/bsl_index.db")]),
+            ..Default::default()
+        };
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("SmokeProcedure"));
+
+        let outcome = CodeSearchAdapter::with_runners(&grep, &index)
+            .invoke("unica.code.search", &args, &context, false)
+            .unwrap();
+
+        assert!(!outcome.ok);
         assert!(outcome
-            .warnings
+            .errors
             .iter()
-            .any(|warning| warning.contains("missing non-empty query")));
-        assert!(analyzer.commands.borrow().is_empty());
-        assert!(index.commands.borrow().is_empty());
+            .any(|error| error.contains("fatal: not a git repository")));
+        assert!(!outcome
+            .stdout
+            .as_deref()
+            .unwrap_or_default()
+            .contains("No git grep matches."));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn code_search_adapter_adds_rlm_section_when_index_is_ready() {
+        let context = temp_context("search-ready");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        let db_path = context.cache_root.join("rlm-tools-bsl/test/bsl_index.db");
+        create_rlm_search_db(&db_path);
+        let grep = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: "CommonModules/Проведение.bsl:42:ОбработкаПроведения\n".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        };
+        let index = FakeIndexRunner {
+            outputs: RefCell::new(vec![index_success(format!(
+                "Index: {}\n  Status:   fresh\n",
+                db_path.display()
+            ))]),
+            ..Default::default()
+        };
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("ОбработкаПроведения"));
+        args.insert("limit".to_string(), json!(5));
+
+        let outcome = CodeSearchAdapter::with_runners(&grep, &index)
+            .invoke("unica.code.search", &args, &context, false)
+            .unwrap();
+
+        let stdout = outcome.stdout.unwrap();
+        assert!(stdout.contains("=== rlm ==="));
+        assert!(stdout.contains("=== git grep ==="));
+        assert!(stdout.contains("CommonModules/Проведение.bsl:42"));
+        assert!(stdout.contains("Procedure ОбработкаПроведения() export"));
         cleanup_context(&context);
     }
 
@@ -3054,18 +3422,45 @@ mod tests {
 
     #[test]
     fn diagnostics_adapter_still_builds_bsl_analyzer_analyze_command() {
-        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let context = temp_context("diagnostics-analyze-dry-run");
         let mut args = Map::new();
         args.insert("sourceDir".to_string(), json!("src"));
 
-        let outcome = CliAdapter::new("run-bsl-analyzer.sh", &["analyze"], "code analysis")
+        let outcome = CliAdapter::new("bsl-analyzer", &["analyze"], "code analysis")
             .invoke("unica.code.diagnostics", &args, &context, true, false)
             .unwrap();
 
         let command = outcome.command.unwrap().join(" ");
-        assert!(command.contains("run-bsl-analyzer.sh"));
+        assert!(command.contains("bin/"));
+        assert!(command.contains("bsl-analyzer"));
+        assert!(!command.contains("run-bsl-analyzer.sh"));
         assert!(command.contains("analyze"));
         assert!(command.contains("--source-dir src"));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn diagnostics_analyze_normalizes_json_format_and_keeps_limit_out_of_cli_args() {
+        let context = temp_context("diagnostics-format-dry-run");
+        let mut args = Map::new();
+        args.insert("sourceDir".to_string(), json!("src/extensions/Smoke"));
+        args.insert("format".to_string(), json!("json"));
+        args.insert("limit".to_string(), json!(20));
+
+        let outcome = BslAnalyzerMcpAdapter::new()
+            .invoke("unica.code.diagnostics", &args, &context, true)
+            .unwrap();
+
+        let command = outcome.command.unwrap().join(" ");
+        assert!(command.contains("bin/"));
+        assert!(command.contains("bsl-analyzer"));
+        assert!(!command.contains("run-bsl-analyzer.sh"));
+        assert!(command.contains("analyze"));
+        assert!(command.contains("--source-dir src/extensions/Smoke"));
+        assert!(command.contains("--format jsonl"));
+        assert!(!command.contains("--limit"));
+        assert!(!command.contains(" 20"));
+        cleanup_context(&context);
     }
 
     #[test]
@@ -3182,7 +3577,7 @@ mod tests {
         let mut args = Map::new();
         args.insert("args".to_string(), json!(["--unsafe", "../outside"]));
 
-        let error = CliAdapter::new("run-v8-runner.sh", &["build"], "build/runtime")
+        let error = CliAdapter::new("v8-runner", &["build"], "build/runtime")
             .invoke("unica.build.load", &args, &context, true, true)
             .unwrap_err();
 
@@ -3195,7 +3590,7 @@ mod tests {
         let mut args = Map::new();
         args.insert("dbPassword".to_string(), json!("super-secret"));
 
-        let outcome = CliAdapter::new("run-v8-runner.sh", &["build"], "build/runtime")
+        let outcome = CliAdapter::new("v8-runner", &["build"], "build/runtime")
             .invoke("unica.build.load", &args, &context, true, true)
             .unwrap();
 
@@ -3206,7 +3601,7 @@ mod tests {
 
     #[test]
     fn cli_adapter_uses_fake_process_runner_for_status_and_output_contract() {
-        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let context = temp_context("cli-fake-runner-status");
         let runner = FakeProcessRunner {
             output: ProcessOutput {
                 status_success: false,
@@ -3217,10 +3612,9 @@ mod tests {
             },
         };
 
-        let outcome =
-            CliAdapter::with_runner("run-v8-runner.sh", &["build"], "build/runtime", &runner)
-                .invoke("unica.build.load", &Map::new(), &context, false, true)
-                .unwrap();
+        let outcome = CliAdapter::with_runner("v8-runner", &["build"], "build/runtime", &runner)
+            .invoke("unica.build.load", &Map::new(), &context, false, true)
+            .unwrap();
 
         assert!(!outcome.ok);
         assert_eq!(outcome.stdout.as_deref(), Some("partial stdout"));
@@ -3230,11 +3624,12 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("exit status: 2")));
+        cleanup_context(&context);
     }
 
     #[test]
     fn cli_adapter_records_default_process_timeout() {
-        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let context = temp_context("cli-timeout-record");
         let runner = RecordingProcessRunner {
             commands: RefCell::new(Vec::new()),
             output: ProcessOutput {
@@ -3246,21 +3641,25 @@ mod tests {
             },
         };
 
-        let outcome =
-            CliAdapter::with_runner("run-v8-runner.sh", &["build"], "build/runtime", &runner)
-                .invoke("unica.build.load", &Map::new(), &context, false, true)
-                .unwrap();
+        let outcome = CliAdapter::with_runner("v8-runner", &["build"], "build/runtime", &runner)
+            .invoke("unica.build.load", &Map::new(), &context, false, true)
+            .unwrap();
 
         assert!(outcome.ok);
         assert_eq!(
             runner.commands.borrow()[0].timeout,
             Some(DEFAULT_PROCESS_TIMEOUT)
         );
+        assert!(runner.commands.borrow()[0]
+            .program
+            .to_string_lossy()
+            .contains("bin/"));
+        cleanup_context(&context);
     }
 
     #[test]
     fn cli_adapter_reports_fake_process_timeout() {
-        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let context = temp_context("cli-fake-timeout");
         let runner = FakeProcessRunner {
             output: ProcessOutput {
                 status_success: false,
@@ -3271,10 +3670,9 @@ mod tests {
             },
         };
 
-        let outcome =
-            CliAdapter::with_runner("run-v8-runner.sh", &["build"], "build/runtime", &runner)
-                .invoke("unica.build.load", &Map::new(), &context, false, true)
-                .unwrap();
+        let outcome = CliAdapter::with_runner("v8-runner", &["build"], "build/runtime", &runner)
+            .invoke("unica.build.load", &Map::new(), &context, false, true)
+            .unwrap();
 
         assert!(!outcome.ok);
         assert!(outcome
@@ -3285,11 +3683,12 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("timed out after")));
+        cleanup_context(&context);
     }
 
     #[test]
     fn runtime_adapter_does_not_report_wrapper_timeout_seconds_without_local_timeout() {
-        let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
+        let context = temp_context("runtime-timeout-no-local-budget");
         let runner = FakeProcessRunner {
             output: ProcessOutput {
                 status_success: false,
@@ -3312,6 +3711,7 @@ mod tests {
             .iter()
             .any(|error| error == "internal v8-runner runtime adapter timed out"));
         assert!(outcome.errors.iter().all(|error| !error.contains("120")));
+        cleanup_context(&context);
     }
 
     #[test]
@@ -3486,9 +3886,74 @@ mod tests {
     fn create_fake_plugin_root(root: &Path) {
         let plugin_root = root.join("plugins").join("unica");
         fs::create_dir_all(plugin_root.join("skills")).unwrap();
-        fs::create_dir_all(plugin_root.join("scripts")).unwrap();
-        fs::write(plugin_root.join("scripts").join("run-bsl-analyzer.sh"), "").unwrap();
-        fs::write(plugin_root.join("scripts").join("run-rlm-bsl-index.sh"), "").unwrap();
+        fs::create_dir_all(plugin_root.join("third-party")).unwrap();
+        for target in ["darwin-arm64", "linux-x64"] {
+            fs::create_dir_all(plugin_root.join("bin").join(target)).unwrap();
+            fs::write(
+                plugin_root.join("bin").join(target).join("v8-runner"),
+                "v8-runner",
+            )
+            .unwrap();
+            fs::write(
+                plugin_root.join("bin").join(target).join("bsl-analyzer"),
+                "bsl-analyzer",
+            )
+            .unwrap();
+            fs::write(
+                plugin_root.join("bin").join(target).join("rlm-bsl-index"),
+                "rlm-index",
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(plugin_root.join("bin/win-x64")).unwrap();
+        fs::write(
+            plugin_root.join("bin/win-x64").join("v8-runner.exe"),
+            "v8-runner",
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("bin/win-x64").join("bsl-analyzer.exe"),
+            "bsl-analyzer",
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("bin/win-x64").join("rlm-bsl-index.exe"),
+            "rlm-index",
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("third-party/manifest.json"),
+            r#"{
+  "schemaVersion": 2,
+  "tools": [
+    {
+      "name": "bsl-analyzer",
+      "binaries": {
+        "darwin-arm64": {"targetTriple": "aarch64-apple-darwin", "binaryPath": "bin/darwin-arm64/bsl-analyzer", "sha256": "e5121f9edee6abec4a7a34a3953521d89edb1cb14b871ea63a26f52d5697b05a"},
+        "linux-x64": {"targetTriple": "x86_64-unknown-linux-gnu", "binaryPath": "bin/linux-x64/bsl-analyzer", "sha256": "e5121f9edee6abec4a7a34a3953521d89edb1cb14b871ea63a26f52d5697b05a"},
+        "win-x64": {"targetTriple": "x86_64-pc-windows-msvc", "binaryPath": "bin/win-x64/bsl-analyzer.exe", "sha256": "e5121f9edee6abec4a7a34a3953521d89edb1cb14b871ea63a26f52d5697b05a"}
+      }
+    },
+    {
+      "name": "rlm-bsl-index",
+      "binaries": {
+        "darwin-arm64": {"targetTriple": "aarch64-apple-darwin", "binaryPath": "bin/darwin-arm64/rlm-bsl-index", "sha256": "fa6a77fa531fa57e7781010a7cec69b7be4b7b58903365153bf1f66e851ab213"},
+        "linux-x64": {"targetTriple": "x86_64-unknown-linux-gnu", "binaryPath": "bin/linux-x64/rlm-bsl-index", "sha256": "fa6a77fa531fa57e7781010a7cec69b7be4b7b58903365153bf1f66e851ab213"},
+        "win-x64": {"targetTriple": "x86_64-pc-windows-msvc", "binaryPath": "bin/win-x64/rlm-bsl-index.exe", "sha256": "fa6a77fa531fa57e7781010a7cec69b7be4b7b58903365153bf1f66e851ab213"}
+      }
+    },
+    {
+      "name": "v8-runner",
+      "binaries": {
+        "darwin-arm64": {"targetTriple": "aarch64-apple-darwin", "binaryPath": "bin/darwin-arm64/v8-runner", "sha256": "da3d869003da0bfb858de1160b3b1a7b92dee2374889909ee252cfd51a79e415"},
+        "linux-x64": {"targetTriple": "x86_64-unknown-linux-gnu", "binaryPath": "bin/linux-x64/v8-runner", "sha256": "da3d869003da0bfb858de1160b3b1a7b92dee2374889909ee252cfd51a79e415"},
+        "win-x64": {"targetTriple": "x86_64-pc-windows-msvc", "binaryPath": "bin/win-x64/v8-runner.exe", "sha256": "da3d869003da0bfb858de1160b3b1a7b92dee2374889909ee252cfd51a79e415"}
+      }
+    }
+  ]
+}"#,
+        )
+        .unwrap();
     }
 
     fn create_rlm_search_db(db_path: &PathBuf) {

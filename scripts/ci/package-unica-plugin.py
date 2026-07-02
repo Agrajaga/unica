@@ -173,6 +173,30 @@ def write_manifest(plugin_dir: Path, grouped_tools: dict[str, dict], lock_file: 
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def write_packaged_mcp_launcher(plugin_dir: Path, grouped_tools: dict[str, dict]) -> None:
+    unica = grouped_tools.get("unica")
+    if not unica:
+        return
+    binaries = unica.get("binaries", {})
+    if len(binaries) != 1:
+        return
+
+    _target, binary = next(iter(binaries.items()))
+    binary_path = binary["binaryPath"]
+    mcp_path = plugin_dir / ".mcp.json"
+    mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
+    server = mcp["mcpServers"]["unica"]
+    server["command"] = f"./{binary_path}"
+    server["args"] = []
+    server["note"] = (
+        "Single public Unica stdio MCP orchestrator. Packaged archives launch "
+        "the bundled unica binary directly; it owns workspace/cache coordination "
+        "and resolves bundled build, code-analysis, standards, and XML/JSON DSL "
+        "adapters internally."
+    )
+    mcp_path.write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def write_official_marketplace(source_path: Path, dest_path: Path, *, marketplace_name: str = PLUGIN_ID) -> None:
     data = json.loads(source_path.read_text(encoding="utf-8"))
     data["name"] = marketplace_name
@@ -276,6 +300,7 @@ def main() -> None:
                 copy_binary_tree(target_dir, plugin_dst / "bin" / target_dir.name)
 
     write_manifest(plugin_dst, grouped_tools, lock_file)
+    write_packaged_mcp_launcher(plugin_dst, grouped_tools)
 
     json.loads((plugin_dst / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
     json.loads((plugin_dst / ".mcp.json").read_text(encoding="utf-8"))

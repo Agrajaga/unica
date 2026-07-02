@@ -2,9 +2,9 @@
 
 ## Source Checkout
 
-In the repository checkout, `run-unica.sh` detects `Cargo.toml` and runs the Rust
-binary through cargo. This keeps local development fast and avoids generated
-binary commits.
+In the repository checkout, `.mcp.json` runs the Rust binary through
+`cargo run --bin unica`. This keeps local development possible without generated
+binary commits or shell wrapper files.
 
 ## Generated Marketplace Package
 
@@ -13,16 +13,16 @@ The release pipeline builds target-specific bundled binaries, writes
 
 Packaged execution:
 
-1. `.mcp.json` starts `scripts/run-unica.sh`.
-2. `run-unica.sh` delegates to `scripts/run-tool.sh unica`.
-3. `run-tool.sh` verifies host target and SHA-256 from generated manifest.
-4. The bundled `unica` binary starts as stdio MCP server.
+1. `.mcp.json` starts `./bin/<target>/unica`.
+2. The bundled `unica` binary starts as stdio MCP server.
+3. Internal adapters resolve and verify their bundled tools through Rust before
+   execution.
 
 ## Local Install
 
 `scripts/dev/install-local-unica.sh` builds a local package, installs it as a
-local Codex marketplace, validates launchers, and can verify fresh Codex prompt
-visibility.
+local Codex marketplace, validates native binaries, and can verify fresh Codex
+prompt visibility.
 
 ## Runtime State
 
@@ -34,6 +34,6 @@ Workspace-scoped internal services store runtime state under
 location. The service record contains the localhost port, process id, token,
 version, workspace root, source root, and access timestamps.
 
-Packaged launchers export `UNICA_PLUGIN_ROOT` before starting bundled binaries
-so hidden workspace services can locate internal adapter scripts even when the
-user workspace is outside the plugin directory.
+Packaged binaries locate the plugin root from their own executable path when
+`UNICA_PLUGIN_ROOT` is not set, so hidden workspace services can locate internal
+adapter assets even when the user workspace is outside the plugin directory.
