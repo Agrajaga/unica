@@ -1,11 +1,14 @@
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::legacy_scripts::find_plugin_root;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -79,7 +82,7 @@ pub struct IndexOutput {
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct IndexBackgroundJob {
     pub action: String,
     pub source_root: PathBuf,
@@ -88,6 +91,7 @@ pub struct IndexBackgroundJob {
     pub status_path: PathBuf,
     pub lock_path: PathBuf,
     pub lock_id: String,
+    pub lock_lease: IndexLockLease,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,8 +103,14 @@ struct BslIndexLock {
     source_root: String,
     started_at: u64,
     updated_at: u64,
+    #[serde(default = "default_lock_state")]
+    state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     child_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    released_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 pub trait IndexRunner {
@@ -317,33 +327,22 @@ impl<'a> WorkspaceIndexService<'a> {
             }
         }
 
-        let index_lock = BslIndexLock::new(action, &source_root);
-        let lock_id = index_lock.lock_id.clone();
-        match OpenOptions::new().create_new(true).write(true).open(&lock) {
-            Ok(mut file) => {
-                if let Err(error) = write_lock_file(&mut file, &index_lock) {
-                    let _ = fs::remove_file(&lock);
-                    let _ = write_status(
-                        context,
-                        BslIndexStatus::failed(error.as_str(), Some(&source_root)),
-                    );
-                    return IndexStartReport::default();
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+        let lock_lease = match acquire_index_lock(&lock, action, &source_root) {
+            Ok(Some(lock_lease)) => lock_lease,
+            Ok(None) => {
                 return IndexStartReport {
                     warnings: vec!["rlm index building".to_string()],
                 };
             }
             Err(error) => {
-                let message = format!("failed to acquire RLM index lock: {error}");
                 let _ = write_status(
                     context,
-                    BslIndexStatus::failed(message.as_str(), Some(&source_root)),
+                    BslIndexStatus::failed(error.as_str(), Some(&source_root)),
                 );
                 return IndexStartReport::default();
             }
-        }
+        };
+        let lock_id = lock_lease.lock_id().to_string();
 
         let status_path = status_path(context);
         let _ = write_status_path(
@@ -359,9 +358,9 @@ impl<'a> WorkspaceIndexService<'a> {
             status_path,
             lock_path: lock.clone(),
             lock_id: lock_id.clone(),
+            lock_lease,
         };
         if let Err(error) = self.runner.start_background(job) {
-            remove_owned_lock(&lock, &lock_id);
             let _ = write_status(context, BslIndexStatus::failed(error.as_str(), None));
             return IndexStartReport::default();
         }
@@ -447,14 +446,135 @@ impl BslIndexLock {
             source_root: source_root.display().to_string(),
             started_at: now,
             updated_at: now,
+            state: "active".to_string(),
             child_pid: None,
+            released_at: None,
+            message: None,
         }
     }
 
-    fn is_fresh(&self) -> bool {
-        self.schema_version == LOCK_SCHEMA_VERSION
-            && now_secs().saturating_sub(self.updated_at) <= LOCK_STALE_AFTER.as_secs()
+    fn recovered(reason: &str, source_root: &Path) -> Self {
+        let now = now_secs();
+        Self {
+            schema_version: LOCK_SCHEMA_VERSION,
+            lock_id: new_lock_id(),
+            owner_pid: std::process::id(),
+            action: "recover".to_string(),
+            source_root: source_root.display().to_string(),
+            started_at: now,
+            updated_at: now,
+            state: "recovered".to_string(),
+            child_pid: None,
+            released_at: Some(now),
+            message: Some(reason.to_string()),
+        }
     }
+
+    fn is_active(&self) -> bool {
+        self.schema_version == LOCK_SCHEMA_VERSION && self.state == "active"
+    }
+
+    fn is_fresh(&self) -> bool {
+        self.is_active() && now_secs().saturating_sub(self.updated_at) <= LOCK_STALE_AFTER.as_secs()
+    }
+
+    fn mark_released(&mut self) {
+        let now = now_secs();
+        self.state = "released".to_string();
+        self.updated_at = now;
+        self.released_at = Some(now);
+    }
+
+    fn mark_recovered(&mut self, reason: &str) {
+        let now = now_secs();
+        self.state = "recovered".to_string();
+        self.updated_at = now;
+        self.released_at = Some(now);
+        self.message = Some(reason.to_string());
+    }
+}
+
+fn default_lock_state() -> String {
+    "active".to_string()
+}
+
+#[derive(Debug)]
+pub struct IndexLockLease {
+    path: PathBuf,
+    file: File,
+    lock: BslIndexLock,
+    released: bool,
+}
+
+impl IndexLockLease {
+    fn lock_id(&self) -> &str {
+        self.lock.lock_id.as_str()
+    }
+
+    fn refresh(&mut self, child_pid: u32) {
+        if !self.current_file_still_owned() {
+            return;
+        }
+        self.lock.updated_at = now_secs();
+        self.lock.child_pid = Some(child_pid);
+        let _ = write_lock_file_to_open(&mut self.file, &self.lock);
+    }
+
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        unregister_active_lock(&self.path, self.lock_id());
+        if self.current_file_still_owned() {
+            self.lock.mark_released();
+            let _ = write_lock_file_to_open(&mut self.file, &self.lock);
+        }
+        let _ = self.file.unlock();
+        self.released = true;
+    }
+
+    fn current_file_still_owned(&self) -> bool {
+        read_lock_path(&self.path)
+            .map(|index_lock| index_lock.lock_id == self.lock.lock_id)
+            .unwrap_or(false)
+    }
+}
+
+impl Drop for IndexLockLease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn active_index_locks() -> &'static Mutex<HashMap<PathBuf, String>> {
+    static ACTIVE_INDEX_LOCKS: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    ACTIVE_INDEX_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_active_lock(path: &Path, lock_id: &str) {
+    if let Ok(mut locks) = active_index_locks().lock() {
+        locks.insert(path.to_path_buf(), lock_id.to_string());
+    }
+}
+
+fn unregister_active_lock(path: &Path, lock_id: &str) {
+    if let Ok(mut locks) = active_index_locks().lock() {
+        if locks
+            .get(path)
+            .map(|current| current == lock_id)
+            .unwrap_or(false)
+        {
+            locks.remove(path);
+        }
+    }
+}
+
+fn active_lock_registered(path: &Path) -> bool {
+    active_index_locks()
+        .lock()
+        .ok()
+        .and_then(|locks| locks.get(path).cloned())
+        .is_some()
 }
 
 impl BslIndexRunMetrics {
@@ -488,14 +608,9 @@ impl IndexRunner for SystemIndexRunner {
     }
 }
 
-fn run_background_job(job: IndexBackgroundJob) {
-    let _lock_cleanup = LockCleanup {
-        path: job.lock_path.clone(),
-        lock_id: job.lock_id.clone(),
-    };
+fn run_background_job(mut job: IndexBackgroundJob) {
     let started_at = now_secs();
-    let result =
-        run_index_command_with_heartbeat(&job.primary, Some((&job.lock_path, &job.lock_id)));
+    let result = run_index_command_with_heartbeat(&job.primary, Some(&mut job.lock_lease));
     let finished_at = now_secs();
     match result {
         Ok(output) if output.status_success => {
@@ -565,7 +680,7 @@ fn run_index_command(command: &IndexCommand) -> Result<IndexOutput, String> {
 
 fn run_index_command_with_heartbeat(
     command: &IndexCommand,
-    heartbeat: Option<(&Path, &str)>,
+    mut heartbeat: Option<&mut IndexLockLease>,
 ) -> Result<IndexOutput, String> {
     let mut child = Command::new(&command.program)
         .args(&command.args)
@@ -578,8 +693,8 @@ fn run_index_command_with_heartbeat(
 
     let started = Instant::now();
     let mut last_heartbeat = Instant::now();
-    if let Some((path, lock_id)) = heartbeat {
-        refresh_lock_heartbeat(path, lock_id, child.id());
+    if let Some(lease) = heartbeat.as_mut() {
+        (*lease).refresh(child.id());
     }
     loop {
         if child
@@ -600,9 +715,9 @@ fn run_index_command_with_heartbeat(
             });
         }
 
-        if let Some((path, lock_id)) = heartbeat {
+        if let Some(lease) = heartbeat.as_mut() {
             if last_heartbeat.elapsed() >= LOCK_HEARTBEAT_INTERVAL {
-                refresh_lock_heartbeat(path, lock_id, child.id());
+                (*lease).refresh(child.id());
                 last_heartbeat = Instant::now();
             }
         }
@@ -623,17 +738,6 @@ fn run_index_command_with_heartbeat(
         }
 
         thread::sleep(Duration::from_millis(50));
-    }
-}
-
-struct LockCleanup {
-    path: PathBuf,
-    lock_id: String,
-}
-
-impl Drop for LockCleanup {
-    fn drop(&mut self) {
-        remove_owned_lock(&self.path, &self.lock_id);
     }
 }
 
@@ -715,10 +819,17 @@ fn active_lock(context: &WorkspaceContext, source_root: &Path) -> bool {
     if !lock.is_file() {
         return false;
     }
+    if active_lock_registered(&lock) {
+        return true;
+    }
     match read_lock_path(&lock) {
+        Ok(index_lock) if !index_lock.is_active() => false,
         Ok(index_lock) if index_lock.is_fresh() => true,
         Ok(index_lock) => {
-            recover_stale_lock(
+            if lock_is_held_by_other_process(&lock) {
+                return true;
+            }
+            !recover_stale_lock(
                 context,
                 source_root,
                 format!(
@@ -727,25 +838,26 @@ fn active_lock(context: &WorkspaceContext, source_root: &Path) -> bool {
                 )
                 .as_str(),
                 Some(index_lock.lock_id.as_str()),
-            );
-            false
+            )
         }
         Err(error) => {
             if invalid_lock_may_be_active(context, &lock) {
                 return true;
             }
-            recover_stale_lock(
+            !recover_stale_lock(
                 context,
                 source_root,
                 format!("RLM index lock is invalid: {error}").as_str(),
                 None,
-            );
-            false
+            )
         }
     }
 }
 
 fn invalid_lock_may_be_active(context: &WorkspaceContext, lock: &Path) -> bool {
+    if active_lock_registered(lock) || lock_is_held_by_other_process(lock) {
+        return true;
+    }
     let lock_updated_at = file_modified_secs(lock).unwrap_or_else(now_secs);
     if now_secs().saturating_sub(lock_updated_at) <= LOCK_STALE_AFTER.as_secs() {
         return true;
@@ -763,13 +875,10 @@ fn recover_stale_lock(
     source_root: &Path,
     reason: &str,
     lock_id: Option<&str>,
-) {
+) -> bool {
     let lock = lock_path(context);
-    match lock_id {
-        Some(lock_id) => remove_owned_lock(&lock, lock_id),
-        None => {
-            let _ = fs::remove_file(lock);
-        }
+    if !mark_lock_recovered(&lock, lock_id, source_root, reason) {
+        return false;
     }
     if read_bsl_index_status(context)
         .map(|status| status.status == "building")
@@ -783,11 +892,47 @@ fn recover_stale_lock(
             ),
         );
     }
+    true
 }
 
 fn read_lock_path(path: &Path) -> Result<BslIndexLock, String> {
     let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
     serde_json::from_str(&text).map_err(|error| error.to_string())
+}
+
+fn acquire_index_lock(
+    path: &Path,
+    action: &str,
+    source_root: &Path,
+) -> Result<Option<IndexLockLease>, String> {
+    if active_lock_registered(path) {
+        return Ok(None);
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("failed to open RLM index lock: {error}"))?;
+    match file.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if lock_error_is_contended(&error) => return Ok(None),
+        Err(error) => return Err(format!("failed to lock RLM index lock: {error}")),
+    }
+    if active_lock_registered(path) {
+        let _ = file.unlock();
+        return Ok(None);
+    }
+    let index_lock = BslIndexLock::new(action, source_root);
+    write_lock_file_to_open(&mut file, &index_lock)?;
+    register_active_lock(path, index_lock.lock_id.as_str());
+    Ok(Some(IndexLockLease {
+        path: path.to_path_buf(),
+        file,
+        lock: index_lock,
+        released: false,
+    }))
 }
 
 #[cfg(test)]
@@ -815,6 +960,14 @@ fn write_lock_file(file: &mut File, index_lock: &BslIndexLock) -> Result<(), Str
         .map_err(|error| format!("failed to write RLM index lock: {error}"))
 }
 
+fn write_lock_file_to_open(file: &mut File, index_lock: &BslIndexLock) -> Result<(), String> {
+    file.set_len(0)
+        .and_then(|_| file.seek(SeekFrom::Start(0)).map(|_| ()))
+        .map_err(|error| format!("failed to prepare RLM index lock for write: {error}"))?;
+    write_lock_file(file, index_lock)
+}
+
+#[cfg(test)]
 fn lock_temp_path(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
@@ -827,54 +980,62 @@ fn lock_temp_path(path: &Path) -> PathBuf {
     ))
 }
 
-fn write_owned_lock_path(
+fn mark_lock_recovered(
     path: &Path,
-    index_lock: BslIndexLock,
-    expected_lock_id: &str,
-) -> Result<bool, String> {
-    let temp_path = lock_temp_path(path);
-    {
-        let mut temp = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp_path)
-            .map_err(|error| format!("failed to create temporary RLM index lock: {error}"))?;
-        write_lock_file(&mut temp, &index_lock)?;
-    }
-    match read_lock_path(path) {
-        Ok(current) if current.lock_id == expected_lock_id => {
-            fs::rename(&temp_path, path).map_err(|error| {
-                let _ = fs::remove_file(&temp_path);
-                format!("failed to replace RLM index lock atomically: {error}")
-            })?;
-            Ok(true)
-        }
-        _ => {
-            let _ = fs::remove_file(&temp_path);
-            Ok(false)
-        }
-    }
-}
-
-fn refresh_lock_heartbeat(path: &Path, lock_id: &str, child_pid: u32) {
-    let Ok(mut index_lock) = read_lock_path(path) else {
-        return;
+    expected_lock_id: Option<&str>,
+    source_root: &Path,
+    reason: &str,
+) -> bool {
+    let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+    else {
+        return false;
     };
-    if index_lock.lock_id != lock_id {
-        return;
+    match file.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if lock_error_is_contended(&error) => return false,
+        Err(_) => return false,
     }
-    index_lock.updated_at = now_secs();
-    index_lock.child_pid = Some(child_pid);
-    let _ = write_owned_lock_path(path, index_lock, lock_id);
+
+    let recovered = match read_lock_path(path) {
+        Ok(mut current) => {
+            if expected_lock_id
+                .map(|lock_id| current.lock_id != lock_id)
+                .unwrap_or(false)
+            {
+                let _ = file.unlock();
+                return false;
+            }
+            current.mark_recovered(reason);
+            current
+        }
+        Err(_) => BslIndexLock::recovered(reason, source_root),
+    };
+    let result = write_lock_file_to_open(&mut file, &recovered).is_ok();
+    let _ = file.unlock();
+    result
 }
 
-fn remove_owned_lock(path: &Path, lock_id: &str) {
-    if read_lock_path(path)
-        .map(|index_lock| index_lock.lock_id == lock_id)
-        .unwrap_or(false)
-    {
-        let _ = fs::remove_file(path);
+fn lock_is_held_by_other_process(path: &Path) -> bool {
+    let Ok(file) = OpenOptions::new().read(true).write(true).open(path) else {
+        return false;
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(error) if lock_error_is_contended(&error) => true,
+        Err(_) => true,
     }
+}
+
+fn lock_error_is_contended(error: &std::io::Error) -> bool {
+    error.kind() == ErrorKind::WouldBlock
 }
 
 fn file_modified_secs(path: &Path) -> Option<u64> {
@@ -1266,9 +1427,9 @@ mod tests {
         let status = status_path(&context);
         let lock = lock_path(&context);
         fs::create_dir_all(lock.parent().unwrap()).unwrap();
-        let index_lock = BslIndexLock::new("build", &context.workspace_root.join("src"));
-        let lock_id = index_lock.lock_id.clone();
-        write_lock_path(&lock, index_lock).unwrap();
+        let lock_lease = acquire_index_lock(&lock, "build", &context.workspace_root.join("src"))
+            .unwrap()
+            .expect("lock should be acquired for background job");
 
         run_background_job(IndexBackgroundJob {
             action: "build".to_string(),
@@ -1286,7 +1447,8 @@ mod tests {
             ),
             status_path: status.clone(),
             lock_path: lock.clone(),
-            lock_id,
+            lock_id: lock_lease.lock_id().to_string(),
+            lock_lease,
         });
 
         let value: serde_json::Value =
@@ -1304,7 +1466,56 @@ mod tests {
         assert_eq!(metrics["modules"], 24);
         assert_eq!(metrics["methods"], 617);
         assert_eq!(metrics["db_size"], "1.3 MB");
-        assert!(!lock.exists());
+        let current = read_lock_path(&lock).expect("completed job should leave a marker");
+        assert_eq!(current.state, "released");
+        cleanup(&context);
+    }
+
+    #[test]
+    fn released_lock_does_not_block_next_index_build() {
+        let context = test_context("released-lock");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        write_released_lock(&context, "build");
+        write_old_building_status(&context, "build");
+        let runner = RecordingIndexRunner {
+            outputs: RefCell::new(vec![IndexOutput::success(
+                "Index not found: /tmp/bsl_index.db",
+            )]),
+            ..Default::default()
+        };
+        let service = WorkspaceIndexService::with_runner(&runner);
+
+        let report = service.start_for_workspace(&context, &Map::new(), false);
+
+        assert_eq!(report.warnings, vec!["rlm index build started".to_string()]);
+        assert_eq!(
+            runner.backgrounds.borrow()[0].primary.args[0..2],
+            ["index", "build"]
+        );
+        cleanup(&context);
+    }
+
+    #[test]
+    fn stale_lock_held_by_current_process_is_still_active() {
+        let context = test_context("stale-held-lock");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        let lock = lock_path(&context);
+        fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let mut lease = acquire_index_lock(&lock, "build", &context.workspace_root.join("src"))
+            .unwrap()
+            .expect("lock should be acquired");
+        force_lock_updated_at(
+            &mut lease,
+            now_secs().saturating_sub(LOCK_STALE_AFTER.as_secs() + 1),
+        );
+        let runner = RecordingIndexRunner::default();
+        let service = WorkspaceIndexService::with_runner(&runner);
+
+        let readiness = service.ready_index(&context, &Map::new());
+
+        assert_eq!(readiness, IndexReadiness::Building);
+        assert!(runner.commands.borrow().is_empty());
+        drop(lease);
         cleanup(&context);
     }
 
@@ -1313,16 +1524,14 @@ mod tests {
         let context = test_context("cleanup-owner");
         let lock = lock_path(&context);
         fs::create_dir_all(lock.parent().unwrap()).unwrap();
-        let mut old_lock = BslIndexLock::new("build", &context.workspace_root.join("src"));
-        old_lock.lock_id = "old-owner".to_string();
+        let lease = acquire_index_lock(&lock, "build", &context.workspace_root.join("src"))
+            .unwrap()
+            .expect("old owner should acquire lock");
         let mut new_lock = BslIndexLock::new("build", &context.workspace_root.join("src"));
         new_lock.lock_id = "new-owner".to_string();
         write_lock_path(&lock, new_lock.clone()).unwrap();
 
-        drop(LockCleanup {
-            path: lock.clone(),
-            lock_id: old_lock.lock_id,
-        });
+        drop(lease);
 
         let current = read_lock_path(&lock).expect("replacement lock should remain");
         assert_eq!(current.lock_id, new_lock.lock_id);
@@ -1334,17 +1543,19 @@ mod tests {
         let context = test_context("heartbeat-owner");
         let lock = lock_path(&context);
         fs::create_dir_all(lock.parent().unwrap()).unwrap();
-        let mut old_lock = BslIndexLock::new("build", &context.workspace_root.join("src"));
-        old_lock.lock_id = "old-owner".to_string();
+        let mut lease = acquire_index_lock(&lock, "build", &context.workspace_root.join("src"))
+            .unwrap()
+            .expect("old owner should acquire lock");
         let mut new_lock = BslIndexLock::new("build", &context.workspace_root.join("src"));
         new_lock.lock_id = "new-owner".to_string();
         write_lock_path(&lock, new_lock.clone()).unwrap();
 
-        refresh_lock_heartbeat(&lock, &old_lock.lock_id, 42);
+        lease.refresh(42);
 
         let current = read_lock_path(&lock).expect("replacement lock should remain readable");
         assert_eq!(current.lock_id, new_lock.lock_id);
         assert_eq!(current.child_pid, new_lock.child_pid);
+        drop(lease);
         cleanup(&context);
     }
 
@@ -1363,6 +1574,21 @@ mod tests {
         assert!(report.warnings.is_empty());
         let current = read_lock_path(&lock).expect("replacement lock should remain");
         assert_eq!(current.lock_id, "new-owner");
+        cleanup(&context);
+    }
+
+    #[test]
+    fn stale_structured_lock_is_marked_recovered_before_rebuild() {
+        let context = test_context("stale-structured-recovered");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        write_stale_lock(&context, "build");
+        write_old_building_status(&context, "build");
+
+        assert!(!active_lock(&context, &context.workspace_root.join("src")));
+
+        let current =
+            read_lock_path(&lock_path(&context)).expect("stale lock should remain as marker");
+        assert_eq!(current.state, "recovered");
         cleanup(&context);
     }
 
@@ -1405,6 +1631,11 @@ mod tests {
         }
     }
 
+    fn force_lock_updated_at(lease: &mut IndexLockLease, updated_at: u64) {
+        lease.lock.updated_at = updated_at;
+        write_lock_file_to_open(&mut lease.file, &lease.lock).unwrap();
+    }
+
     impl IndexOutput {
         fn success(stdout: impl Into<String>) -> Self {
             Self {
@@ -1429,7 +1660,7 @@ mod tests {
     }
 
     fn test_context(name: &str) -> WorkspaceContext {
-        let root = std::env::temp_dir().join(format!("unica-index-{name}-{}", now_secs()));
+        let root = std::env::temp_dir().join(format!("unica-index-{name}-{}", now_nanos()));
         fs::create_dir_all(&root).unwrap();
         create_fake_plugin_root(&root);
         WorkspaceContext {
@@ -1476,6 +1707,27 @@ mod tests {
             "source_root": context.workspace_root.join("src").display().to_string(),
             "started_at": stale,
             "updated_at": stale
+        });
+        fs::write(
+            lock_path(context),
+            serde_json::to_string_pretty(&text).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+
+    fn write_released_lock(context: &WorkspaceContext, action: &str) {
+        fs::create_dir_all(lock_path(context).parent().unwrap()).unwrap();
+        let now = now_secs();
+        let text = serde_json::json!({
+            "schema_version": 1,
+            "lock_id": new_lock_id(),
+            "owner_pid": std::process::id(),
+            "action": action,
+            "source_root": context.workspace_root.join("src").display().to_string(),
+            "started_at": now,
+            "updated_at": now,
+            "state": "released",
+            "released_at": now
         });
         fs::write(
             lock_path(context),
