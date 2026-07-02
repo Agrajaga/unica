@@ -215,12 +215,13 @@ jobs:
           name: unica-codex-marketplace-linux-x64
           path: dist/linux-x64
 
-      - name: Run deterministic release assessment
+      - name: Run release assessment
         run: >
           python scripts/ci/release-assessment.py
           --package-archive dist/linux-x64/unica-codex-marketplace-linux-x64.tar.gz
           --work-dir .build/release-assessment
           --out-dir dist/release-assessment
+          --bsp-ref 3.2.1.446
           --release-tag "${{ github.ref_name }}"
           --github-run-id "${{ github.run_id }}"
 

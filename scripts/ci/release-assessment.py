@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run deterministic Unica release assessment against 1c-syntax/ssl_3_2."""
+"""Run Unica release assessment against a pinned 1c-syntax/ssl_3_2 ref."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 BSP_REPO = "https://github.com/1c-syntax/ssl_3_2"
-BSP_REF = "master"
+BSP_REF = "3.2.1.446"
 SOURCE_DIR = "src/cf"
 EXPECTED_PUBLIC_TOOLS = {
     "unica.project.status",
@@ -541,7 +541,7 @@ def summarize_cache(cache_dir: Path) -> dict[str, Any]:
 
 
 def build_summary(scenarios: list[dict[str, Any]], diagnostic_codes: list[str], cache_dir: Path) -> dict[str, Any]:
-    blocking_failures = sum(1 for scenario in scenarios if scenario["blocking"] and scenario["status"] == "failed")
+    blocking_failures = sum(1 for scenario in scenarios if scenario["status"] == "failed")
     total_duration = sum(int(scenario["durationMs"]) for scenario in scenarios)
     return {
         "status": "failed" if blocking_failures else "passed",
@@ -581,6 +581,7 @@ def build_assessment_report(
     candidate_package: str,
     bsp_commit: str,
     timeout_seconds: int,
+    bsp_ref: str = BSP_REF,
 ) -> dict[str, Any]:
     scenarios: list[dict[str, Any]] = []
     diagnostic_codes: list[str] = []
@@ -646,7 +647,8 @@ def build_assessment_report(
         "candidatePackage": candidate_package,
         "bsp": {
             "repo": BSP_REPO,
-            "ref": BSP_REF,
+            "ref": bsp_ref,
+            "requestedRef": bsp_ref,
             "commit": bsp_commit,
             "descriptionVersion": description.get("Версия"),
             "descriptionDate": description.get("Дата"),
@@ -777,13 +779,14 @@ def main() -> None:
     parser.add_argument("--pages-root", type=Path)
     parser.add_argument("--release-tag", default=release_tag_from_env())
     parser.add_argument("--github-run-id", default=os.environ.get("GITHUB_RUN_ID", "local"))
+    parser.add_argument("--bsp-ref", default=BSP_REF)
     parser.add_argument("--timeout-seconds", type=int, default=600)
     args = parser.parse_args()
 
     work_dir = args.work_dir.resolve()
     package_archive = args.package_archive.resolve()
     run_unica = extract_marketplace_archive(package_archive, work_dir / "marketplace")
-    bsp_root, bsp_commit = download_bsp(work_dir / "bsp")
+    bsp_root, bsp_commit = download_bsp(work_dir / "bsp", ref=args.bsp_ref)
     report = build_assessment_report(
         run_unica=run_unica,
         bsp_root=bsp_root,
@@ -793,6 +796,7 @@ def main() -> None:
         github_run_id=args.github_run_id,
         candidate_package=package_archive.name,
         bsp_commit=bsp_commit,
+        bsp_ref=args.bsp_ref,
         timeout_seconds=args.timeout_seconds,
     )
     if args.pages_root:

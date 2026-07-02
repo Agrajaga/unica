@@ -113,6 +113,8 @@ for raw in sys.stdin:
             self.assertEqual(report["schemaVersion"], 1)
             self.assertEqual(report["summary"]["status"], "passed")
             self.assertEqual(report["bsp"]["commit"], "abc123")
+            self.assertEqual(report["bsp"]["ref"], module.BSP_REF)
+            self.assertEqual(report["bsp"]["requestedRef"], module.BSP_REF)
             self.assertTrue(all(scenario["durationMs"] >= 0 for scenario in report["scenarios"]))
             self.assertIn("UnusedLocalVariable", report["summary"]["qualityFindings"]["diagnosticCodes"])
             self.assertTrue((out_dir / "assessment.json").is_file())
@@ -166,6 +168,34 @@ for raw in sys.stdin:
         self.assertIn("&lt;script&gt;alert", html)
         self.assertNotIn("<script>alert", html)
         self.assertIn("Blocking failures", html)
+
+    def test_summary_fails_when_any_scenario_failed_even_if_marked_non_blocking(self) -> None:
+        module = load_assessment_module()
+
+        scenarios = [
+            module.scenario_result(
+                scenario_id="quality-smoke",
+                title="Quality smoke",
+                tool="unica.form.info",
+                arguments={},
+                status="failed",
+                duration_ms=7,
+                blocking=False,
+                errors=["runtime dependency missing"],
+            )
+        ]
+
+        summary = module.build_summary(scenarios, [], Path("/tmp/unica-no-cache"))
+
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["blockingFailures"], 1)
+        self.assertEqual(summary["qualityFindings"]["nonBlockingFailures"], 1)
+
+    def test_default_bsp_ref_is_pinned_and_report_records_requested_ref(self) -> None:
+        module = load_assessment_module()
+
+        self.assertNotEqual(module.BSP_REF, "master")
+        self.assertEqual(module.BSP_REF, "3.2.1.446")
 
     def test_versioned_pages_copy_preserves_existing_versions_and_latest(self) -> None:
         module = load_assessment_module()

@@ -105,6 +105,7 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
         self.assertIn("name: unica-codex-marketplace-linux-x64", text)
         self.assertIn("python scripts/ci/release-assessment.py", text)
         self.assertIn("--package-archive dist/linux-x64/unica-codex-marketplace-linux-x64.tar.gz", text)
+        self.assertIn("--bsp-ref 3.2.1.446", text)
         self.assertIn("name: unica-release-assessment", text)
 
     def test_pages_publish_waits_for_release_assessment(self) -> None:
