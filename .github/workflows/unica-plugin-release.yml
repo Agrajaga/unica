@@ -289,11 +289,9 @@ jobs:
 
           if git "${git_auth_config[@]}" ls-remote --exit-code --heads "$repo_url" gh-pages >/dev/null 2>&1; then
             git "${git_auth_config[@]}" clone --depth 1 --branch gh-pages "$repo_url" pages-site
+            rm -rf pages-site/.git
           else
             mkdir -p pages-site
-            git -C pages-site init
-            git -C pages-site checkout --orphan gh-pages
-            git -C pages-site remote add origin "$repo_url"
           fi
 
           mkdir -p pages-site/assessments
@@ -308,18 +306,9 @@ jobs:
           </html>
           HTML
 
-          git -C pages-site config user.name "github-actions[bot]"
-          git -C pages-site config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C pages-site add assessments
-          if git -C pages-site diff --cached --quiet; then
-            echo "No assessment page changes to publish."
-          else
-            git -C pages-site commit -m "docs: publish assessment ${GITHUB_REF_NAME}"
-            git "${git_auth_config[@]}" -C pages-site push origin HEAD:gh-pages
-          fi
-          rm -rf pages-site/.git
-
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
