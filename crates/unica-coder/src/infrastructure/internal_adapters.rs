@@ -796,12 +796,15 @@ impl<'a> CodeNavigationAdapter<'a> {
                 "{tool_name} argument `mode` must be one of: lines, files"
             ));
         }
+        let limit = read_limit(args, 200);
 
         let mut git_args = vec!["grep".to_string()];
         if mode == "files" {
             git_args.push("--name-only".to_string());
         } else {
             git_args.push("-n".to_string());
+            git_args.push("-m".to_string());
+            git_args.push(limit.to_string());
         }
         if !args.get("regex").and_then(Value::as_bool).unwrap_or(false) {
             git_args.push("-F".to_string());
@@ -828,19 +831,26 @@ impl<'a> CodeNavigationAdapter<'a> {
             cwd: context.workspace_root.clone(),
             timeout: Some(DEFAULT_PROCESS_TIMEOUT),
         })?;
-        let limit = read_limit(args, 200);
         let body = grep_body(&output.stdout, mode, limit);
         let no_matches = body.is_empty()
             && !output.status_success
+            && output.stderr.trim().is_empty()
             && !output.timed_out
             && process_exit_code_is(&output.status, 1);
-        if !output.status_success && !no_matches {
+        let partial_matches = output.timed_out && !body.is_empty();
+        if !output.status_success && !no_matches && !partial_matches {
+            let error = output.stderr.trim();
+            let error = if error.is_empty() {
+                format!("git grep exited with status {}", output.status)
+            } else {
+                error.to_string()
+            };
             return Ok(AdapterOutcome {
                 ok: false,
                 summary: format!("{tool_name} failed through git grep"),
                 changes: Vec::new(),
                 warnings: vec![format!("git grep exited with status {}", output.status)],
-                errors: vec![output.stderr.trim().to_string()],
+                errors: vec![error],
                 artifacts: Vec::new(),
                 stdout: Some(format_section("git-grep", &body)),
                 stderr: Some(output.stderr),
@@ -2935,6 +2945,8 @@ mod tests {
         let grep_pos = stdout.find("=== git grep ===").unwrap();
         assert!(bsl_pos < rlm_pos);
         assert!(rlm_pos < grep_pos);
+        assert!(stdout.contains("=== rlm ==="));
+        assert!(stdout.contains("=== git grep ==="));
         assert!(stdout.contains("CommonModules/Проведение.bsl:42"));
         assert!(stdout.contains("Procedure ОбработкаПроведения() export"));
         assert!(!stdout.contains("=== git-grep ==="));
@@ -3384,6 +3396,8 @@ mod tests {
         assert!(commands[0].args.contains(&"grep".to_string()));
         assert!(commands[0].args.contains(&"-F".to_string()));
         assert!(commands[0].args.contains(&"-i".to_string()));
+        assert!(commands[0].args.contains(&"-m".to_string()));
+        assert!(commands[0].args.contains(&"10".to_string()));
         assert!(commands[0]
             .args
             .contains(&":(glob)CommonModules/**/*.bsl".to_string()));
@@ -3417,6 +3431,41 @@ mod tests {
 
         assert!(error.contains("outside workspace root"));
         assert!(grep.commands.borrow().is_empty());
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn code_grep_adapter_reports_git_fatal_error_instead_of_no_matches() {
+        let context = temp_context("grep-fatal");
+        let index = FakeIndexRunner::default();
+        let grep = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
+            output: ProcessOutput {
+                status_success: false,
+                status: "exit status: 128".to_string(),
+                stdout: String::new(),
+                stderr: "fatal: not a git repository (or any of the parent directories): .git\n"
+                    .to_string(),
+                timed_out: false,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("SmokeProcedure"));
+
+        let outcome = CodeNavigationAdapter::with_runners(&index, &grep)
+            .invoke("unica.code.grep", &args, &context, false)
+            .unwrap();
+
+        assert!(!outcome.ok);
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("fatal: not a git repository")));
+        assert!(!outcome
+            .stdout
+            .as_deref()
+            .unwrap_or_default()
+            .contains("No git grep matches."));
         cleanup_context(&context);
     }
 
