@@ -348,24 +348,6 @@ pub(crate) fn fresh_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fresh_uuid_generates_uuid_v4() {
-        let value = fresh_uuid();
-
-        assert!(is_valid_uuid(&value), "{value}");
-        assert!(!value.starts_with("00000000-0000-0000-"), "{value}");
-        assert_eq!(value.as_bytes()[14], b'4', "{value}");
-        assert!(
-            matches!(value.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
-            "{value}"
-        );
-    }
-}
-
 pub(crate) fn template_metadata_xml(
     template_name: &str,
     synonym: &str,
@@ -611,5 +593,23 @@ pub(crate) fn invoke_mutation(
         "template-add" => Some(add_template(args, context)),
         "template-remove" => Some(remove_template(args, context)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_uuid_generates_uuid_v4() {
+        let value = fresh_uuid();
+
+        assert!(is_valid_uuid(&value), "{value}");
+        assert!(!value.starts_with("00000000-0000-0000-"), "{value}");
+        assert_eq!(value.as_bytes()[14], b'4', "{value}");
+        assert!(
+            matches!(value.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
+            "{value}"
+        );
     }
 }
