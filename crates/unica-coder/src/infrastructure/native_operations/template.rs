@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::common::*;
 use super::{cf::*, cfe::*, form::*, interface::*, meta::*, mxl::*, role::*, skd::*, subsystem::*};
@@ -346,19 +345,7 @@ pub(crate) fn full_md_namespace_declarations() -> &'static str {
 }
 
 pub(crate) fn fresh_uuid() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let hex = format!("{nanos:032x}");
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    )
+    uuid::Uuid::new_v4().to_string()
 }
 
 pub(crate) fn template_metadata_xml(
@@ -606,5 +593,19 @@ pub(crate) fn invoke_mutation(
         "template-add" => Some(add_template(args, context)),
         "template-remove" => Some(remove_template(args, context)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_uuid_generates_uuid_v4() {
+        let value = fresh_uuid();
+        let uuid = uuid::Uuid::parse_str(&value).expect(&value);
+
+        assert!(!uuid.is_nil(), "{value}");
+        assert_eq!(uuid.get_version(), Some(uuid::Version::Random), "{value}");
     }
 }

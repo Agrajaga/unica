@@ -8,31 +8,32 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::common::*;
 use super::{
     cf::*, cfe::*, form::*, interface::*, mxl::*, role::*, skd::*, subsystem::*, template::*,
 };
 
-static META_COMPILE_UUID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-
 pub(crate) fn fresh_meta_compile_uuid() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let sequence = META_COMPILE_UUID_SEQUENCE.fetch_add(1, Ordering::Relaxed) as u128;
-    let hex = format!("{:032x}", nanos.wrapping_add(sequence));
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[0..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..32]
-    )
+    uuid::Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod uuid_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_meta_compile_uuid_generates_uuid_v4() {
+        let value = fresh_meta_compile_uuid();
+
+        assert!(is_guid(&value), "{value}");
+        assert!(!value.starts_with("00000000-0000-0000-"), "{value}");
+        assert_eq!(value.as_bytes()[14], b'4', "{value}");
+        assert!(
+            matches!(value.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
+            "{value}"
+        );
+    }
 }
 
 #[derive(Clone)]
