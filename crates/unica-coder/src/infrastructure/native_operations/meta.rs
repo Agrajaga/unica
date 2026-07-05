@@ -8085,22 +8085,39 @@ pub(crate) fn register_compiled_meta_in_configuration(
     if !config_xml_path.is_file() {
         return Ok(Some("no-config".to_string()));
     }
-    let mut raw_text = fs::read_to_string(&config_xml_path)
-        .map_err(|err| format!("failed to read {}: {err}", config_xml_path.display()))?;
+    let mut raw_text = read_utf8_sig(&config_xml_path)?;
     if raw_text.contains(&format!("<{child_tag}>{obj_name}</{child_tag}>")) {
         return Ok(Some("already".to_string()));
     }
     if raw_text.contains("</ChildObjects>") {
-        raw_text = raw_text.replacen(
-            "</ChildObjects>",
-            &format!("\t\t\t<{child_tag}>{obj_name}</{child_tag}>\n\t\t</ChildObjects>"),
-            1,
-        );
+        raw_text =
+            register_compiled_meta_child_text(&raw_text, child_tag, obj_name).unwrap_or(raw_text);
         write_utf8_bom(&config_xml_path, &raw_text)?;
         Ok(Some("added".to_string()))
     } else {
         Ok(Some("no-childobj".to_string()))
     }
+}
+
+fn register_compiled_meta_child_text(
+    xml_text: &str,
+    child_tag: &str,
+    obj_name: &str,
+) -> Option<String> {
+    let close = "</ChildObjects>";
+    let index = xml_text.find(close)?;
+    let line_start = xml_text[..index].rfind('\n').map_or(0, |pos| pos + 1);
+    let closing_indent = &xml_text[line_start..index];
+    let insertion = format!("<{child_tag}>{obj_name}</{child_tag}>");
+    let mut result =
+        String::with_capacity(xml_text.len() + 1 + insertion.len() + 1 + closing_indent.len());
+    result.push_str(&xml_text[..index]);
+    result.push('\t');
+    result.push_str(&insertion);
+    result.push('\n');
+    result.push_str(closing_indent);
+    result.push_str(&xml_text[index..]);
+    Some(result)
 }
 
 pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -> AdapterOutcome {
