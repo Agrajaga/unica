@@ -367,6 +367,65 @@ mod edit_tests {
 
         let _ = fs::remove_dir_all(&context.cwd);
     }
+    #[test]
+    fn edit_meta_removes_attribute_from_tabular_section() {
+        let context = temp_context("remove-tabular-section-attribute");
+        let object_path = context.cwd.join("Documents").join("SamplePackingList.xml");
+        let mut xml = sample_document_xml("<RegisterRecords/>");
+        xml = xml.replace(
+            "\t\t<ChildObjects/>",
+            "\t\t<ChildObjects>\n\t\t\t<TabularSection uuid=\"22222222-2222-4222-8222-222222222222\">\n\t\t\t\t<Properties>\n\t\t\t\t\t<Name>SampleItems</Name>\n\t\t\t\t\t<Synonym/>\n\t\t\t\t\t<Comment/>\n\t\t\t\t\t<ToolTip/>\n\t\t\t\t\t<FillChecking>DontCheck</FillChecking>\n\t\t\t\t</Properties>\n\t\t\t\t<ChildObjects>\n\t\t\t\t\t<Attribute uuid=\"33333333-3333-4333-8333-333333333333\">\n\t\t\t\t\t\t<Properties>\n\t\t\t\t\t\t\t<Name>ExistingItem</Name>\n\t\t\t\t\t\t\t<Synonym/>\n\t\t\t\t\t\t\t<Comment/>\n\t\t\t\t\t\t\t<Type/>\n\t\t\t\t\t\t</Properties>\n\t\t\t\t\t</Attribute>\n\t\t\t\t\t<Attribute uuid=\"44444444-4444-4444-8444-444444444444\">\n\t\t\t\t\t\t<Properties>\n\t\t\t\t\t\t\t<Name>ObsoleteItem</Name>\n\t\t\t\t\t\t\t<Synonym/>\n\t\t\t\t\t\t\t<Comment/>\n\t\t\t\t\t\t\t<Type/>\n\t\t\t\t\t\t</Properties>\n\t\t\t\t\t</Attribute>\n\t\t\t\t</ChildObjects>\n\t\t\t</TabularSection>\n\t\t</ChildObjects>",
+        );
+        write_file(&object_path, &xml);
+
+        let outcome = edit_meta(
+            &meta_edit_args(
+                &object_path,
+                "remove-ts-attribute",
+                "SampleItems.ObsoleteItem",
+            ),
+            &context,
+        );
+        let stdout = outcome.stdout.as_deref().unwrap_or("");
+        assert!(outcome.ok, "{stdout}\n{:?}", outcome.errors);
+        assert!(stdout.contains("Removed:  1"), "{stdout}");
+
+        let updated = fs::read_to_string(&object_path).unwrap();
+        assert!(updated.contains("<Name>ExistingItem</Name>"));
+        assert!(!updated.contains("<Name>ObsoleteItem</Name>"));
+        Document::parse(updated.trim_start_matches('\u{feff}')).unwrap();
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_meta_remove_tabular_attribute_reports_missing_attribute() {
+        let context = temp_context("missing-tabular-section-attribute");
+        let object_path = context.cwd.join("Documents").join("SamplePackingList.xml");
+        let mut xml = sample_document_xml("<RegisterRecords/>");
+        xml = xml.replace(
+            "\t\t<ChildObjects/>",
+            "\t\t<ChildObjects>\n\t\t\t<TabularSection uuid=\"22222222-2222-4222-8222-222222222222\">\n\t\t\t\t<Properties>\n\t\t\t\t\t<Name>SampleItems</Name>\n\t\t\t\t\t<Synonym/>\n\t\t\t\t\t<Comment/>\n\t\t\t\t\t<ToolTip/>\n\t\t\t\t\t<FillChecking>DontCheck</FillChecking>\n\t\t\t\t</Properties>\n\t\t\t\t<ChildObjects/>\n\t\t\t</TabularSection>\n\t\t</ChildObjects>",
+        );
+        write_file(&object_path, &xml);
+
+        let outcome = edit_meta(
+            &meta_edit_args(
+                &object_path,
+                "remove-ts-attribute",
+                "SampleItems.MissingItem",
+            ),
+            &context,
+        );
+
+        assert!(!outcome.ok, "{:?}", outcome.stdout);
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("Attribute 'SampleItems.MissingItem' not found")));
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
 }
 
 #[derive(Clone)]
@@ -8477,6 +8536,7 @@ pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -
 
         let mut added = 0usize;
         let mut modified = 0usize;
+        let mut removed = 0usize;
         match operation {
             "modify-property" => {
                 for pair in value
@@ -8514,9 +8574,12 @@ pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -
                 meta_edit_add_tabular_section_attribute(&mut xml_text, value)?;
                 added += 1;
             }
+            "remove-ts-attribute" => {
+                removed += meta_edit_remove_tabular_section_attribute(&mut xml_text, value)?;
+            }
             other => {
                 return Err(format!(
-                    "native meta-edit currently supports modify-property, add-registerRecord, add-attribute, add-ts and add-ts-attribute only, got: {other}"
+                    "native meta-edit currently supports modify-property, add-registerRecord, add-attribute, add-ts, add-ts-attribute and remove-ts-attribute only, got: {other}"
                 ));
             }
         }
@@ -8525,7 +8588,7 @@ pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -
             .map_err(|err| format!("XML parse error after meta-edit: {err}"))?;
         write_utf8_bom(&object_path, &xml_text)?;
         let stdout = format!(
-            "\n=== meta-edit summary ===\n  Object:   {object_type}.{object_name}\n  Added:    {added}\n  Removed:  0\n  Modified: {modified}\n"
+            "\n=== meta-edit summary ===\n  Object:   {object_type}.{object_name}\n  Added:    {added}\n  Removed:  {removed}\n  Modified: {modified}\n"
         );
         Ok((stdout, object_path, modified))
     })();
@@ -8840,6 +8903,57 @@ pub(crate) fn meta_edit_add_tabular_section_attribute(
     meta_edit_insert_tabular_child_object(xml_text, section_name, &lines)
 }
 
+pub(crate) fn meta_edit_remove_tabular_section_attribute(
+    xml_text: &mut String,
+    raw_value: &str,
+) -> Result<usize, String> {
+    let mut removed = 0usize;
+    for item in raw_value
+        .split(";;")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let (section_name, attr_name) = item.split_once('.').ok_or_else(|| {
+            "remove-ts-attribute requires Value like Section.Attribute".to_string()
+        })?;
+        let section_name = section_name.trim();
+        let attr_name = attr_name.trim();
+        if section_name.is_empty() || attr_name.is_empty() {
+            return Err("remove-ts-attribute requires Value like Section.Attribute".to_string());
+        }
+        meta_edit_remove_tabular_child_by_name(xml_text, section_name, "Attribute", attr_name)?;
+        removed += 1;
+    }
+
+    if removed == 0 {
+        return Err("remove-ts-attribute requires non-empty Value".to_string());
+    }
+    Ok(removed)
+}
+
+pub(crate) fn meta_edit_remove_tabular_child_by_name(
+    xml_text: &mut String,
+    section_name: &str,
+    tag: &str,
+    name: &str,
+) -> Result<(), String> {
+    let doc = Document::parse(xml_text.trim_start_matches('\u{feff}'))
+        .map_err(|err| format!("XML parse error: {err}"))?;
+    let object = meta_edit_object_node(&doc)?;
+    let section = meta_edit_find_tabular_section(object, section_name)
+        .ok_or_else(|| format!("TabularSection '{section_name}' not found"))?;
+    let child_objects = meta_info_child(section, "ChildObjects")
+        .ok_or_else(|| format!("{tag} '{section_name}.{name}' not found"))?;
+    let target = meta_info_children(child_objects, tag)
+        .into_iter()
+        .find(|child| meta_edit_child_object_name(*child).as_deref() == Some(name))
+        .ok_or_else(|| format!("{tag} '{section_name}.{name}' not found"))?;
+    let range = target.range();
+    drop(doc);
+    meta_edit_remove_xml_node_range(xml_text, range);
+    Ok(())
+}
+
 pub(crate) fn meta_edit_attribute_context(object_type: &str) -> &str {
     match object_type {
         "Catalog" => "catalog",
@@ -9039,6 +9153,33 @@ pub(crate) fn meta_edit_insert_lines_into_node_child_objects(
         return Ok(());
     }
     meta_edit_insert_child_objects_into_node(xml_text, range, tag, close_indent, lines)
+}
+
+pub(crate) fn meta_edit_remove_xml_node_range(
+    xml_text: &mut String,
+    range: std::ops::Range<usize>,
+) {
+    let mut start = range.start;
+    let mut end = range.end;
+
+    if let Some(line_start) = xml_text[..start].rfind('\n') {
+        let prefix = &xml_text[line_start + 1..start];
+        if prefix.trim().is_empty() {
+            start = line_start + 1;
+        }
+    }
+
+    if end < xml_text.len() {
+        if let Some(line_end) = xml_text[end..].find('\n') {
+            let suffix_end = end + line_end;
+            let suffix = &xml_text[end..suffix_end];
+            if suffix.trim().is_empty() {
+                end = suffix_end + 1;
+            }
+        }
+    }
+
+    xml_text.replace_range(start..end, "");
 }
 
 pub(crate) fn normalize_meta_edit_property_value(key: &str, value: &str) -> String {
