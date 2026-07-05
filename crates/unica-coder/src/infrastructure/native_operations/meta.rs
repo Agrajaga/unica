@@ -224,6 +224,35 @@ mod edit_tests {
     }
 
     #[test]
+    fn edit_meta_adds_tabular_section_with_inline_columns() {
+        let context = temp_context("add-tabular-section-with-inline-columns");
+        let object_path = context.cwd.join("Documents").join("SamplePackingList.xml");
+        write_file(&object_path, &sample_document_xml("<RegisterRecords/>"));
+
+        let outcome = edit_meta(
+            &meta_edit_args(
+                &object_path,
+                "add-ts",
+                "SampleItems: SampleSourceDocument: DocumentRef.SampleSale, SampleQuantity: Number(15,3)",
+            ),
+            &context,
+        );
+        let stdout = outcome.stdout.as_deref().unwrap_or("");
+        assert!(outcome.ok, "{stdout}\n{:?}", outcome.errors);
+
+        let updated = fs::read_to_string(&object_path).unwrap();
+        assert!(updated.contains("<TabularSection uuid=\""));
+        assert!(updated.contains("<Name>SampleItems</Name>"));
+        assert!(!updated.contains("<Name>SampleItems: SampleSourceDocument"));
+        assert!(updated.contains("<Name>SampleSourceDocument</Name>"));
+        assert!(updated.contains("<v8:Type>cfg:DocumentRef.SampleSale</v8:Type>"));
+        assert!(updated.contains("<Name>SampleQuantity</Name>"));
+        Document::parse(updated.trim_start_matches('\u{feff}')).unwrap();
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
     fn edit_meta_adds_attribute_to_tabular_section() {
         let context = temp_context("add-tabular-section-attribute");
         let object_path = context.cwd.join("Documents").join("SamplePackingList.xml");
@@ -8684,15 +8713,8 @@ pub(crate) fn meta_edit_add_tabular_section(
     object_name: &str,
     raw_value: &str,
 ) -> Result<(), String> {
-    let name = raw_value.trim();
-    if name.is_empty() {
-        return Err("add-ts requires non-empty Value".to_string());
-    }
-    meta_edit_ensure_top_child_name_free(xml_text, "TabularSection", name)?;
-    let section = MetaCompileTabularSection {
-        name: name.to_string(),
-        columns: Vec::new(),
-    };
+    let section = meta_edit_parse_tabular_section(raw_value)?;
+    meta_edit_ensure_top_child_name_free(xml_text, "TabularSection", &section.name)?;
     let mut lines = Vec::new();
     let mut next_uuid = fresh_meta_compile_uuid;
     emit_meta_tabular_section(
@@ -8704,6 +8726,99 @@ pub(crate) fn meta_edit_add_tabular_section(
         &mut next_uuid,
     );
     meta_edit_insert_top_child_object(xml_text, &lines)
+}
+
+pub(crate) fn meta_edit_parse_tabular_section(
+    raw_value: &str,
+) -> Result<MetaCompileTabularSection, String> {
+    let value = raw_value.trim();
+    if value.is_empty() {
+        return Err("add-ts requires non-empty Value".to_string());
+    }
+
+    let Some((name, raw_columns)) = value.split_once(':') else {
+        return Ok(MetaCompileTabularSection {
+            name: value.to_string(),
+            columns: Vec::new(),
+        });
+    };
+
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("add-ts requires non-empty tabular section name".to_string());
+    }
+
+    let columns = meta_edit_parse_tabular_section_columns(raw_columns)?;
+    Ok(MetaCompileTabularSection {
+        name: name.to_string(),
+        columns,
+    })
+}
+
+pub(crate) fn meta_edit_parse_tabular_section_columns(
+    raw_columns: &str,
+) -> Result<Vec<MetaCompileAttr>, String> {
+    let mut column_defs = Vec::new();
+    let mut current = String::new();
+
+    for part in split_meta_edit_commas_outside_parens(raw_columns) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if !current.is_empty() && meta_edit_looks_like_attr_definition(part) {
+            column_defs.push(current);
+            current = part.to_string();
+        } else if current.is_empty() {
+            current = part.to_string();
+        } else {
+            current.push_str(", ");
+            current.push_str(part);
+        }
+    }
+    if !current.is_empty() {
+        column_defs.push(current);
+    }
+
+    column_defs
+        .into_iter()
+        .map(|column| {
+            let attr = meta_compile_parse_attr(&Value::String(column.clone()));
+            if attr.name.is_empty() || attr.type_name.is_empty() {
+                return Err(format!(
+                    "add-ts column requires Value like Name: Type, got: {column}"
+                ));
+            }
+            Ok(attr)
+        })
+        .collect()
+}
+
+pub(crate) fn split_meta_edit_commas_outside_parens(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&value[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&value[start..]);
+    parts
+}
+
+pub(crate) fn meta_edit_looks_like_attr_definition(value: &str) -> bool {
+    value
+        .split_once(':')
+        .map(|(name, _)| !name.trim().is_empty())
+        .unwrap_or(false)
 }
 
 pub(crate) fn meta_edit_add_tabular_section_attribute(
