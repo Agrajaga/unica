@@ -426,6 +426,74 @@ mod edit_tests {
 
         let _ = fs::remove_dir_all(&context.cwd);
     }
+
+    #[test]
+    fn edit_meta_modifies_attribute_synonym_and_comment() {
+        let context = temp_context("modify-attribute");
+        let object_path = context.cwd.join("Documents").join("SamplePackingList.xml");
+        let mut xml = sample_document_xml("<RegisterRecords/>");
+        xml = xml.replace(
+            "\t\t<ChildObjects/>",
+            "\t\t<ChildObjects>\n\t\t\t<Attribute uuid=\"33333333-3333-4333-8333-333333333333\">\n\t\t\t\t<Properties>\n\t\t\t\t\t<Name>SampleCargoPlaceCode</Name>\n\t\t\t\t\t<Synonym/>\n\t\t\t\t\t<Comment/>\n\t\t\t\t\t<Type>\n\t\t\t\t\t\t<v8:Type>xs:string</v8:Type>\n\t\t\t\t\t\t<v8:StringQualifiers>\n\t\t\t\t\t\t\t<v8:Length>50</v8:Length>\n\t\t\t\t\t\t</v8:StringQualifiers>\n\t\t\t\t\t</Type>\n\t\t\t\t</Properties>\n\t\t\t</Attribute>\n\t\t</ChildObjects>",
+        );
+        write_file(&object_path, &xml);
+
+        let outcome = edit_meta(
+            &meta_edit_args(
+                &object_path,
+                "modify-attribute",
+                "SampleCargoPlaceCode: synonym=Код грузового места, comment=TZ-SAMPLE",
+            ),
+            &context,
+        );
+        let stdout = outcome.stdout.as_deref().unwrap_or("");
+        assert!(outcome.ok, "{stdout}\n{:?}", outcome.errors);
+        assert!(stdout.contains("Modified: 2"), "{stdout}");
+
+        let updated = fs::read_to_string(&object_path).unwrap();
+        assert!(updated.contains("<Name>SampleCargoPlaceCode</Name>"));
+        assert!(updated.contains("<v8:content>Код грузового места</v8:content>"));
+        assert!(updated.contains("<Comment>TZ-SAMPLE</Comment>"));
+        assert!(updated.contains("<v8:Length>50</v8:Length>"));
+        Document::parse(updated.trim_start_matches('\u{feff}')).unwrap();
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_meta_modifies_tabular_attribute_synonym_comment_and_allowed_sign() {
+        let context = temp_context("modify-tabular-attribute");
+        let object_path = context.cwd.join("Documents").join("SamplePackingList.xml");
+        let mut xml = sample_document_xml("<RegisterRecords/>");
+        xml = xml.replace(
+            "\t\t<ChildObjects/>",
+            "\t\t<ChildObjects>\n\t\t\t<TabularSection uuid=\"22222222-2222-4222-8222-222222222222\">\n\t\t\t\t<Properties>\n\t\t\t\t\t<Name>SampleItems</Name>\n\t\t\t\t\t<Synonym/>\n\t\t\t\t\t<Comment/>\n\t\t\t\t\t<ToolTip/>\n\t\t\t\t\t<FillChecking>DontCheck</FillChecking>\n\t\t\t\t</Properties>\n\t\t\t\t<ChildObjects>\n\t\t\t\t\t<Attribute uuid=\"33333333-3333-4333-8333-333333333333\">\n\t\t\t\t\t\t<Properties>\n\t\t\t\t\t\t\t<Name>SampleQuantity</Name>\n\t\t\t\t\t\t\t<Synonym/>\n\t\t\t\t\t\t\t<Comment/>\n\t\t\t\t\t\t\t<Type>\n\t\t\t\t\t\t\t\t<v8:Type>xs:decimal</v8:Type>\n\t\t\t\t\t\t\t\t<v8:NumberQualifiers>\n\t\t\t\t\t\t\t\t\t<v8:Digits>15</v8:Digits>\n\t\t\t\t\t\t\t\t\t<v8:FractionDigits>3</v8:FractionDigits>\n\t\t\t\t\t\t\t\t</v8:NumberQualifiers>\n\t\t\t\t\t\t\t</Type>\n\t\t\t\t\t\t</Properties>\n\t\t\t\t\t</Attribute>\n\t\t\t\t</ChildObjects>\n\t\t\t</TabularSection>\n\t\t</ChildObjects>",
+        );
+        write_file(&object_path, &format!("\u{feff}{xml}"));
+
+        let outcome = edit_meta(
+            &meta_edit_args(
+                &object_path,
+                "modify-ts-attribute",
+                "SampleItems.SampleQuantity: synonym=Количество, comment=TZ-SAMPLE, v8:AllowedSign=Nonnegative",
+            ),
+            &context,
+        );
+        let stdout = outcome.stdout.as_deref().unwrap_or("");
+        assert!(outcome.ok, "{stdout}\n{:?}", outcome.errors);
+        assert!(stdout.contains("Modified: 3"), "{stdout}");
+
+        let updated = fs::read_to_string(&object_path).unwrap();
+        assert!(updated.starts_with('\u{feff}'));
+        assert!(updated.contains("<Name>SampleQuantity</Name>"));
+        assert!(updated.contains("<v8:content>Количество</v8:content>"));
+        assert!(updated.contains("<Comment>TZ-SAMPLE</Comment>"));
+        assert!(updated.contains("<v8:AllowedSign>Nonnegative</v8:AllowedSign>"));
+        assert!(updated.contains("<v8:FractionDigits>3</v8:FractionDigits>"));
+        Document::parse(updated.trim_start_matches('\u{feff}')).unwrap();
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
 }
 
 #[derive(Clone)]
@@ -8574,12 +8642,18 @@ pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -
                 meta_edit_add_tabular_section_attribute(&mut xml_text, value)?;
                 added += 1;
             }
+            "modify-attribute" => {
+                modified += meta_edit_modify_attribute(&mut xml_text, value)?;
+            }
+            "modify-ts-attribute" => {
+                modified += meta_edit_modify_tabular_section_attribute(&mut xml_text, value)?;
+            }
             "remove-ts-attribute" => {
                 removed += meta_edit_remove_tabular_section_attribute(&mut xml_text, value)?;
             }
             other => {
                 return Err(format!(
-                    "native meta-edit currently supports modify-property, add-registerRecord, add-attribute, add-ts, add-ts-attribute and remove-ts-attribute only, got: {other}"
+                    "native meta-edit currently supports modify-property, add-registerRecord, add-attribute, add-ts, add-ts-attribute, modify-attribute, modify-ts-attribute and remove-ts-attribute only, got: {other}"
                 ));
             }
         }
@@ -8929,6 +9003,304 @@ pub(crate) fn meta_edit_remove_tabular_section_attribute(
         return Err("remove-ts-attribute requires non-empty Value".to_string());
     }
     Ok(removed)
+}
+
+pub(crate) fn meta_edit_modify_attribute(
+    xml_text: &mut String,
+    raw_value: &str,
+) -> Result<usize, String> {
+    let mut modified = 0usize;
+    for item in raw_value
+        .split(";;")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let (attr_name, raw_changes) = item.split_once(':').ok_or_else(|| {
+            "modify-attribute requires Value like Attribute: key=value".to_string()
+        })?;
+        let attr_name = attr_name.trim();
+        if attr_name.is_empty() || raw_changes.trim().is_empty() {
+            return Err("modify-attribute requires Value like Attribute: key=value".to_string());
+        }
+        modified += meta_edit_modify_top_attribute_properties(xml_text, attr_name, raw_changes)?;
+    }
+    if modified == 0 {
+        return Err("modify-attribute requires non-empty Value".to_string());
+    }
+    Ok(modified)
+}
+
+pub(crate) fn meta_edit_modify_tabular_section_attribute(
+    xml_text: &mut String,
+    raw_value: &str,
+) -> Result<usize, String> {
+    let mut modified = 0usize;
+    for item in raw_value
+        .split(";;")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let (target, raw_changes) = item.split_once(':').ok_or_else(|| {
+            "modify-ts-attribute requires Value like Section.Attribute: key=value".to_string()
+        })?;
+        let (section_name, attr_name) = target.trim().split_once('.').ok_or_else(|| {
+            "modify-ts-attribute requires Value like Section.Attribute: key=value".to_string()
+        })?;
+        let section_name = section_name.trim();
+        let attr_name = attr_name.trim();
+        if section_name.is_empty() || attr_name.is_empty() || raw_changes.trim().is_empty() {
+            return Err(
+                "modify-ts-attribute requires Value like Section.Attribute: key=value".to_string(),
+            );
+        }
+        modified += meta_edit_modify_tabular_attribute_properties(
+            xml_text,
+            section_name,
+            attr_name,
+            raw_changes,
+        )?;
+    }
+    if modified == 0 {
+        return Err("modify-ts-attribute requires non-empty Value".to_string());
+    }
+    Ok(modified)
+}
+
+pub(crate) fn meta_edit_modify_top_attribute_properties(
+    xml_text: &mut String,
+    attr_name: &str,
+    raw_changes: &str,
+) -> Result<usize, String> {
+    let doc = Document::parse(xml_text.trim_start_matches('\u{feff}'))
+        .map_err(|err| format!("XML parse error: {err}"))?;
+    let object = meta_edit_object_node(&doc)?;
+    let child_objects = meta_info_child(object, "ChildObjects")
+        .ok_or_else(|| format!("Attribute '{attr_name}' not found"))?;
+    let target = meta_info_children(child_objects, "Attribute")
+        .into_iter()
+        .find(|child| meta_edit_child_object_name(*child).as_deref() == Some(attr_name))
+        .ok_or_else(|| format!("Attribute '{attr_name}' not found"))?;
+    let props = meta_info_child(target, "Properties")
+        .ok_or_else(|| format!("Attribute '{attr_name}' has no Properties"))?;
+    let range = props.range();
+    drop(doc);
+    meta_edit_modify_properties_range(xml_text, range, raw_changes)
+}
+
+pub(crate) fn meta_edit_modify_tabular_attribute_properties(
+    xml_text: &mut String,
+    section_name: &str,
+    attr_name: &str,
+    raw_changes: &str,
+) -> Result<usize, String> {
+    let doc = Document::parse(xml_text.trim_start_matches('\u{feff}'))
+        .map_err(|err| format!("XML parse error: {err}"))?;
+    let object = meta_edit_object_node(&doc)?;
+    let section = meta_edit_find_tabular_section(object, section_name)
+        .ok_or_else(|| format!("TabularSection '{section_name}' not found"))?;
+    let child_objects = meta_info_child(section, "ChildObjects")
+        .ok_or_else(|| format!("Attribute '{section_name}.{attr_name}' not found"))?;
+    let target = meta_info_children(child_objects, "Attribute")
+        .into_iter()
+        .find(|child| meta_edit_child_object_name(*child).as_deref() == Some(attr_name))
+        .ok_or_else(|| format!("Attribute '{section_name}.{attr_name}' not found"))?;
+    let props = meta_info_child(target, "Properties")
+        .ok_or_else(|| format!("Attribute '{section_name}.{attr_name}' has no Properties"))?;
+    let range = props.range();
+    drop(doc);
+    meta_edit_modify_properties_range(xml_text, range, raw_changes)
+}
+
+pub(crate) fn meta_edit_modify_properties_range(
+    xml_text: &mut String,
+    range: std::ops::Range<usize>,
+    raw_changes: &str,
+) -> Result<usize, String> {
+    let mut properties = xml_text[range.clone()].to_string();
+    let child_indent = meta_edit_property_child_indent(&properties);
+    let mut modified = 0usize;
+
+    for change in split_meta_edit_commas_outside_parens(raw_changes) {
+        let change = change.trim();
+        if change.is_empty() {
+            continue;
+        }
+        let (raw_key, raw_value) = change
+            .split_once('=')
+            .ok_or_else(|| format!("modify attribute change requires key=value, got: {change}"))?;
+        let key = raw_key.trim();
+        let value = raw_value.trim();
+        let canonical = meta_edit_canonical_attribute_property(key);
+        match canonical.as_str() {
+            "Synonym" => {
+                let mut lines = Vec::new();
+                emit_meta_mltext(&mut lines, &child_indent, "Synonym", value);
+                meta_edit_replace_or_insert_property(
+                    &mut properties,
+                    "Synonym",
+                    &lines.join("\n"),
+                    &child_indent,
+                )?;
+            }
+            "Comment" => {
+                let replacement = if value.is_empty() {
+                    format!("{child_indent}<Comment/>")
+                } else {
+                    format!("{child_indent}<Comment>{}</Comment>", escape_xml(value))
+                };
+                meta_edit_replace_or_insert_property(
+                    &mut properties,
+                    "Comment",
+                    &replacement,
+                    &child_indent,
+                )?;
+            }
+            "Type" => {
+                let mut lines = Vec::new();
+                emit_meta_value_type(&mut lines, &child_indent, value);
+                meta_edit_replace_or_insert_property(
+                    &mut properties,
+                    "Type",
+                    &lines.join("\n"),
+                    &child_indent,
+                )?;
+            }
+            "v8:AllowedSign" => {
+                meta_edit_replace_or_insert_nested_v8_property(
+                    &mut properties,
+                    "NumberQualifiers",
+                    "AllowedSign",
+                    value,
+                    &child_indent,
+                )?;
+            }
+            _ => {
+                let replacement = format!(
+                    "{child_indent}<{canonical}>{}</{canonical}>",
+                    escape_xml(value)
+                );
+                meta_edit_replace_or_insert_property(
+                    &mut properties,
+                    &canonical,
+                    &replacement,
+                    &child_indent,
+                )?;
+            }
+        }
+        modified += 1;
+    }
+
+    xml_text.replace_range(range, &properties);
+    Ok(modified)
+}
+
+pub(crate) fn meta_edit_canonical_attribute_property(key: &str) -> String {
+    match key.trim().to_ascii_lowercase().as_str() {
+        "name" | "имя" => "Name".to_string(),
+        "synonym" | "синоним" => "Synonym".to_string(),
+        "comment" | "комментарий" => "Comment".to_string(),
+        "type" | "тип" => "Type".to_string(),
+        "fillchecking" | "fill_checking" => "FillChecking".to_string(),
+        "indexing" | "индексирование" => "Indexing".to_string(),
+        "use" | "использование" => "Use".to_string(),
+        "allowedsign" | "allowed_sign" | "v8:allowedsign" => "v8:AllowedSign".to_string(),
+        _ => key.trim().to_string(),
+    }
+}
+
+pub(crate) fn meta_edit_property_child_indent(properties: &str) -> String {
+    for tag in ["Name", "Synonym", "Comment", "Type"] {
+        let needle = format!("<{tag}");
+        if let Some(pos) = properties.find(&needle) {
+            let line_start = properties[..pos]
+                .rfind('\n')
+                .map(|idx| idx + 1)
+                .unwrap_or(0);
+            let indent = &properties[line_start..pos];
+            if indent.chars().all(|ch| ch == '\t' || ch == ' ') {
+                return indent.to_string();
+            }
+        }
+    }
+    "\t\t\t\t\t".to_string()
+}
+
+pub(crate) fn meta_edit_replace_or_insert_property(
+    properties: &mut String,
+    tag: &str,
+    replacement: &str,
+    child_indent: &str,
+) -> Result<(), String> {
+    let self_closing = format!("<{tag}/>");
+    if let Some(pos) = properties.find(&self_closing) {
+        properties.replace_range(pos..pos + self_closing.len(), replacement.trim_start());
+        return Ok(());
+    }
+
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    if let Some(start) = properties.find(&open) {
+        let Some(relative_end) = properties[start + open.len()..].find(&close) else {
+            return Err(format!("No closing </{tag}> found"));
+        };
+        let end = start + open.len() + relative_end + close.len();
+        properties.replace_range(start..end, replacement.trim_start());
+        return Ok(());
+    }
+
+    let Some(close_pos) = properties.rfind("</Properties>") else {
+        return Err("No closing </Properties> found".to_string());
+    };
+    properties.insert_str(close_pos, &format!("{replacement}\n{child_indent}"));
+    Ok(())
+}
+
+pub(crate) fn meta_edit_replace_or_insert_nested_v8_property(
+    properties: &mut String,
+    parent_tag: &str,
+    child_tag: &str,
+    value: &str,
+    child_indent: &str,
+) -> Result<(), String> {
+    let parent_open = format!("<v8:{parent_tag}>");
+    let parent_close = format!("</v8:{parent_tag}>");
+    let Some(parent_start) = properties.find(&parent_open) else {
+        return Err(format!("No <v8:{parent_tag}> found"));
+    };
+    let parent_content_start = parent_start + parent_open.len();
+    let Some(relative_parent_end) = properties[parent_content_start..].find(&parent_close) else {
+        return Err(format!("No </v8:{parent_tag}> found"));
+    };
+    let parent_end = parent_content_start + relative_parent_end;
+    let parent_range = parent_start..parent_end + parent_close.len();
+    let mut parent = properties[parent_range.clone()].to_string();
+    let nested_indent = format!("{child_indent}\t\t");
+    let replacement = format!(
+        "{nested_indent}<v8:{child_tag}>{}</v8:{child_tag}>",
+        escape_xml(value)
+    );
+
+    let self_closing = format!("<v8:{child_tag}/>");
+    if let Some(pos) = parent.find(&self_closing) {
+        parent.replace_range(pos..pos + self_closing.len(), replacement.trim_start());
+    } else {
+        let open = format!("<v8:{child_tag}>");
+        let close = format!("</v8:{child_tag}>");
+        if let Some(start) = parent.find(&open) {
+            let Some(relative_end) = parent[start + open.len()..].find(&close) else {
+                return Err(format!("No </v8:{child_tag}> found"));
+            };
+            let end = start + open.len() + relative_end + close.len();
+            parent.replace_range(start..end, replacement.trim_start());
+        } else {
+            let Some(close_pos) = parent.rfind(&parent_close) else {
+                return Err(format!("No </v8:{parent_tag}> found"));
+            };
+            parent.insert_str(close_pos, &format!("{replacement}\n{child_indent}\t"));
+        }
+    }
+    properties.replace_range(parent_range, &parent);
+    Ok(())
 }
 
 pub(crate) fn meta_edit_remove_tabular_child_by_name(
