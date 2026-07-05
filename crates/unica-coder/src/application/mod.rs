@@ -990,9 +990,8 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Edit managed Form.xml elements, attributes, and commands.",
             mutating: true,
             cache_access: cache_access_for("form-edit", Some(DomainEventKind::FormChanged)),
-            handler: ToolHandler::LegacyScript {
-                skill: "form-edit",
-                script: "form-edit.py",
+            handler: ToolHandler::NativeOperation {
+                operation: "form-edit",
                 event: Some(DomainEventKind::FormChanged),
             },
         },
@@ -1315,11 +1314,10 @@ mod tests {
             .unwrap();
         assert!(result.ok);
         assert!(result.summary.contains("dry run"));
-        let command = result
-            .command
-            .as_ref()
-            .expect("legacy dry run previews command");
-        assert!(command.join(" ").contains("form-edit.py"));
+        assert!(
+            result.command.is_none(),
+            "native dry run should not preview a legacy script command"
+        );
         assert_eq!(result.cache.mode, "dry-run");
         assert!(result.cache.events.contains(&"FormChanged".to_string()));
         assert!(result
@@ -1505,7 +1503,6 @@ mod tests {
         let expected = [
             ("unica.form.add", "form-add", "form-add.py"),
             ("unica.form.compile", "form-compile", "form-compile.py"),
-            ("unica.form.edit", "form-edit", "form-edit.py"),
             ("unica.form.remove", "form-remove", "remove-form.py"),
             ("unica.form.validate", "form-validate", "form-validate.py"),
         ];

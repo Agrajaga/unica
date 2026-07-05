@@ -2399,6 +2399,7 @@ pub(crate) fn edit_form(args: &Map<String, Value>, context: &WorkspaceContext) -
                     "UsualGroup",
                     "Table",
                     "Button",
+                    "CommandBar",
                 ],
             ),
         };
@@ -2412,6 +2413,14 @@ pub(crate) fn edit_form(args: &Map<String, Value>, context: &WorkspaceContext) -
         let mut added_elements = Vec::<String>::new();
         if let Some(elements) = defn.get("elements").and_then(Value::as_array) {
             if !elements.is_empty() {
+                let element_names = form_edit_element_names(elements);
+                form_edit_check_duplicate_names(&element_names, "form element")?;
+                form_edit_check_existing_names(
+                    &xml_text,
+                    &element_names,
+                    &["InputField", "UsualGroup", "Table", "Button", "CommandBar"],
+                    "form element",
+                )?;
                 let start = elem_ids.next;
                 let mut lines = Vec::<String>::new();
                 for element in elements {
@@ -2426,7 +2435,12 @@ pub(crate) fn edit_form(args: &Map<String, Value>, context: &WorkspaceContext) -
                         added_elements.push(format!("  + [Input] {name}{path}"));
                     }
                 }
-                form_edit_insert_section_items(&mut xml_text, "ChildItems", &lines)?;
+                form_edit_insert_element_items(
+                    &mut xml_text,
+                    defn.get("into").and_then(Value::as_str),
+                    defn.get("after").and_then(Value::as_str),
+                    &lines,
+                )?;
                 let _companion_count = elem_ids.next.saturating_sub(start + added_elements.len());
             }
         }
@@ -2434,6 +2448,14 @@ pub(crate) fn edit_form(args: &Map<String, Value>, context: &WorkspaceContext) -
         let mut added_attrs = Vec::<String>::new();
         if let Some(attrs) = defn.get("attributes").and_then(Value::as_array) {
             if !attrs.is_empty() {
+                let attr_names = form_edit_named_items(attrs, &["name"]);
+                form_edit_check_duplicate_names(&attr_names, "attribute")?;
+                form_edit_check_existing_names(
+                    &xml_text,
+                    &attr_names,
+                    &["Attribute"],
+                    "attribute",
+                )?;
                 let mut lines = Vec::<String>::new();
                 for attr in attrs {
                     let Some(object) = attr.as_object() else {
@@ -2457,6 +2479,9 @@ pub(crate) fn edit_form(args: &Map<String, Value>, context: &WorkspaceContext) -
         let mut added_cmds = Vec::<String>::new();
         if let Some(commands) = defn.get("commands").and_then(Value::as_array) {
             if !commands.is_empty() {
+                let command_names = form_edit_named_items(commands, &["name"]);
+                form_edit_check_duplicate_names(&command_names, "command")?;
+                form_edit_check_existing_names(&xml_text, &command_names, &["Command"], "command")?;
                 let mut lines = Vec::<String>::new();
                 for cmd in commands {
                     let Some(object) = cmd.as_object() else {
@@ -2580,8 +2605,66 @@ pub(crate) fn form_edit_element_display_name(element: &Value) -> Option<String> 
     object
         .get("input")
         .and_then(Value::as_str)
+        .or_else(|| object.get("button").and_then(Value::as_str))
+        .or_else(|| object.get("cmdBar").and_then(Value::as_str))
+        .or_else(|| object.get("commandBar").and_then(Value::as_str))
         .or_else(|| object.get("name").and_then(Value::as_str))
         .map(ToOwned::to_owned)
+}
+
+pub(crate) fn form_edit_element_names(elements: &[Value]) -> Vec<String> {
+    elements
+        .iter()
+        .filter_map(form_edit_element_display_name)
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+pub(crate) fn form_edit_named_items(items: &[Value], keys: &[&str]) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let object = item.as_object()?;
+            keys.iter()
+                .find_map(|key| object.get(*key).and_then(Value::as_str))
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+pub(crate) fn form_edit_check_duplicate_names(names: &[String], kind: &str) -> Result<(), String> {
+    let mut seen = HashSet::<&str>::new();
+    for name in names {
+        if !seen.insert(name.as_str()) {
+            return Err(format!("[ERROR] Duplicate {kind} in patch: '{name}'"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn form_edit_check_existing_names(
+    xml_text: &str,
+    names: &[String],
+    tags: &[&str],
+    kind: &str,
+) -> Result<(), String> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let doc = Document::parse(xml_text).map_err(|err| format!("[ERROR] XML parse error: {err}"))?;
+    let existing = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element() && tags.contains(&node.tag_name().name()))
+        .filter_map(|node| node.attribute("name"))
+        .collect::<HashSet<_>>();
+    for name in names {
+        if existing.contains(name.as_str()) {
+            return Err(format!("[ERROR] Duplicate {kind}: '{name}' already exists"));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn form_edit_insert_section_items(
@@ -2607,6 +2690,147 @@ pub(crate) fn form_edit_insert_section_items(
         return Err(format!("No <{section}> section found in form"));
     };
     xml_text.insert_str(pos, &format!("{content}\n\t"));
+    Ok(())
+}
+
+pub(crate) fn form_edit_insert_element_items(
+    xml_text: &mut String,
+    into_name: Option<&str>,
+    after_name: Option<&str>,
+    lines: &[String],
+) -> Result<(), String> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let target = form_edit_target_child_items_range(xml_text, into_name, after_name)?;
+    form_edit_insert_lines_into_target(xml_text, target, lines)
+}
+
+pub(crate) enum FormEditInsertTarget {
+    ExistingChildItems(std::ops::Range<usize>),
+    ElementNeedsChildItems {
+        range: std::ops::Range<usize>,
+        tag: String,
+    },
+    AfterElement(usize),
+}
+
+pub(crate) fn form_edit_target_child_items_range(
+    xml_text: &str,
+    into_name: Option<&str>,
+    after_name: Option<&str>,
+) -> Result<FormEditInsertTarget, String> {
+    let doc = Document::parse(xml_text).map_err(|err| format!("[ERROR] XML parse error: {err}"))?;
+    let root = doc.root_element();
+    if let Some(into_name) = into_name.filter(|name| !name.is_empty()) {
+        let Some(target) = root
+            .descendants()
+            .find(|node| node.is_element() && node.attribute("name") == Some(into_name))
+        else {
+            return Err(format!("[ERROR] Target group '{into_name}' not found"));
+        };
+        if let Some(child_items) = form_child(target, "ChildItems") {
+            return Ok(FormEditInsertTarget::ExistingChildItems(
+                child_items.range(),
+            ));
+        }
+        return Ok(FormEditInsertTarget::ElementNeedsChildItems {
+            range: target.range(),
+            tag: target.tag_name().name().to_string(),
+        });
+    }
+    if let Some(after_name) = after_name.filter(|name| !name.is_empty()) {
+        let Some(after_element) = root
+            .descendants()
+            .find(|node| node.is_element() && node.attribute("name") == Some(after_name))
+        else {
+            return Err(format!("[ERROR] Element '{after_name}' not found"));
+        };
+        if after_element
+            .ancestors()
+            .find(|node| node.is_element() && node.tag_name().name() == "ChildItems")
+            .is_none()
+        {
+            return Err(format!(
+                "No parent <ChildItems> section found for form element '{after_name}'"
+            ));
+        };
+        return Ok(FormEditInsertTarget::AfterElement(
+            after_element.range().end,
+        ));
+    }
+    let Some(child_items) = form_child(root, "ChildItems") else {
+        return Err("No <ChildItems> section found in form".to_string());
+    };
+    Ok(FormEditInsertTarget::ExistingChildItems(
+        child_items.range(),
+    ))
+}
+
+pub(crate) fn form_edit_insert_lines_into_target(
+    xml_text: &mut String,
+    target: FormEditInsertTarget,
+    lines: &[String],
+) -> Result<(), String> {
+    match target {
+        FormEditInsertTarget::ExistingChildItems(range) => {
+            form_edit_insert_lines_into_range(xml_text, range, "ChildItems", lines)
+        }
+        FormEditInsertTarget::ElementNeedsChildItems { range, tag } => {
+            form_edit_insert_child_items_into_element(xml_text, range, &tag, lines)
+        }
+        FormEditInsertTarget::AfterElement(pos) => {
+            let content = lines.join("\n");
+            xml_text.insert_str(pos, &format!("\n{content}"));
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn form_edit_insert_lines_into_range(
+    xml_text: &mut String,
+    range: std::ops::Range<usize>,
+    section: &str,
+    lines: &[String],
+) -> Result<(), String> {
+    let content = lines.join("\n");
+    let section_text = &xml_text[range.clone()];
+    if section_text.trim_end().ends_with("/>") {
+        xml_text.replace_range(range, &format!("<{section}>\n{content}\n\t\t</{section}>"));
+        return Ok(());
+    }
+    let close = format!("</{section}>");
+    let Some(relative_pos) = section_text.rfind(&close) else {
+        return Err(format!("No <{section}> section found in form target"));
+    };
+    xml_text.insert_str(range.start + relative_pos, &format!("{content}\n\t\t"));
+    Ok(())
+}
+
+pub(crate) fn form_edit_insert_child_items_into_element(
+    xml_text: &mut String,
+    range: std::ops::Range<usize>,
+    tag: &str,
+    lines: &[String],
+) -> Result<(), String> {
+    let content = lines.join("\n");
+    let element_text = &xml_text[range.clone()];
+    if let Some(relative_pos) = element_text.rfind("/>") {
+        let pos = range.start + relative_pos;
+        xml_text.replace_range(
+            pos..pos + 2,
+            &format!(">\n\t\t<ChildItems>\n{content}\n\t\t</ChildItems>\n\t</{tag}>"),
+        );
+        return Ok(());
+    }
+    let close = format!("</{tag}>");
+    let Some(relative_pos) = element_text.rfind(&close) else {
+        return Err(format!("No closing </{tag}> found in form target"));
+    };
+    xml_text.insert_str(
+        range.start + relative_pos,
+        &format!("\t\t<ChildItems>\n{content}\n\t\t</ChildItems>\n\t"),
+    );
     Ok(())
 }
 
@@ -2917,6 +3141,25 @@ pub(crate) fn emit_form_element(
         emit_form_input(lines, object, name, indent, ids);
         return Ok(());
     }
+    if let Some(name) = object
+        .get("button")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("name").and_then(Value::as_str))
+        .filter(|_| object.contains_key("button"))
+    {
+        emit_form_button(lines, object, name, indent, ids);
+        return Ok(());
+    }
+    if let Some(name) = object
+        .get("cmdBar")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("commandBar").and_then(Value::as_str))
+        .or_else(|| object.get("name").and_then(Value::as_str))
+        .filter(|_| object.contains_key("cmdBar") || object.contains_key("commandBar"))
+    {
+        emit_form_command_bar_element(lines, object, name, indent, ids)?;
+        return Ok(());
+    }
     if object.contains_key("autoCmdBar") || object.contains_key("autoCommandBar") {
         return Ok(());
     }
@@ -3005,6 +3248,98 @@ pub(crate) fn emit_form_input(
         ids,
     );
     lines.push(format!("{indent}</InputField>"));
+}
+
+pub(crate) fn emit_form_button(
+    lines: &mut Vec<String>,
+    element: &Map<String, Value>,
+    name: &str,
+    indent: &str,
+    ids: &mut FormIdAllocator,
+) {
+    let id = ids.next();
+    lines.push(format!(
+        "{indent}<Button name=\"{}\" id=\"{id}\">",
+        escape_xml(name)
+    ));
+    let inner = format!("{indent}\t");
+    if let Some(button_type) = element.get("type").and_then(Value::as_str) {
+        let xml_type = match button_type {
+            "usual" => "UsualButton",
+            "hyperlink" => "Hyperlink",
+            "commandBar" => "CommandBarButton",
+            other => other,
+        };
+        lines.push(format!("{inner}<Type>{}</Type>", escape_xml(xml_type)));
+    }
+    if let Some(command) = element.get("command").and_then(Value::as_str) {
+        lines.push(format!(
+            "{inner}<CommandName>Form.Command.{}</CommandName>",
+            escape_xml(command)
+        ));
+    }
+    if let Some(std_command) = element.get("stdCommand").and_then(Value::as_str) {
+        let command_name = if let Some((item, command)) = std_command.split_once('.') {
+            format!("Form.Item.{item}.StandardCommand.{command}")
+        } else {
+            format!("Form.StandardCommand.{std_command}")
+        };
+        lines.push(format!(
+            "{inner}<CommandName>{}</CommandName>",
+            escape_xml(&command_name)
+        ));
+    }
+    if let Some(title) = element.get("title").and_then(Value::as_str) {
+        emit_form_mltext(lines, &inner, "Title", title);
+    }
+    emit_form_common_flags(lines, element, &inner);
+    if element.get("defaultButton").and_then(Value::as_bool) == Some(true) {
+        lines.push(format!("{inner}<DefaultButton>true</DefaultButton>"));
+    }
+    if let Some(location) = element.get("locationInCommandBar").and_then(Value::as_str) {
+        lines.push(format!(
+            "{inner}<LocationInCommandBar>{}</LocationInCommandBar>",
+            escape_xml(location)
+        ));
+    }
+    emit_form_companion(
+        lines,
+        "ExtendedTooltip",
+        &format!("{name}РасширеннаяПодсказка"),
+        &inner,
+        ids,
+    );
+    lines.push(format!("{indent}</Button>"));
+}
+
+pub(crate) fn emit_form_command_bar_element(
+    lines: &mut Vec<String>,
+    element: &Map<String, Value>,
+    name: &str,
+    indent: &str,
+    ids: &mut FormIdAllocator,
+) -> Result<(), String> {
+    let id = ids.next();
+    lines.push(format!(
+        "{indent}<CommandBar name=\"{}\" id=\"{id}\">",
+        escape_xml(name)
+    ));
+    let inner = format!("{indent}\t");
+    if element.get("autofill").and_then(Value::as_bool) == Some(true) {
+        lines.push(format!("{inner}<Autofill>true</Autofill>"));
+    }
+    emit_form_common_flags(lines, element, &inner);
+    if let Some(children) = element.get("children").and_then(Value::as_array) {
+        if !children.is_empty() {
+            lines.push(format!("{inner}<ChildItems>"));
+            for child in children {
+                emit_form_element(lines, child, &format!("{inner}\t"), ids)?;
+            }
+            lines.push(format!("{inner}</ChildItems>"));
+        }
+    }
+    lines.push(format!("{indent}</CommandBar>"));
+    Ok(())
 }
 
 pub(crate) fn emit_form_common_flags(
@@ -3532,6 +3867,206 @@ mod tests {
             ),
             "{stdout}"
         );
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_form_adds_command_bar_button_into_existing_container() {
+        let context = temp_context("edit-command-bar");
+        let form_path = context
+            .cwd
+            .join("Documents")
+            .join("SampleShipment")
+            .join("Forms")
+            .join("MainForm")
+            .join("Ext")
+            .join("Form.xml");
+        write_file(
+            &form_path,
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.17">
+	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+	<ChildItems>
+		<CommandBar name="ПанельДействий" id="1">
+			<ChildItems/>
+		</CommandBar>
+	</ChildItems>
+	<Attributes/>
+	<Commands/>
+</Form>
+"#,
+        );
+        let patch_path = context.cwd.join("form-edit-command-bar.json");
+        write_file(
+            &patch_path,
+            r#"{
+  "into": "ПанельДействий",
+  "elements": [
+    {
+      "button": "Заполнить",
+      "type": "commandBar",
+      "command": "Заполнить",
+      "locationInCommandBar": "InAdditionalSubmenu"
+    }
+  ],
+  "commands": [
+    { "name": "Заполнить", "action": "ЗаполнитьОбработка" }
+  ]
+}
+"#,
+        );
+
+        let mut args = Map::new();
+        args.insert(
+            "FormPath".to_string(),
+            json!(form_path.display().to_string()),
+        );
+        args.insert(
+            "JsonPath".to_string(),
+            json!(patch_path.display().to_string()),
+        );
+
+        let outcome = edit_form(&args, &context);
+        let stdout = outcome.stdout.as_deref().unwrap_or("");
+        assert!(outcome.ok, "{stdout}\n{:?}", outcome.errors);
+
+        let updated = fs::read_to_string(&form_path).unwrap();
+        assert_eq!(
+            updated
+                .matches("<CommandBar name=\"ПанельДействий\"")
+                .count(),
+            1
+        );
+        assert_eq!(updated.matches("<Command name=\"Заполнить\"").count(), 1);
+        assert!(updated.contains("<Button name=\"Заполнить\""));
+        assert!(updated.contains("<Type>CommandBarButton</Type>"));
+        assert!(updated.contains("<CommandName>Form.Command.Заполнить</CommandName>"));
+        assert!(
+            updated.contains("<LocationInCommandBar>InAdditionalSubmenu</LocationInCommandBar>")
+        );
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_form_creates_child_items_for_target_container() {
+        let context = temp_context("edit-command-bar-no-child-items");
+        let form_path = context
+            .cwd
+            .join("Documents")
+            .join("SampleShipment")
+            .join("Forms")
+            .join("MainForm")
+            .join("Ext")
+            .join("Form.xml");
+        write_file(
+            &form_path,
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.17">
+	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+	<ChildItems>
+		<CommandBar name="ПанельДействий" id="1"/>
+	</ChildItems>
+	<Attributes/>
+	<Commands/>
+</Form>
+"#,
+        );
+        let patch_path = context.cwd.join("form-edit-command-bar.json");
+        write_file(
+            &patch_path,
+            r#"{
+  "into": "ПанельДействий",
+  "elements": [
+    {
+      "button": "Заполнить",
+      "type": "commandBar",
+      "command": "Заполнить"
+    }
+  ],
+  "commands": [
+    { "name": "Заполнить", "action": "ЗаполнитьОбработка" }
+  ]
+}
+"#,
+        );
+
+        let mut args = Map::new();
+        args.insert(
+            "FormPath".to_string(),
+            json!(form_path.display().to_string()),
+        );
+        args.insert(
+            "JsonPath".to_string(),
+            json!(patch_path.display().to_string()),
+        );
+
+        let outcome = edit_form(&args, &context);
+        let stdout = outcome.stdout.as_deref().unwrap_or("");
+        assert!(outcome.ok, "{stdout}\n{:?}", outcome.errors);
+
+        let updated = fs::read_to_string(&form_path).unwrap();
+        assert!(updated.contains("<CommandBar name=\"ПанельДействий\" id=\"1\">"));
+        assert!(updated.contains("<ChildItems>"));
+        assert!(updated.contains("<Button name=\"Заполнить\""));
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_form_rejects_duplicate_command_name() {
+        let context = temp_context("edit-command-duplicate");
+        let form_path = context
+            .cwd
+            .join("Documents")
+            .join("SampleShipment")
+            .join("Forms")
+            .join("MainForm")
+            .join("Ext")
+            .join("Form.xml");
+        write_file(
+            &form_path,
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.17">
+	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+	<ChildItems/>
+	<Attributes/>
+	<Commands>
+		<Command name="Заполнить" id="1"/>
+	</Commands>
+</Form>
+"#,
+        );
+        let original = fs::read_to_string(&form_path).unwrap();
+        let patch_path = context.cwd.join("form-edit-command-duplicate.json");
+        write_file(
+            &patch_path,
+            r#"{
+  "commands": [
+    { "name": "Заполнить", "action": "ЗаполнитьОбработка" }
+  ]
+}
+"#,
+        );
+
+        let mut args = Map::new();
+        args.insert(
+            "FormPath".to_string(),
+            json!(form_path.display().to_string()),
+        );
+        args.insert(
+            "JsonPath".to_string(),
+            json!(patch_path.display().to_string()),
+        );
+
+        let outcome = edit_form(&args, &context);
+        assert!(!outcome.ok, "{:?}", outcome.stdout);
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("Duplicate command")));
+        assert_eq!(fs::read_to_string(&form_path).unwrap(), original);
 
         let _ = fs::remove_dir_all(&context.cwd);
     }
