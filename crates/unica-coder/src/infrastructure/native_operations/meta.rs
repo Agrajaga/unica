@@ -71,7 +71,7 @@ mod edit_tests {
     fn sample_document_xml(register_records: &str) -> String {
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
-<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
 	<Document uuid="11111111-1111-4111-8111-111111111111">
 		<Properties>
 			<Name>SampleShipment</Name>
@@ -99,6 +99,17 @@ mod edit_tests {
             "Value".to_string(),
             json!("AccumulationRegister.SampleUnshippedGoods"),
         );
+        args
+    }
+
+    fn meta_edit_args(object_path: &Path, operation: &str, value: &str) -> Map<String, Value> {
+        let mut args = Map::new();
+        args.insert(
+            "ObjectPath".to_string(),
+            json!(object_path.display().to_string()),
+        );
+        args.insert("Operation".to_string(), json!(operation));
+        args.insert("Value".to_string(), json!(value));
         args
     }
 
@@ -160,6 +171,108 @@ mod edit_tests {
         assert!(result.summary.contains("dry run"));
         assert_eq!(result.cache.mode, "dry-run");
         assert_eq!(fs::read_to_string(&object_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_meta_adds_attribute_to_document() {
+        let context = temp_context("add-attribute");
+        let object_path = context.cwd.join("Documents").join("SamplePackingList.xml");
+        write_file(&object_path, &sample_document_xml("<RegisterRecords/>"));
+
+        let outcome = edit_meta(
+            &meta_edit_args(
+                &object_path,
+                "add-attribute",
+                "SampleCargoPlaceCode: String(50)",
+            ),
+            &context,
+        );
+        let stdout = outcome.stdout.as_deref().unwrap_or("");
+        assert!(outcome.ok, "{stdout}\n{:?}", outcome.errors);
+        assert!(stdout.contains("Added:    1"), "{stdout}");
+
+        let updated = fs::read_to_string(&object_path).unwrap();
+        assert!(updated.contains("<Attribute uuid=\""));
+        assert!(updated.contains("<Name>SampleCargoPlaceCode</Name>"));
+        assert!(updated.contains("<v8:Length>50</v8:Length>"));
+        Document::parse(updated.trim_start_matches('\u{feff}')).unwrap();
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_meta_adds_tabular_section_to_document() {
+        let context = temp_context("add-tabular-section");
+        let object_path = context.cwd.join("Documents").join("SamplePackingList.xml");
+        write_file(&object_path, &sample_document_xml("<RegisterRecords/>"));
+
+        let outcome = edit_meta(
+            &meta_edit_args(&object_path, "add-ts", "SampleItems"),
+            &context,
+        );
+        let stdout = outcome.stdout.as_deref().unwrap_or("");
+        assert!(outcome.ok, "{stdout}\n{:?}", outcome.errors);
+
+        let updated = fs::read_to_string(&object_path).unwrap();
+        assert!(updated.contains("<TabularSection uuid=\""));
+        assert!(updated.contains("<Name>SampleItems</Name>"));
+        Document::parse(updated.trim_start_matches('\u{feff}')).unwrap();
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_meta_adds_attribute_to_tabular_section() {
+        let context = temp_context("add-tabular-section-attribute");
+        let object_path = context.cwd.join("Documents").join("SamplePackingList.xml");
+        let mut xml = sample_document_xml("<RegisterRecords/>");
+        xml = xml.replace(
+            "\t\t<ChildObjects/>",
+            "\t\t<ChildObjects>\n\t\t\t<TabularSection uuid=\"22222222-2222-4222-8222-222222222222\">\n\t\t\t\t<Properties>\n\t\t\t\t\t<Name>SampleItems</Name>\n\t\t\t\t\t<Synonym/>\n\t\t\t\t\t<Comment/>\n\t\t\t\t\t<ToolTip/>\n\t\t\t\t\t<FillChecking>DontCheck</FillChecking>\n\t\t\t\t</Properties>\n\t\t\t\t<ChildObjects/>\n\t\t\t</TabularSection>\n\t\t</ChildObjects>",
+        );
+        write_file(&object_path, &xml);
+
+        let outcome = edit_meta(
+            &meta_edit_args(
+                &object_path,
+                "add-ts-attribute",
+                "SampleItems.SampleSourceDocument: DocumentRef.SampleSale",
+            ),
+            &context,
+        );
+        let stdout = outcome.stdout.as_deref().unwrap_or("");
+        assert!(outcome.ok, "{stdout}\n{:?}", outcome.errors);
+
+        let updated = fs::read_to_string(&object_path).unwrap();
+        assert!(updated.contains("<Name>SampleSourceDocument</Name>"));
+        assert!(updated.contains("<v8:Type>cfg:DocumentRef.SampleSale</v8:Type>"));
+        Document::parse(updated.trim_start_matches('\u{feff}')).unwrap();
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_meta_add_tabular_attribute_reports_missing_target() {
+        let context = temp_context("missing-tabular-section");
+        let object_path = context.cwd.join("Documents").join("SamplePackingList.xml");
+        write_file(&object_path, &sample_document_xml("<RegisterRecords/>"));
+
+        let outcome = edit_meta(
+            &meta_edit_args(
+                &object_path,
+                "add-ts-attribute",
+                "SampleItems.SampleSourceDocument: DocumentRef.SampleSale",
+            ),
+            &context,
+        );
+
+        assert!(!outcome.ok, "{:?}", outcome.stdout);
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("TabularSection 'SampleItems' not found")));
 
         let _ = fs::remove_dir_all(&context.cwd);
     }
@@ -8295,9 +8408,21 @@ pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -
                 meta_edit_add_register_record(&mut xml_text, &object_type, value)?;
                 added += 1;
             }
+            "add-attribute" => {
+                meta_edit_add_attribute(&mut xml_text, &object_type, value)?;
+                added += 1;
+            }
+            "add-ts" => {
+                meta_edit_add_tabular_section(&mut xml_text, &object_type, &object_name, value)?;
+                added += 1;
+            }
+            "add-ts-attribute" => {
+                meta_edit_add_tabular_section_attribute(&mut xml_text, value)?;
+                added += 1;
+            }
             other => {
                 return Err(format!(
-                    "native meta-edit currently supports modify-property and add-registerRecord only, got: {other}"
+                    "native meta-edit currently supports modify-property, add-registerRecord, add-attribute, add-ts and add-ts-attribute only, got: {other}"
                 ));
             }
         }
@@ -8467,6 +8592,241 @@ pub(crate) fn meta_edit_add_register_record(
     xml_text.insert_str(
         pos,
         &format!("\t\t<RegisterRecords>\n\t\t\t{item}\n\t\t</RegisterRecords>\n"),
+    );
+    Ok(())
+}
+
+pub(crate) fn meta_edit_add_attribute(
+    xml_text: &mut String,
+    object_type: &str,
+    raw_value: &str,
+) -> Result<(), String> {
+    let attr = meta_compile_parse_attr(&Value::String(raw_value.trim().to_string()));
+    if attr.name.is_empty() {
+        return Err("add-attribute requires Value like Name: Type".to_string());
+    }
+    meta_edit_ensure_top_child_name_free(xml_text, "Attribute", &attr.name)?;
+    let context = meta_edit_attribute_context(object_type);
+    let mut lines = Vec::new();
+    let mut next_uuid = fresh_meta_compile_uuid;
+    emit_meta_attribute(&mut lines, "\t\t\t", &attr, context, &mut next_uuid);
+    meta_edit_insert_top_child_object(xml_text, &lines)
+}
+
+pub(crate) fn meta_edit_add_tabular_section(
+    xml_text: &mut String,
+    object_type: &str,
+    object_name: &str,
+    raw_value: &str,
+) -> Result<(), String> {
+    let name = raw_value.trim();
+    if name.is_empty() {
+        return Err("add-ts requires non-empty Value".to_string());
+    }
+    meta_edit_ensure_top_child_name_free(xml_text, "TabularSection", name)?;
+    let section = MetaCompileTabularSection {
+        name: name.to_string(),
+        columns: Vec::new(),
+    };
+    let mut lines = Vec::new();
+    let mut next_uuid = fresh_meta_compile_uuid;
+    emit_meta_tabular_section(
+        &mut lines,
+        "\t\t\t",
+        &section,
+        object_type,
+        object_name,
+        &mut next_uuid,
+    );
+    meta_edit_insert_top_child_object(xml_text, &lines)
+}
+
+pub(crate) fn meta_edit_add_tabular_section_attribute(
+    xml_text: &mut String,
+    raw_value: &str,
+) -> Result<(), String> {
+    let (section_name, attr_text) = raw_value.trim().split_once('.').ok_or_else(|| {
+        "add-ts-attribute requires Value like Section.Attribute: Type".to_string()
+    })?;
+    let section_name = section_name.trim();
+    let attr = meta_compile_parse_attr(&Value::String(attr_text.trim().to_string()));
+    if section_name.is_empty() || attr.name.is_empty() {
+        return Err("add-ts-attribute requires Value like Section.Attribute: Type".to_string());
+    }
+    meta_edit_ensure_tabular_child_name_free(xml_text, section_name, "Attribute", &attr.name)?;
+    let mut lines = Vec::new();
+    let mut next_uuid = fresh_meta_compile_uuid;
+    emit_meta_attribute(&mut lines, "\t\t\t\t\t", &attr, "tabular", &mut next_uuid);
+    meta_edit_insert_tabular_child_object(xml_text, section_name, &lines)
+}
+
+pub(crate) fn meta_edit_attribute_context(object_type: &str) -> &str {
+    match object_type {
+        "Catalog" => "catalog",
+        "DataProcessor" | "Report" => "processor",
+        "InformationRegister"
+        | "AccumulationRegister"
+        | "AccountingRegister"
+        | "CalculationRegister" => "register-other",
+        _ => "object",
+    }
+}
+
+pub(crate) fn meta_edit_object_node<'a, 'input>(
+    doc: &'a Document<'input>,
+) -> Result<roxmltree::Node<'a, 'input>, String> {
+    let root = doc.root_element();
+    if root.tag_name().name() != "MetaDataObject" {
+        return Err(format!(
+            "Root element must be MetaDataObject, got: {}",
+            root.tag_name().name()
+        ));
+    }
+    root.children()
+        .find(|node| node.is_element())
+        .ok_or_else(|| "No object element found under MetaDataObject".to_string())
+}
+
+pub(crate) fn meta_edit_child_object_name(node: roxmltree::Node<'_, '_>) -> Option<String> {
+    meta_info_child(node, "Properties").and_then(|props| meta_info_child_text(props, "Name"))
+}
+
+pub(crate) fn meta_edit_ensure_top_child_name_free(
+    xml_text: &str,
+    tag: &str,
+    name: &str,
+) -> Result<(), String> {
+    let doc = Document::parse(xml_text.trim_start_matches('\u{feff}'))
+        .map_err(|err| format!("XML parse error: {err}"))?;
+    let object = meta_edit_object_node(&doc)?;
+    if let Some(child_objects) = meta_info_child(object, "ChildObjects") {
+        for child in meta_info_children(child_objects, tag) {
+            if meta_edit_child_object_name(child).as_deref() == Some(name) {
+                return Err(format!("{tag} '{name}' already exists"));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn meta_edit_find_tabular_section<'a, 'input>(
+    object: roxmltree::Node<'a, 'input>,
+    section_name: &str,
+) -> Option<roxmltree::Node<'a, 'input>> {
+    let child_objects = meta_info_child(object, "ChildObjects")?;
+    meta_info_children(child_objects, "TabularSection")
+        .into_iter()
+        .find(|section| meta_edit_child_object_name(*section).as_deref() == Some(section_name))
+}
+
+pub(crate) fn meta_edit_ensure_tabular_child_name_free(
+    xml_text: &str,
+    section_name: &str,
+    tag: &str,
+    name: &str,
+) -> Result<(), String> {
+    let doc = Document::parse(xml_text.trim_start_matches('\u{feff}'))
+        .map_err(|err| format!("XML parse error: {err}"))?;
+    let object = meta_edit_object_node(&doc)?;
+    let section = meta_edit_find_tabular_section(object, section_name)
+        .ok_or_else(|| format!("TabularSection '{section_name}' not found"))?;
+    if let Some(child_objects) = meta_info_child(section, "ChildObjects") {
+        for child in meta_info_children(child_objects, tag) {
+            if meta_edit_child_object_name(child).as_deref() == Some(name) {
+                return Err(format!("{tag} '{section_name}.{name}' already exists"));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn meta_edit_insert_top_child_object(
+    xml_text: &mut String,
+    lines: &[String],
+) -> Result<(), String> {
+    let doc = Document::parse(xml_text.trim_start_matches('\u{feff}'))
+        .map_err(|err| format!("XML parse error: {err}"))?;
+    let object = meta_edit_object_node(&doc)?;
+    if let Some(child_objects) = meta_info_child(object, "ChildObjects") {
+        let range = child_objects.range();
+        drop(doc);
+        return meta_edit_insert_lines_into_child_objects(xml_text, range, "\t\t", lines);
+    }
+    let range = object.range();
+    let tag = object.tag_name().name().to_string();
+    drop(doc);
+    meta_edit_insert_child_objects_into_node(xml_text, range, &tag, "\t\t", lines)
+}
+
+pub(crate) fn meta_edit_insert_tabular_child_object(
+    xml_text: &mut String,
+    section_name: &str,
+    lines: &[String],
+) -> Result<(), String> {
+    let doc = Document::parse(xml_text.trim_start_matches('\u{feff}'))
+        .map_err(|err| format!("XML parse error: {err}"))?;
+    let object = meta_edit_object_node(&doc)?;
+    let section = meta_edit_find_tabular_section(object, section_name)
+        .ok_or_else(|| format!("TabularSection '{section_name}' not found"))?;
+    if let Some(child_objects) = meta_info_child(section, "ChildObjects") {
+        let range = child_objects.range();
+        drop(doc);
+        return meta_edit_insert_lines_into_child_objects(xml_text, range, "\t\t\t\t", lines);
+    }
+    let range = section.range();
+    drop(doc);
+    meta_edit_insert_child_objects_into_node(xml_text, range, "TabularSection", "\t\t\t\t", lines)
+}
+
+pub(crate) fn meta_edit_insert_lines_into_child_objects(
+    xml_text: &mut String,
+    range: std::ops::Range<usize>,
+    close_indent: &str,
+    lines: &[String],
+) -> Result<(), String> {
+    let content = lines.join("\n");
+    let section_text = &xml_text[range.clone()];
+    if section_text.trim_end().ends_with("/>") {
+        xml_text.replace_range(
+            range,
+            &format!("<ChildObjects>\n{content}\n{close_indent}</ChildObjects>"),
+        );
+        return Ok(());
+    }
+    let Some(relative_pos) = section_text.rfind("</ChildObjects>") else {
+        return Err("No closing </ChildObjects> found".to_string());
+    };
+    xml_text.insert_str(
+        range.start + relative_pos,
+        &format!("{content}\n{close_indent}"),
+    );
+    Ok(())
+}
+
+pub(crate) fn meta_edit_insert_child_objects_into_node(
+    xml_text: &mut String,
+    range: std::ops::Range<usize>,
+    tag: &str,
+    close_indent: &str,
+    lines: &[String],
+) -> Result<(), String> {
+    let content = lines.join("\n");
+    let node_text = &xml_text[range.clone()];
+    if let Some(relative_pos) = node_text.rfind("/>") {
+        let pos = range.start + relative_pos;
+        xml_text.replace_range(
+            pos..pos + 2,
+            &format!(">\n{close_indent}<ChildObjects>\n{content}\n{close_indent}</ChildObjects>\n\t</{tag}>"),
+        );
+        return Ok(());
+    }
+    let close = format!("</{tag}>");
+    let Some(relative_pos) = node_text.rfind(&close) else {
+        return Err(format!("No closing </{tag}> found"));
+    };
+    xml_text.insert_str(
+        range.start + relative_pos,
+        &format!("{close_indent}<ChildObjects>\n{content}\n{close_indent}</ChildObjects>\n"),
     );
     Ok(())
 }
