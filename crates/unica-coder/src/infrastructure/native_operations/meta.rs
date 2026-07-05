@@ -36,6 +36,135 @@ mod uuid_tests {
     }
 }
 
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+    use crate::application::UnicaApplication;
+    use crate::domain::workspace::WorkspaceContext;
+    use serde_json::{json, Map};
+    use std::fs;
+    use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_context(name: &str) -> WorkspaceContext {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("unica-meta-{name}-{nanos}"));
+        fs::create_dir_all(&root).unwrap();
+        WorkspaceContext {
+            cwd: root.clone(),
+            workspace_root: root.clone(),
+            cache_root: root.join(".build").join("unica"),
+            workspace_epoch: 1,
+        }
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, content).unwrap();
+    }
+
+    fn sample_document_xml(register_records: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Document uuid="11111111-1111-4111-8111-111111111111">
+		<Properties>
+			<Name>SampleShipment</Name>
+			<Synonym/>
+			<Comment/>
+			{register_records}
+			<PostInPrivilegedMode>true</PostInPrivilegedMode>
+			<UnpostInPrivilegedMode>true</UnpostInPrivilegedMode>
+		</Properties>
+		<ChildObjects/>
+	</Document>
+</MetaDataObject>
+"#
+        )
+    }
+
+    fn register_record_args(object_path: &Path) -> Map<String, Value> {
+        let mut args = Map::new();
+        args.insert(
+            "ObjectPath".to_string(),
+            json!(object_path.display().to_string()),
+        );
+        args.insert("Operation".to_string(), json!("add-registerRecord"));
+        args.insert(
+            "Value".to_string(),
+            json!("AccumulationRegister.SampleUnshippedGoods"),
+        );
+        args
+    }
+
+    #[test]
+    fn edit_meta_adds_register_record_to_document() {
+        let context = temp_context("add-register-record");
+        let object_path = context.cwd.join("Documents").join("SampleShipment.xml");
+        write_file(&object_path, &sample_document_xml("<RegisterRecords/>"));
+
+        let outcome = edit_meta(&register_record_args(&object_path), &context);
+        let stdout = outcome.stdout.as_deref().unwrap_or("");
+        assert!(outcome.ok, "{stdout}\n{:?}", outcome.errors);
+        assert!(stdout.contains("Added:    1"), "{stdout}");
+
+        let updated = fs::read_to_string(&object_path).unwrap();
+        assert!(updated.contains("<RegisterRecords>"));
+        assert!(updated.contains(
+            "<xr:Item xsi:type=\"xr:MDObjectRef\">AccumulationRegister.SampleUnshippedGoods</xr:Item>"
+        ));
+        Document::parse(updated.trim_start_matches('\u{feff}')).unwrap();
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_meta_rejects_duplicate_register_record() {
+        let context = temp_context("duplicate-register-record");
+        let object_path = context.cwd.join("Documents").join("SampleShipment.xml");
+        let original = sample_document_xml(
+            r#"<RegisterRecords>
+				<xr:Item xsi:type="xr:MDObjectRef">AccumulationRegister.SampleUnshippedGoods</xr:Item>
+			</RegisterRecords>"#,
+        );
+        write_file(&object_path, &original);
+
+        let outcome = edit_meta(&register_record_args(&object_path), &context);
+        assert!(!outcome.ok, "{:?}", outcome.stdout);
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("already exists")));
+        assert_eq!(fs::read_to_string(&object_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_meta_register_record_dry_run_does_not_write_file() {
+        let context = temp_context("dry-run-register-record");
+        let object_path = context.cwd.join("Documents").join("SampleShipment.xml");
+        let original = sample_document_xml("<RegisterRecords/>");
+        write_file(&object_path, &original);
+
+        let result = UnicaApplication::new()
+            .call_tool("unica.meta.edit", &register_record_args(&object_path))
+            .unwrap();
+
+        assert!(result.ok);
+        assert!(result.summary.contains("dry run"));
+        assert_eq!(result.cache.mode, "dry-run");
+        assert_eq!(fs::read_to_string(&object_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct MetaInfoAttr<'a, 'input> {
     pub(crate) name: String,
@@ -8135,37 +8264,49 @@ pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -
         let operation = operation.expect("checked above");
         let value = string_arg(args, &["value", "Value"]).unwrap_or_default();
 
-        if operation != "modify-property" {
-            return Err(format!(
-                "native meta-edit currently supports modify-property only, got: {operation}"
-            ));
-        }
-
         let mut xml_text = fs::read_to_string(&object_path)
             .map_err(|err| format!("failed to read {}: {err}", object_path.display()))?;
         let (object_type, object_name) = meta_edit_object_identity(&xml_text)?;
+
+        let mut added = 0usize;
         let mut modified = 0usize;
-        for pair in value
-            .split(";;")
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-        {
-            let Some((key, raw_value)) = pair.split_once('=') else {
-                continue;
-            };
-            let key = key.trim();
-            let raw_value = raw_value.trim();
-            let normalized = normalize_meta_edit_property_value(key, raw_value);
-            if replace_first_xml_element_text(&mut xml_text, key, &normalized) {
-                modified += 1;
-            } else {
-                insert_meta_property_before_child_objects(&mut xml_text, key, &normalized)?;
-                modified += 1;
+        match operation {
+            "modify-property" => {
+                for pair in value
+                    .split(";;")
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                {
+                    let Some((key, raw_value)) = pair.split_once('=') else {
+                        continue;
+                    };
+                    let key = key.trim();
+                    let raw_value = raw_value.trim();
+                    let normalized = normalize_meta_edit_property_value(key, raw_value);
+                    if replace_first_xml_element_text(&mut xml_text, key, &normalized) {
+                        modified += 1;
+                    } else {
+                        insert_meta_property_before_child_objects(&mut xml_text, key, &normalized)?;
+                        modified += 1;
+                    }
+                }
+            }
+            "add-registerRecord" => {
+                meta_edit_add_register_record(&mut xml_text, &object_type, value)?;
+                added += 1;
+            }
+            other => {
+                return Err(format!(
+                    "native meta-edit currently supports modify-property and add-registerRecord only, got: {other}"
+                ));
             }
         }
+
+        Document::parse(xml_text.trim_start_matches('\u{feff}'))
+            .map_err(|err| format!("XML parse error after meta-edit: {err}"))?;
         write_utf8_bom(&object_path, &xml_text)?;
         let stdout = format!(
-            "\n=== meta-edit summary ===\n  Object:   {object_type}.{object_name}\n  Added:    0\n  Removed:  0\n  Modified: {modified}\n"
+            "\n=== meta-edit summary ===\n  Object:   {object_type}.{object_name}\n  Added:    {added}\n  Removed:  0\n  Modified: {modified}\n"
         );
         Ok((stdout, object_path, modified))
     })();
@@ -8268,6 +8409,66 @@ pub(crate) fn meta_edit_object_identity(xml_text: &str) -> Result<(String, Strin
         .unwrap_or("")
         .to_string();
     Ok((object_type, object_name))
+}
+
+pub(crate) fn meta_edit_add_register_record(
+    xml_text: &mut String,
+    object_type: &str,
+    raw_value: &str,
+) -> Result<(), String> {
+    if object_type != "Document" {
+        return Err(format!(
+            "add-registerRecord is supported for Document only, got: {object_type}"
+        ));
+    }
+    let value = normalize_meta_object_ref(raw_value.trim());
+    if value.is_empty() {
+        return Err("add-registerRecord requires non-empty Value".to_string());
+    }
+    if !value.starts_with("AccumulationRegister.")
+        && !value.starts_with("InformationRegister.")
+        && !value.starts_with("AccountingRegister.")
+        && !value.starts_with("CalculationRegister.")
+    {
+        return Err(format!(
+            "add-registerRecord Value must be a register reference, got: {value}"
+        ));
+    }
+    let item = format!(
+        "<xr:Item xsi:type=\"xr:MDObjectRef\">{}</xr:Item>",
+        escape_xml(&value)
+    );
+    if xml_text.contains(&item) {
+        return Err(format!("Register record '{value}' already exists"));
+    }
+
+    if xml_text.contains("<RegisterRecords/>") {
+        *xml_text = xml_text.replacen(
+            "<RegisterRecords/>",
+            &format!("<RegisterRecords>\n\t\t\t{item}\n\t\t</RegisterRecords>"),
+            1,
+        );
+        return Ok(());
+    }
+    if let Some(close_pos) = xml_text.find("</RegisterRecords>") {
+        xml_text.insert_str(close_pos, &format!("\t\t\t{item}\n\t\t"));
+        return Ok(());
+    }
+    if let Some(pos) = xml_text.find("<PostInPrivilegedMode>") {
+        xml_text.insert_str(
+            pos,
+            &format!("<RegisterRecords>\n\t\t\t{item}\n\t\t</RegisterRecords>\n\t\t"),
+        );
+        return Ok(());
+    }
+    let Some(pos) = xml_text.find("</Properties>") else {
+        return Err("No <Properties> section found in metadata object".to_string());
+    };
+    xml_text.insert_str(
+        pos,
+        &format!("\t\t<RegisterRecords>\n\t\t\t{item}\n\t\t</RegisterRecords>\n"),
+    );
+    Ok(())
 }
 
 pub(crate) fn normalize_meta_edit_property_value(key: &str, value: &str) -> String {
