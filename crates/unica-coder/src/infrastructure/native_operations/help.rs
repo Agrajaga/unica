@@ -87,8 +87,14 @@ pub(crate) fn add_help(args: &Map<String, Value>, context: &WorkspaceContext) ->
         }
 
         stdout.push_str(&format!("[OK] Создана справка: {object_name}\n"));
-        stdout.push_str(&format!("     Метаданные: {}\n", help_xml_path.display()));
-        stdout.push_str(&format!("     Страница:   {}\n", help_html_path.display()));
+        stdout.push_str(&format!(
+            "     Метаданные: {}\n",
+            help_display_path(&help_xml_path, &context.cwd)
+        ));
+        stdout.push_str(&format!(
+            "     Страница:   {}\n",
+            help_display_path(&help_html_path, &context.cwd)
+        ));
 
         Ok((stdout, changes, artifacts))
     })();
@@ -117,6 +123,12 @@ pub(crate) fn add_help(args: &Map<String, Value>, context: &WorkspaceContext) ->
             command: None,
         },
     }
+}
+
+fn help_display_path(path: &Path, cwd: &Path) -> String {
+    path.strip_prefix(cwd)
+        .map(|value| value.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 struct HelpTarget {
@@ -195,7 +207,7 @@ fn help_metadata_xml(lang: &str, format_version: &str) -> String {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <Help xmlns=\"http://v8.1c.ru/8.3/xcf/extrnprops\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" version=\"{}\">\n\
 \t<Page>{}</Page>\n\
-</Help>\n",
+</Help>",
         escape_xml(format_version),
         escape_xml(lang)
     )
@@ -203,17 +215,7 @@ fn help_metadata_xml(lang: &str, format_version: &str) -> String {
 
 fn help_page_html(object_name: &str) -> String {
     format!(
-        "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">\n\
-<html>\n\
-<head>\n\
-    <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/>\n\
-    <link rel=\"stylesheet\" type=\"text/css\" href=\"v8help://service_book/service_style\"/>\n\
-</head>\n\
-<body>\n\
-    <h1>{}</h1>\n\
-    <p>Описание.</p>\n\
-</body>\n\
-</html>",
+        "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\">\n<html>\n<head>\n    <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/>\n    <link rel=\"stylesheet\" type=\"text/css\" href=\"v8help://service_book/service_style\"/>\n</head>\n<body>\n    <h1>{}</h1>\n    <p>Описание.</p>\n</body>\n</html>",
         escape_xml(object_name)
     )
 }

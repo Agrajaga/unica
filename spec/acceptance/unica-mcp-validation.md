@@ -104,6 +104,11 @@ python3.12 -m unittest discover -s tests/ci
 git diff --check
 ```
 
+BSP parity fixtures are intentionally byte-for-byte harvested. Their subtree is
+marked `-text -whitespace` in `.gitattributes`; fixture integrity is enforced by
+manifest `size`/`sha256`, while `git diff --check` remains required for the rest
+of the tree.
+
 ## Skill Script Removal Acceptance
 
 For migrated skills, documentation and tests must reject workflow guidance that

@@ -8,7 +8,7 @@ Unica - это плагин для Codex, который помогает раб
 
 - `plugins/unica/skills/` - прикладные навыки Codex: формы, метаданные, EPF/ERF, базы, роли, СКД, веб-публикация и другие задачи 1С.
 - `plugins/unica/.mcp.json` - MCP-подключения для поиска кода, работы с инструментами 1С и справочными материалами.
-- `plugins/unica/scripts/legacy/` - временные legacy-реализации операций, которые еще мигрируют в Rust MCP.
+- `crates/unica-coder/` - Rust runtime `unica`, который реализует публичные `unica.*` tools без runtime script fallback.
 - `plugins/unica/third-party/tools.lock.json` - единый список версий внешних инструментов.
 - `.github/workflows/unica-plugin-release.yml` - сборка готового пакета плагина для установки.
 
@@ -22,26 +22,29 @@ Unica - это плагин для Codex, который помогает раб
 
 ## Установка
 
-На macOS и Linux одна команда скачивает installer из последнего GitHub Release,
-определяет платформу, скачивает нужный пакет Unica и устанавливает его в Codex:
+На macOS и Linux одна команда скачивает POSIX installer из последнего GitHub
+Release, определяет платформу, скачивает нужный пакет Unica и устанавливает его
+в Codex:
 
 ```sh
 curl -fsSL https://github.com/IngvarConsulting/unica/releases/latest/download/install-unica.sh | sh
 ```
 
-На Windows используйте Windows PowerShell 5.1. Shell installer
-`install-unica.sh` не поддерживает Git Bash/MSYS/Cygwin:
+На Windows используйте Windows PowerShell 5.1. `install-unica.sh` не
+поддерживает Windows, включая Git Bash, MSYS и Cygwin:
 
 ```powershell
 iwr https://github.com/IngvarConsulting/unica/releases/latest/download/install-unica.ps1 -OutFile install-unica.ps1
 powershell -ExecutionPolicy Bypass -File .\install-unica.ps1
 ```
 
-Для установки конкретного релиза:
+Для установки конкретного релиза на macOS или Linux:
 
 ```sh
 curl -fsSL https://github.com/IngvarConsulting/unica/releases/latest/download/install-unica.sh | sh -s -- --version v0.5.1
 ```
+
+Для установки конкретного релиза на Windows:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-unica.ps1 -Version v0.5.1
@@ -53,8 +56,8 @@ Release assets собираются отдельно под платформы:
 - `unica-codex-marketplace-linux-x64.tar.gz`
 - `unica-codex-marketplace-win-x64.zip`
 
-Installer выбирает нужный архив, регистрирует marketplace `unica-local`,
-обновляет cache Codex и включает `unica@unica-local`.
+Installer выбирает нужный архив для своей платформы, регистрирует marketplace
+`unica-local`, обновляет cache Codex и включает `unica@unica-local`.
 
 Проверка:
 
@@ -86,7 +89,7 @@ scripts/dev/install-local-unica.sh
 
 - Установленный Codex CLI.
 - Для реальных операций с базами и конфигурациями - установленная платформа 1С.
-- Для Windows-сценариев 1С - PowerShell, пока соответствующие legacy-операции не мигрированы.
+- Для Windows-сценариев 1С - PowerShell, когда сама платформа 1С или внешние workflow требуют Windows automation. XML/DSL операции `unica.form.*` и `unica.skd.*` выполняются внутри Rust runtime.
 
 ## Где смотреть детали
 

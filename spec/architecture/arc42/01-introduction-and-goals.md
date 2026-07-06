@@ -26,6 +26,5 @@ workspace state происходила внутри orchestrator, а не чер
 1. Один публичный MCP contract.
 2. Минимальный расход контекста LLM на инфраструктурную координацию.
 3. Явное владение cache/state внутри Rust orchestrator.
-4. Постепенная миграция command semantics from skill-local operation files into
-   native Rust MCP tools without stopping workflows.
+4. Native Rust MCP handlers own command semantics for operation backends.
 5. Проверяемый packaging и fresh Codex visibility.

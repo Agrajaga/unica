@@ -1,8 +1,8 @@
 pub(crate) mod bundled_tools;
 pub mod internal_adapters;
-pub mod legacy_scripts;
 pub mod native_operations;
 pub mod path_policy;
+pub mod plugin_runtime;
 pub mod workspace_index;
 pub mod workspace_services;
 pub mod workspace_state;

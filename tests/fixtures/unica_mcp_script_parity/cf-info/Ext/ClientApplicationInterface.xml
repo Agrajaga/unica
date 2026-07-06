@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ClientApplicationInterface xmlns="http://v8.1c.ru/8.2/managed-application/core">
+	<top>
+		<uuid>b553047f-c9aa-4157-978d-448ecad24248</uuid>
+	</top>
+	<left>
+		<uuid>b2735bd3-d822-4430-ba59-c9e869693b24</uuid>
+		<uuid>13322b22-3960-4d68-93a6-fe2dd7f28ca3</uuid>
+	</left>
+	<panelDef id="b553047f-c9aa-4157-978d-448ecad24248"/>
+</ClientApplicationInterface>

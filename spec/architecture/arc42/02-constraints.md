@@ -13,9 +13,9 @@
 - Rust workspace currently exposes package `unica-coder` and binary `unica`.
 - The stdio MCP server must support `initialize`, `ping`, `tools/list`, and
   `tools/call`.
-- Target architecture has no dependency on skill-local Python/PowerShell
-  operation files. Existing files are migration debt and must be replaced by
-  native `unica.*` MCP implementations before removal.
+- Runtime architecture has no dependency on Python/PowerShell/Bash operation
+  files. Donor scripts may exist only as test fixtures for parity with native
+  `unica.*` MCP implementations.
 - Packaged binary execution goes through checksum-verifying wrappers and
   generated `third-party/manifest.json`.
 - `.build/` is volatile and ignored; orchestrator cache state may live under

@@ -3,8 +3,8 @@
 - Adapter: internal boundary that calls a bundled tool or remote endpoint.
 - Cache impact: the set of cache names invalidated or refreshed by domain events.
 - Domain event: a typed fact emitted by an operation, for example `FormChanged`.
-- Skill-local operation file: existing Python or PowerShell implementation under
-  a skill directory. It is migration debt, not target architecture.
+- Reference operation script: Python/PowerShell/Bash donor model kept under
+  `tests/fixtures` for parity tests. It is not a runtime backend.
 - MCP: Model Context Protocol.
 - Orchestrator: the Rust `unica` server that owns public tool dispatch and
   cache/state coordination.

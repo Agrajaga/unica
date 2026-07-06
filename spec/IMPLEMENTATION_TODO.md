@@ -4,12 +4,9 @@ This file tracks open implementation work only.
 
 ## Current Tasks
 
-- [ ] Keep parity-unproven XML/DSL tools on the transitional internal
-  operation-file adapter until focused fixtures prove native Rust equivalence.
-- [ ] Complete operation-specific native writers for mutating XML/DSL tools where
-  `dryRun: false` still refuses execution until the writer is implemented.
-- [ ] Expand fixture parity beyond the native generic XML parser for rich legacy
-  `info`, `validate`, `compile`, `edit`, remove, and CFE/UI outputs.
+- [ ] Resolve the remaining prompt-visible script-backed skills (`img-grid`,
+  `web-test`): either move them behind an approved MCP/native boundary or
+  document and test explicit ADR exceptions for non-XML/DSL utilities.
 
 ## Rules
 

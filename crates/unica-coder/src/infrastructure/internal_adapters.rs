@@ -1,6 +1,6 @@
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
-use crate::infrastructure::legacy_scripts::{find_plugin_root, value_to_cli_string};
+use crate::infrastructure::plugin_runtime::{find_plugin_root, value_to_cli_string};
 use crate::infrastructure::workspace_index::{
     IndexReadiness, IndexRunner, WorkspaceIndexService, SYSTEM_INDEX_RUNNER,
 };

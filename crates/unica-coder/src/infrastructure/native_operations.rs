@@ -53,10 +53,11 @@ impl NativeOperationAdapter {
         }
 
         if mutating {
-            return Ok(
-                registry::invoke_mutation(operation, tool_name, args, context)
-                    .unwrap_or_else(|| unimplemented_mutation(tool_name)),
-            );
+            return registry::invoke_mutation(operation, tool_name, args, context).ok_or_else(|| {
+                format!(
+                    "native mutation handler is not registered for {tool_name} operation `{operation}`"
+                )
+            });
         }
 
         if let Some(outcome) = registry::invoke_read(operation, tool_name, args, context) {
@@ -70,20 +71,43 @@ impl NativeOperationAdapter {
     }
 }
 
-fn unimplemented_mutation(tool_name: &str) -> AdapterOutcome {
-    AdapterOutcome {
-        ok: false,
-        summary: format!(
-            "{tool_name} is native, but this mutating operation needs a concrete JSON/XML payload before execution"
-        ),
-        changes: Vec::new(),
-        warnings: Vec::new(),
-        errors: vec![format!(
-            "native handler for {tool_name} refuses to mutate without an implemented operation-specific writer"
-        )],
-        artifacts: Vec::new(),
-        stdout: None,
-        stderr: None,
-        command: None,
+#[cfg(test)]
+mod tests {
+    use super::NativeOperationAdapter;
+    use crate::domain::workspace::WorkspaceContext;
+    use serde_json::Map;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn missing_native_mutation_handler_is_contract_error() {
+        let root = temp_root("missing-mutation-handler");
+        fs::create_dir_all(root.join("src")).unwrap();
+        let context = WorkspaceContext::discover(root.clone()).unwrap();
+
+        let result = NativeOperationAdapter::invoke(
+            "definitely-missing-operation",
+            "unica.definitely.missing",
+            &Map::new(),
+            &context,
+            false,
+            true,
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("native mutation handler is not registered"));
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("unica-native-ops-{name}-{nanos}"));
+        fs::create_dir_all(&root).unwrap();
+        root
     }
 }

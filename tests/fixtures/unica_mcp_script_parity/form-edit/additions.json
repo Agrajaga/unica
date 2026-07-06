@@ -1,0 +1,21 @@
+{
+  "attributes": [
+    {
+      "name": "Comment",
+      "type": "string"
+    }
+  ],
+  "commands": [
+    {
+      "name": "DoSomething",
+      "title": "Do something"
+    }
+  ],
+  "elements": [
+    {
+      "input": "Comment",
+      "path": "Comment",
+      "title": "Comment"
+    }
+  ]
+}

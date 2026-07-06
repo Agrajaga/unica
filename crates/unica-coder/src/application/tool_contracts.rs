@@ -25,6 +25,7 @@ const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "ConfigPath",
     "Context",
     "CreateIfMissing",
+    "DataSet",
     "DataPath",
     "DefinitionFile",
     "Detailed",
@@ -36,7 +37,6 @@ const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "FormName",
     "FormPath",
     "Format",
-    "FromObject",
     "InterceptorType",
     "JsonPath",
     "KeepFiles",
@@ -53,6 +53,7 @@ const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "ModulePath",
     "Name",
     "NamePrefix",
+    "NoSelection",
     "NoRole",
     "NoValidate",
     "Object",
@@ -83,6 +84,7 @@ const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "TargetPath",
     "Type",
     "Value",
+    "Variant",
     "Vendor",
     "Version",
     "WithText",
@@ -102,6 +104,7 @@ const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "configPath",
     "context",
     "createIfMissing",
+    "dataSet",
     "dataPath",
     "definitionFile",
     "detailed",
@@ -113,7 +116,6 @@ const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "formName",
     "formPath",
     "format",
-    "fromObject",
     "interceptorType",
     "jsonPath",
     "keepFiles",
@@ -130,6 +132,7 @@ const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "modulePath",
     "name",
     "namePrefix",
+    "noSelection",
     "noRole",
     "noValidate",
     "object",
@@ -160,6 +163,7 @@ const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "targetPath",
     "type",
     "value",
+    "variant",
     "vendor",
     "version",
     "withText",
@@ -700,15 +704,6 @@ fn write_path_args(tool: ToolSpec) -> &'static [&'static str] {
             "cfe-borrow" | "cfe-patch-method" => &["ExtensionPath", "extensionPath"],
             _ => &[],
         },
-        ToolHandler::LegacyScript { skill, .. } => match skill {
-            "form-add" => &["ObjectPath", "objectPath"],
-            "form-compile" => &["OutputPath", "outputPath"],
-            "form-edit" => &["FormPath", "formPath"],
-            "form-remove" => &["SrcDir", "srcDir"],
-            "skd-compile" => &["OutputPath", "outputPath"],
-            "skd-edit" => &["TemplatePath", "templatePath"],
-            _ => &[],
-        },
         ToolHandler::RuntimeAdapter => &["config", "path", "output", "settings", "mcpConfig"],
         _ => &[],
     }
@@ -716,22 +711,6 @@ fn write_path_args(tool: ToolSpec) -> &'static [&'static str] {
 
 fn is_native_xml_tool(tool: ToolSpec) -> bool {
     matches!(tool.handler, ToolHandler::NativeOperation { .. })
-        || matches!(
-            tool.handler,
-            ToolHandler::LegacyScript {
-                skill: "form-add"
-                    | "form-compile"
-                    | "form-edit"
-                    | "form-info"
-                    | "form-remove"
-                    | "form-validate"
-                    | "skd-compile"
-                    | "skd-edit"
-                    | "skd-info"
-                    | "skd-validate",
-                ..
-            }
-        )
 }
 
 fn native_source_path_args() -> &'static [&'static str] {
@@ -811,7 +790,6 @@ fn allowed_args(tool: &ToolSpec) -> Vec<&'static str> {
         ToolHandler::CodeAdapter { .. } => names.extend(code_args_for(tool.name)),
         ToolHandler::StandardsAdapter { .. } => names.extend(STANDARDS_ARGS),
         ToolHandler::ProjectStatus | ToolHandler::ProjectMap => {}
-        ToolHandler::LegacyScript { .. } => names.extend(NATIVE_XML_DSL_ARGS),
     }
     names.sort_unstable();
     names.dedup();
@@ -836,11 +814,6 @@ fn required_args(tool: &ToolSpec) -> Vec<&'static str> {
             "skd-info" | "skd-validate" | "skd-edit" => vec!["TemplatePath"],
             "mxl-info" | "mxl-validate" | "mxl-decompile" => vec!["TemplatePath"],
             "role-info" | "role-validate" => vec!["RightsPath"],
-            _ => Vec::new(),
-        },
-        ToolHandler::LegacyScript { skill, .. } => match skill {
-            "form-info" | "form-validate" | "form-edit" => vec!["FormPath"],
-            "skd-info" | "skd-validate" | "skd-edit" => vec!["TemplatePath"],
             _ => Vec::new(),
         },
         ToolHandler::StandardsAdapter {

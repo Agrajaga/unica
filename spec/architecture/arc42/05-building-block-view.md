@@ -27,8 +27,8 @@
 
 ## Infrastructure Blocks
 
-- Transitional operation-file adapters may exist only to preserve behavior while
-  native MCP handlers are implemented.
+- Native operation handlers implement XML/DSL backend behavior inside
+  `unica-coder`.
 - `CliAdapter` invokes checksum-wrapped bundled tools.
 - `StandardsAdapter` is the internal standards boundary and must become the real
   HTTP MCP client before closing the standards gap.
@@ -39,5 +39,5 @@
 
 The target implementation for configuration, form, SKD, MXL, role, subsystem,
 interface, and template operations is native Rust logic behind `unica.*` tools.
-Skill-local Python/PowerShell operation files must not remain as a target
-building block.
+Python/PowerShell/Bash operation files must not remain as runtime building
+blocks. Reference scripts belong in test fixtures only.

@@ -1,0 +1,40 @@
+{
+  "attributes": [
+    {
+      "name": "ParityComment",
+      "type": "string"
+    }
+  ],
+  "commands": [
+    {
+      "name": "RunParityAction",
+      "title": "Run parity action"
+    }
+  ],
+  "elements": [
+    {
+      "input": "ParityCommentField",
+      "path": "ParityComment",
+      "title": "Parity comment",
+      "on": [
+        {
+          "event": "OnChange",
+          "handler": "ParityCommentOnChange"
+        }
+      ]
+    },
+    {
+      "button": "RunParityActionButton",
+      "type": "commandBar",
+      "command": "RunParityAction",
+      "title": "Run parity action",
+      "on": [
+        {
+          "handler": "RunParityActionOnClick",
+          "event": "Click",
+          "callType": "Before"
+        }
+      ]
+    }
+  ]
+}

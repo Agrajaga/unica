@@ -27,15 +27,13 @@ Internal adapters may call:
 
 - v8-runner wrappers for build/runtime operations;
 - BSL analysis wrappers for code search and diagnostics;
-- remote v8std endpoint for standards knowledge;
-- transitional skill-local operation files only while their command semantics are
-  being moved into native `unica.*` MCP handlers.
+- remote v8std endpoint for standards knowledge.
 
 These adapters are not public MCP registrations.
 
 ## Out Of Scope
 
-- Keeping skill-local Python/PowerShell operation files as a long-term backend.
 - Making every adapter native Rust before the public single-MCP contract is
   stable.
 - Publishing separate MCP servers for specialized engines.
+- Replacing donor reference scripts that are used only by parity fixtures.

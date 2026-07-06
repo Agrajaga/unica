@@ -14,6 +14,12 @@ use super::common::*;
 use super::{
     cfe::*, form::*, interface::*, meta::*, mxl::*, role::*, skd::*, subsystem::*, template::*,
 };
+
+const CF_MD_NS: &str = "http://v8.1c.ru/8.3/MDClasses";
+const CF_XR_NS: &str = "http://v8.1c.ru/8.3/xcf/readable";
+const CF_V8_NS: &str = "http://v8.1c.ru/8.1/data/core";
+const CF_CAI_NS: &str = "http://v8.1c.ru/8.2/managed-application/core";
+const CF_HP_NS: &str = "http://v8.1c.ru/8.3/xcf/extrnprops";
 pub(crate) struct CfValidationReporter {
     pub(crate) errors: usize,
     pub(crate) warnings: usize,
@@ -1027,8 +1033,10 @@ pub(crate) fn analyze_cf_info(
         let total_objects = counts.iter().map(|(_, count)| *count).sum::<usize>();
         let mut lines = Vec::<String>::new();
 
+        let config_dir = config_path.parent().unwrap_or(context.cwd.as_path());
+
         if section == "home-page" {
-            lines.push("Файл Ext/HomePageWorkArea.xml не найден".to_string());
+            cf_append_home_page_section(&mut lines, config_dir, &cfg_name);
         } else if mode == "brief" {
             let syn_part = if cfg_synonym.is_empty() {
                 String::new()
@@ -1093,6 +1101,7 @@ pub(crate) fn analyze_cf_info(
             cf_append_full_info(
                 &mut lines,
                 cfg,
+                props,
                 version,
                 &cfg_name,
                 &cfg_synonym,
@@ -1113,6 +1122,7 @@ pub(crate) fn analyze_cf_info(
                 &cfg_comment,
                 &cfg_prefix,
                 &cfg_update_addr,
+                config_dir,
                 &support_lines,
                 &counts,
                 total_objects,
@@ -1220,6 +1230,7 @@ pub(crate) fn cf_append_counts(
 pub(crate) fn cf_append_full_info(
     lines: &mut Vec<String>,
     cfg: roxmltree::Node<'_, '_>,
+    props: roxmltree::Node<'_, '_>,
     version: &str,
     cfg_name: &str,
     cfg_synonym: &str,
@@ -1240,6 +1251,7 @@ pub(crate) fn cf_append_full_info(
     cfg_comment: &str,
     cfg_prefix: &str,
     cfg_update_addr: &str,
+    config_dir: &Path,
     support_lines: &[String],
     counts: &[(String, usize)],
     total_objects: usize,
@@ -1300,8 +1312,471 @@ pub(crate) fn cf_append_full_info(
     lines.push(String::new());
     lines.push("--- Назначение ---".to_string());
     lines.push(format!("Язык по умолч.:  {cfg_default_lang}"));
+    cf_append_full_purpose_info(lines, props);
+    cf_append_full_panel_layout(lines, config_dir);
+    cf_append_full_home_page_summary(lines, config_dir);
+    cf_append_full_storages_and_forms(lines, props);
+    cf_append_full_multilang_info(lines, props);
+    cf_append_full_mobile_functionalities(lines, props);
+    cf_append_full_internal_info(lines, cfg);
+    cf_append_full_child_objects(lines, cfg, counts, total_objects);
+}
+
+pub(crate) fn cf_append_full_purpose_info(lines: &mut Vec<String>, props: roxmltree::Node<'_, '_>) {
+    if let Some(purpose_node) = props
+        .children()
+        .find(|node| role_info_element(*node, "UsePurposes", Some(CF_MD_NS)))
+    {
+        let purposes = purpose_node
+            .children()
+            .filter(|node| role_info_element(*node, "Value", Some(CF_V8_NS)))
+            .filter_map(|node| node.text())
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if !purposes.is_empty() {
+            lines.push(format!("Назначения:      {}", purposes.join(", ")));
+        }
+    }
+
+    if let Some(roles_node) = props
+        .children()
+        .find(|node| role_info_element(*node, "DefaultRoles", Some(CF_MD_NS)))
+    {
+        let roles = roles_node
+            .children()
+            .filter(|node| role_info_element(*node, "Item", Some(CF_XR_NS)))
+            .filter_map(|node| node.text())
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if !roles.is_empty() {
+            lines.push(format!("Роли по умолч.:  {}", roles.len()));
+            for role in roles {
+                lines.push(format!("  - {role}"));
+            }
+        }
+    }
+
+    lines.push(format!(
+        "Управл.формы в обычн.: {}",
+        cf_prop_text(props, "UseManagedFormInOrdinaryApplication")
+    ));
+    lines.push(format!(
+        "Обычн.формы в управл.: {}",
+        cf_prop_text(props, "UseOrdinaryFormInManagedApplication")
+    ));
     lines.push(String::new());
-    cf_append_counts(lines, counts, total_objects);
+}
+
+pub(crate) struct CfPanelLayout {
+    pub(crate) top: Vec<Vec<String>>,
+    pub(crate) left: Vec<Vec<String>>,
+    pub(crate) right: Vec<Vec<String>>,
+    pub(crate) bottom: Vec<Vec<String>>,
+    pub(crate) declared: Vec<String>,
+}
+
+pub(crate) struct CfHomePageItem {
+    pub(crate) form: String,
+    pub(crate) height: i64,
+    pub(crate) common: bool,
+    pub(crate) roles: Vec<(String, bool)>,
+}
+
+pub(crate) struct CfHomePageLayout {
+    pub(crate) template: String,
+    pub(crate) left: Vec<CfHomePageItem>,
+    pub(crate) right: Vec<CfHomePageItem>,
+}
+
+pub(crate) fn cf_panel_name(uuid: &str) -> String {
+    match uuid {
+        "cbab57f2-a0f3-4f0a-89ea-4cb19570ab75" => "Открытых".to_string(),
+        "b553047f-c9aa-4157-978d-448ecad24248" => "Разделов".to_string(),
+        "13322b22-3960-4d68-93a6-fe2dd7f28ca3" => "Избранного".to_string(),
+        "c933ac92-92cd-459d-81cc-e0c8a83ced99" => "История".to_string(),
+        "b2735bd3-d822-4430-ba59-c9e869693b24" => "Функций".to_string(),
+        other => format!("?{other}"),
+    }
+}
+
+pub(crate) fn cf_read_panel_layout(config_dir: &Path) -> Option<CfPanelLayout> {
+    let path = config_dir
+        .join("Ext")
+        .join("ClientApplicationInterface.xml");
+    let text = read_utf8_sig(&path).ok()?;
+    let doc = Document::parse(text.trim_start_matches('\u{feff}')).ok()?;
+    let root = doc.root_element();
+    let side_slots = |side: &str| {
+        root.children()
+            .filter(|node| role_info_element(*node, side, Some(CF_CAI_NS)))
+            .filter_map(|side_el| {
+                let slot = side_el
+                    .descendants()
+                    .filter(|node| role_info_element(*node, "uuid", Some(CF_CAI_NS)))
+                    .filter_map(|node| node.text())
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(cf_panel_name)
+                    .collect::<Vec<_>>();
+                if slot.is_empty() {
+                    None
+                } else {
+                    Some(slot)
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let declared = root
+        .children()
+        .filter(|node| role_info_element(*node, "panelDef", Some(CF_CAI_NS)))
+        .map(|node| cf_panel_name(node.attribute("id").unwrap_or("")))
+        .collect::<Vec<_>>();
+    Some(CfPanelLayout {
+        top: side_slots("top"),
+        left: side_slots("left"),
+        right: side_slots("right"),
+        bottom: side_slots("bottom"),
+        declared,
+    })
+}
+
+pub(crate) fn cf_format_layout_slots(slots: &[Vec<String>]) -> String {
+    slots
+        .iter()
+        .map(|slot| {
+            if slot.len() == 1 {
+                slot[0].clone()
+            } else {
+                format!("Стек({})", slot.join(", "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+pub(crate) fn cf_append_full_panel_layout(lines: &mut Vec<String>, config_dir: &Path) {
+    let Some(layout) = cf_read_panel_layout(config_dir) else {
+        return;
+    };
+    lines.push("--- Раскладка панелей ---".to_string());
+    for (side, slots) in [
+        ("top", &layout.top),
+        ("left", &layout.left),
+        ("right", &layout.right),
+        ("bottom", &layout.bottom),
+    ] {
+        if slots.is_empty() {
+            lines.push(format!("  {:<7} —", side));
+        } else {
+            lines.push(format!("  {:<7} {}", side, cf_format_layout_slots(slots)));
+        }
+    }
+    if !layout.declared.is_empty() {
+        lines.push(format!("  объявлено: {}", layout.declared.join(", ")));
+    }
+    lines.push(String::new());
+}
+
+pub(crate) fn cf_read_home_page(config_dir: &Path) -> Option<CfHomePageLayout> {
+    let path = config_dir.join("Ext").join("HomePageWorkArea.xml");
+    let text = read_utf8_sig(&path).ok()?;
+    let doc = Document::parse(text.trim_start_matches('\u{feff}')).ok()?;
+    let root = doc.root_element();
+    let template = child_text(root, "WorkingAreaTemplate", Some(CF_HP_NS))
+        .trim()
+        .to_string();
+    Some(CfHomePageLayout {
+        template,
+        left: cf_home_page_column(root, "LeftColumn"),
+        right: cf_home_page_column(root, "RightColumn"),
+    })
+}
+
+pub(crate) fn cf_home_page_column(
+    root: roxmltree::Node<'_, '_>,
+    column_name: &str,
+) -> Vec<CfHomePageItem> {
+    let Some(column) = root
+        .children()
+        .find(|node| role_info_element(*node, column_name, Some(CF_HP_NS)))
+    else {
+        return Vec::new();
+    };
+    column
+        .children()
+        .filter(|node| role_info_element(*node, "Item", Some(CF_HP_NS)))
+        .map(|item| {
+            let form = child_text(item, "Form", Some(CF_HP_NS)).trim().to_string();
+            let height = child_text(item, "Height", Some(CF_HP_NS))
+                .trim()
+                .parse::<i64>()
+                .unwrap_or(10);
+            let mut common = true;
+            let mut roles = Vec::<(String, bool)>::new();
+            if let Some(visibility) = item
+                .children()
+                .find(|node| role_info_element(*node, "Visibility", Some(CF_HP_NS)))
+            {
+                let common_text = child_text(visibility, "Common", Some(CF_XR_NS));
+                if !common_text.trim().is_empty() {
+                    common = common_text.trim() == "true";
+                }
+                roles = visibility
+                    .children()
+                    .filter(|node| role_info_element(*node, "Value", Some(CF_XR_NS)))
+                    .map(|node| {
+                        (
+                            node.attribute("name").unwrap_or("").to_string(),
+                            node.text().unwrap_or("").trim() == "true",
+                        )
+                    })
+                    .collect::<Vec<_>>();
+            }
+            CfHomePageItem {
+                form,
+                height,
+                common,
+                roles,
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+pub(crate) fn cf_append_full_home_page_summary(lines: &mut Vec<String>, config_dir: &Path) {
+    let Some(home_page) = cf_read_home_page(config_dir) else {
+        return;
+    };
+    lines.push("--- Начальная страница ---".to_string());
+    lines.push(format!("  Шаблон: {}", home_page.template));
+    lines.push(format!(
+        "  LeftColumn: {}, RightColumn: {}  (детали: -Section home-page)",
+        home_page.left.len(),
+        home_page.right.len()
+    ));
+    lines.push(String::new());
+}
+
+pub(crate) fn cf_append_home_page_section(
+    lines: &mut Vec<String>,
+    config_dir: &Path,
+    cfg_name: &str,
+) {
+    let Some(home_page) = cf_read_home_page(config_dir) else {
+        lines.push("Файл Ext/HomePageWorkArea.xml не найден".to_string());
+        return;
+    };
+    lines.push(format!("=== Начальная страница: {cfg_name} ==="));
+    lines.push(String::new());
+    lines.push(format!("Шаблон: {}", home_page.template));
+    lines.push(String::new());
+    for (label, items) in [
+        ("LeftColumn", &home_page.left),
+        ("RightColumn", &home_page.right),
+    ] {
+        if items.is_empty() {
+            lines.push(format!("{label}: —"));
+            lines.push(String::new());
+            continue;
+        }
+        lines.push(format!("{label} ({}):", items.len()));
+        for item in items {
+            lines.push(cf_format_home_page_item(item, true));
+            for (role, value) in &item.roles {
+                lines.push(format!("      {role}: {value}"));
+            }
+        }
+        lines.push(String::new());
+    }
+}
+
+pub(crate) fn cf_format_home_page_item(item: &CfHomePageItem, detailed: bool) -> String {
+    let mut badges = vec![format!("h={}", item.height)];
+    if !item.common {
+        badges.push("скрыта".to_string());
+    }
+    if !item.roles.is_empty() {
+        if detailed {
+            badges.push(format!("роли: {}", item.roles.len()));
+        } else {
+            badges.push(format!("+{} ролей", item.roles.len()));
+        }
+    }
+    let tail = if badges.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", badges.join(", "))
+    };
+    format!("    {}{tail}", item.form)
+}
+
+pub(crate) fn cf_append_full_storages_and_forms(
+    lines: &mut Vec<String>,
+    props: roxmltree::Node<'_, '_>,
+) {
+    lines.push("--- Хранилища и формы по умолчанию ---".to_string());
+    for property in [
+        "CommonSettingsStorage",
+        "ReportsUserSettingsStorage",
+        "ReportsVariantsStorage",
+        "FormDataSettingsStorage",
+        "DynamicListsUserSettingsStorage",
+        "URLExternalDataStorage",
+        "DefaultReportForm",
+        "DefaultReportVariantForm",
+        "DefaultReportSettingsForm",
+        "DefaultReportAppearanceTemplate",
+        "DefaultDynamicListSettingsForm",
+        "DefaultSearchForm",
+        "DefaultDataHistoryChangeHistoryForm",
+        "DefaultDataHistoryVersionDataForm",
+        "DefaultDataHistoryVersionDifferencesForm",
+        "DefaultCollaborationSystemUsersChoiceForm",
+        "DefaultConstantsForm",
+        "DefaultInterface",
+        "DefaultStyle",
+    ] {
+        let value = cf_prop_text(props, property);
+        if !value.is_empty() {
+            lines.push(format!("  {property}: {value}"));
+        }
+    }
+    lines.push(String::new());
+}
+
+pub(crate) fn cf_append_full_multilang_info(
+    lines: &mut Vec<String>,
+    props: roxmltree::Node<'_, '_>,
+) {
+    let cfg_brief = cf_prop_ml(props, "BriefInformation");
+    let cfg_detail = cf_prop_ml(props, "DetailedInformation");
+    let cfg_copyright = cf_prop_ml(props, "Copyright");
+    let cfg_vendor_addr = cf_prop_ml(props, "VendorInformationAddress");
+    let cfg_info_addr = cf_prop_ml(props, "ConfigurationInformationAddress");
+    if cfg_brief.is_empty()
+        && cfg_detail.is_empty()
+        && cfg_copyright.is_empty()
+        && cfg_vendor_addr.is_empty()
+        && cfg_info_addr.is_empty()
+    {
+        return;
+    }
+
+    lines.push("--- Информация ---".to_string());
+    if !cfg_brief.is_empty() {
+        lines.push(format!("Краткая:         {cfg_brief}"));
+    }
+    if !cfg_detail.is_empty() {
+        lines.push(format!("Подробная:       {cfg_detail}"));
+    }
+    if !cfg_copyright.is_empty() {
+        lines.push(format!("Copyright:       {cfg_copyright}"));
+    }
+    if !cfg_vendor_addr.is_empty() {
+        lines.push(format!("Сайт поставщика: {cfg_vendor_addr}"));
+    }
+    if !cfg_info_addr.is_empty() {
+        lines.push(format!("Адрес информ.:   {cfg_info_addr}"));
+    }
+    lines.push(String::new());
+}
+
+pub(crate) fn cf_append_full_mobile_functionalities(
+    lines: &mut Vec<String>,
+    props: roxmltree::Node<'_, '_>,
+) {
+    let Some(mobile_func) = props.children().find(|node| {
+        role_info_element(
+            *node,
+            "UsedMobileApplicationFunctionalities",
+            Some(CF_MD_NS),
+        )
+    }) else {
+        return;
+    };
+
+    let mut enabled = Vec::<String>::new();
+    let mut disabled = Vec::<String>::new();
+    for func in mobile_func
+        .children()
+        .filter(|node| role_info_element(*node, "functionality", None))
+    {
+        let name = child_text(func, "functionality", None);
+        let use_flag = child_text(func, "use", None);
+        if use_flag == "true" {
+            enabled.push(name);
+        } else {
+            disabled.push(name);
+        }
+    }
+
+    let total = enabled.len() + disabled.len();
+    lines.push(format!(
+        "--- Мобильные функциональности ({total}, включено: {}) ---",
+        enabled.len()
+    ));
+    for name in enabled {
+        lines.push(format!("  [+] {name}"));
+    }
+    for name in disabled {
+        lines.push(format!("  [-] {name}"));
+    }
+    lines.push(String::new());
+}
+
+pub(crate) fn cf_append_full_internal_info(lines: &mut Vec<String>, cfg: roxmltree::Node<'_, '_>) {
+    let Some(internal_info) = cfg
+        .children()
+        .find(|node| role_info_element(*node, "InternalInfo", Some(CF_MD_NS)))
+    else {
+        return;
+    };
+    let contained = internal_info
+        .children()
+        .filter(|node| role_info_element(*node, "ContainedObject", Some(CF_XR_NS)))
+        .collect::<Vec<_>>();
+    lines.push(format!(
+        "--- InternalInfo ({} ContainedObject) ---",
+        contained.len()
+    ));
+    for co in contained {
+        let class_id = child_text(co, "ClassId", Some(CF_XR_NS));
+        let object_id = child_text(co, "ObjectId", Some(CF_XR_NS));
+        lines.push(format!("  {class_id} -> {object_id}"));
+    }
+    lines.push(String::new());
+}
+
+pub(crate) fn cf_append_full_child_objects(
+    lines: &mut Vec<String>,
+    cfg: roxmltree::Node<'_, '_>,
+    counts: &[(String, usize)],
+    total_objects: usize,
+) {
+    lines.push(format!("--- Состав ({total_objects} объектов) ---"));
+    lines.push(String::new());
+    let child_objects = cfg
+        .children()
+        .find(|node| role_info_element(*node, "ChildObjects", Some(CF_MD_NS)));
+
+    for type_name in cf_type_order() {
+        let Some((_, count)) = counts.iter().find(|(name, _)| name == type_name) else {
+            continue;
+        };
+        lines.push(format!(
+            "  {} ({type_name}): {count}",
+            cf_type_ru_name(type_name)
+        ));
+        if let Some(child_objects) = child_objects {
+            for child in child_objects
+                .children()
+                .filter(|node| role_info_element(*node, type_name, Some(CF_MD_NS)))
+            {
+                lines.push(format!("    {}", child.text().unwrap_or("")));
+            }
+        }
+    }
 }
 
 pub(crate) fn cf_paginate(lines: Vec<String>, args: &Map<String, Value>) -> String {
@@ -1438,10 +1913,7 @@ pub(crate) fn edit_cf(args: &Map<String, Value>, context: &WorkspaceContext) -> 
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| context.cwd.clone());
-        let mut text = fs::read_to_string(&config_path)
-            .map_err(|err| format!("failed to read {}: {err}", config_path.display()))?
-            .trim_start_matches('\u{feff}')
-            .to_string();
+        let mut text = lxml_parser_normalized_text(&read_utf8_sig(&config_path)?);
         if !text.contains("<Configuration") {
             return Err("No <Configuration> element found".to_string());
         }

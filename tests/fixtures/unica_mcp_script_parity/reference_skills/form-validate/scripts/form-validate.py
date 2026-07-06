@@ -59,9 +59,24 @@ VALID_CFG_PREFIXES = {
     'ReportObject', 'TaskObject', 'TaskRef',
 }
 
+DATA_TYPE_DECLARATION_PARENTS = {'Attribute', 'Parameter', 'Column'}
+
 
 def localname(el):
     return etree.QName(el.tag).localname
+
+
+def is_data_type_declaration_type_node(type_node):
+    parent = type_node.getparent()
+    if parent is None:
+        return False
+    parent_name = localname(parent)
+    if parent_name in DATA_TYPE_DECLARATION_PARENTS:
+        return True
+    if parent_name == "Type":
+        grandparent = parent.getparent()
+        return grandparent is not None and localname(grandparent) in DATA_TYPE_DECLARATION_PARENTS
+    return False
 
 
 def main():
@@ -712,7 +727,11 @@ def main():
 
     # --- Check 12: Type validation ---
     if not stopped:
-        type_nodes = root.xpath('//*[local-name()="Type"]')
+        type_nodes = [
+            tn
+            for tn in root.xpath('//*[local-name()="Type"]')
+            if is_data_type_declaration_type_node(tn)
+        ]
         type_error_count = 0
         type_warn_count = 0
         type_count = len(type_nodes)

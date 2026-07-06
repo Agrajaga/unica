@@ -3,8 +3,8 @@
 ## Active Risks
 
 - Standards adapter is not yet a full native HTTP MCP proxy.
-- Current skill-local Python/PowerShell operation files can drift from target
-  MCP behavior until parity work removes them.
+- Native XML/DSL handlers can drift from donor behavior if parity fixtures are
+  not updated together with Rust ports.
 - Cache reporting exists before full lazy/eager rebuild implementation.
 - The public tool list can grow too broad if every internal capability is
   mirrored one-to-one.
@@ -13,7 +13,8 @@
 ## Mitigations
 
 - Keep gaps in the implementation task list.
-- Add parity fixtures and MCP contract tests before deleting operation files.
+- Add parity fixtures and MCP contract tests for donor behavior that must remain
+  compatible.
 - Keep `.mcp.json` single-server tests.
 - Validate generated marketplace packages, not only the source checkout.
 - Use clean `CODEX_HOME` for visibility proof.

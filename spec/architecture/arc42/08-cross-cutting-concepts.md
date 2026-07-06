@@ -20,9 +20,9 @@ use cases so domain events and cache invalidation cannot be bypassed.
 Adapters are typed boundaries around existing engines. They may use CLI or MCP
 protocol internally, but their names and cache lifecycle are not exposed to LLM.
 
-Skill-local Python/PowerShell operation files are not a target adapter class.
-They are temporary migration sources for behavior that must move into native
-`unica.*` MCP handlers.
+Python/PowerShell/Bash operation files are not a runtime adapter class for
+developer operations. Donor scripts can be kept only as fixture reference models
+for native `unica.*` MCP handlers.
 
 ## Workspace-scoped Services
 
