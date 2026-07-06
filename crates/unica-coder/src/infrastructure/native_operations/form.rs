@@ -2335,12 +2335,18 @@ pub(crate) struct FormCompileObjectField {
     pub(crate) type_name: String,
 }
 
+pub(crate) struct FormCompileObjectTabularSection {
+    pub(crate) name: String,
+    pub(crate) synonym: String,
+    pub(crate) columns: Vec<FormCompileObjectField>,
+}
+
 pub(crate) struct FormCompileObjectMeta {
     pub(crate) object_type: String,
     pub(crate) name: String,
     pub(crate) synonym: String,
     pub(crate) attributes: Vec<FormCompileObjectField>,
-    pub(crate) tabular_sections: usize,
+    pub(crate) tabular_sections: Vec<FormCompileObjectTabularSection>,
     pub(crate) code_length: i64,
     pub(crate) hierarchical: bool,
 }
@@ -2388,9 +2394,10 @@ pub(crate) fn form_compile_definition_from_object(
             ));
         }
         ("Document", "List") => form_compile_document_list_definition(&meta),
+        ("Document", "Item") => form_compile_document_item_definition(&meta),
         ("Document", other) => {
             return Err(format!(
-                "native form compiler from-object currently supports Document List only; got Document {other}"
+                "native form compiler from-object currently supports Document List and Document Item only; got Document {other}"
             ));
         }
         (other, _) => {
@@ -2404,7 +2411,7 @@ pub(crate) fn form_compile_definition_from_object(
         meta.object_type,
         meta.name,
         meta.attributes.len(),
-        meta.tabular_sections
+        meta.tabular_sections.len()
     );
     Ok((defn, stdout))
 }
@@ -2429,8 +2436,8 @@ pub(crate) fn form_compile_parse_object_meta(
         .map(|node| form_compile_object_fields(node, "Attribute"))
         .unwrap_or_default();
     let tabular_sections = child_objects
-        .map(|node| meta_info_children(node, "TabularSection").len())
-        .unwrap_or(0);
+        .map(form_compile_object_tabular_sections)
+        .unwrap_or_default();
     let code_length = meta_info_child_text(props, "CodeLength")
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
@@ -2477,6 +2484,27 @@ pub(crate) fn form_compile_object_fields(
                 .map(form_compile_type_xml_text)
                 .unwrap_or_else(|| "string".to_string());
             Some(FormCompileObjectField { name, type_name })
+        })
+        .collect()
+}
+
+pub(crate) fn form_compile_object_tabular_sections(
+    child_objects: roxmltree::Node<'_, '_>,
+) -> Vec<FormCompileObjectTabularSection> {
+    meta_info_children(child_objects, "TabularSection")
+        .into_iter()
+        .filter_map(|tabular_section| {
+            let props = meta_info_child(tabular_section, "Properties")?;
+            let name = meta_info_child_text(props, "Name")?;
+            let synonym = form_compile_meta_synonym(props).unwrap_or_else(|| name.clone());
+            let columns = meta_info_child(tabular_section, "ChildObjects")
+                .map(|node| form_compile_object_fields(node, "Attribute"))
+                .unwrap_or_default();
+            Some(FormCompileObjectTabularSection {
+                name,
+                synonym,
+                columns,
+            })
         })
         .collect()
 }
@@ -2592,6 +2620,169 @@ pub(crate) fn form_compile_document_list_definition(meta: &FormCompileObjectMeta
             },
         }],
     })
+}
+
+pub(crate) fn form_compile_document_item_definition(meta: &FormCompileObjectMeta) -> Value {
+    let footer_fields = ["Комментарий"];
+    let mut claimed = HashSet::<&str>::new();
+    for field in footer_fields {
+        claimed.insert(field);
+    }
+
+    let unclaimed = meta
+        .attributes
+        .iter()
+        .filter(|attr| {
+            !claimed.contains(attr.name.as_str()) && form_compile_displayable_type(&attr.type_name)
+        })
+        .collect::<Vec<_>>();
+    let half = unclaimed.len().div_ceil(2);
+    let (left_attrs, right_attrs) = unclaimed.split_at(half);
+
+    let number_date_group = json!({
+        "group": "horizontal",
+        "name": "ГруппаНомерДата",
+        "showTitle": false,
+        "children": [
+            {"input": "Номер", "path": "Объект.Number", "autoMaxWidth": false, "width": 9},
+            {"input": "Дата", "path": "Объект.Date", "title": "от"},
+        ],
+    });
+
+    let mut left_children = vec![number_date_group];
+    for attr in left_attrs {
+        left_children.push(form_compile_document_item_field(
+            &attr.name,
+            &format!("Объект.{}", attr.name),
+            &attr.type_name,
+        ));
+    }
+
+    let mut right_children = Vec::new();
+    for attr in right_attrs {
+        right_children.push(form_compile_document_item_field(
+            &attr.name,
+            &format!("Объект.{}", attr.name),
+            &attr.type_name,
+        ));
+    }
+
+    let header_children = if right_children.is_empty() {
+        vec![json!({
+            "group": "vertical",
+            "name": "ГруппаШапкаЛево",
+            "showTitle": false,
+            "children": left_children,
+        })]
+    } else {
+        vec![
+            json!({
+                "group": "vertical",
+                "name": "ГруппаШапкаЛево",
+                "showTitle": false,
+                "children": left_children,
+            }),
+            json!({
+                "group": "vertical",
+                "name": "ГруппаШапкаПраво",
+                "showTitle": false,
+                "children": right_children,
+            }),
+        ]
+    };
+
+    let header_group = json!({
+        "group": "horizontal",
+        "name": "ГруппаШапка",
+        "showTitle": false,
+        "representation": "none",
+        "children": header_children,
+    });
+
+    let mut main_page_children = vec![header_group];
+    for field in footer_fields {
+        if let Some(attr) = meta.attributes.iter().find(|attr| attr.name == field) {
+            main_page_children.push(form_compile_document_item_field(
+                &attr.name,
+                &format!("Объект.{}", attr.name),
+                &attr.type_name,
+            ));
+        }
+    }
+
+    let mut pages_children = vec![json!({
+        "page": "ГруппаОсновное",
+        "title": "Основное",
+        "children": main_page_children,
+    })];
+
+    for tabular_section in meta
+        .tabular_sections
+        .iter()
+        .filter(|section| section.name != "ДополнительныеРеквизиты")
+    {
+        let mut columns = vec![json!({
+            "labelField": format!("{}НомерСтроки", tabular_section.name),
+            "path": format!("Объект.{}.LineNumber", tabular_section.name),
+        })];
+        for column in &tabular_section.columns {
+            columns.push(form_compile_document_item_field(
+                &format!("{}{}", tabular_section.name, column.name),
+                &format!("Объект.{}.{}", tabular_section.name, column.name),
+                &column.type_name,
+            ));
+        }
+        pages_children.push(json!({
+            "page": format!("Группа{}", tabular_section.name),
+            "title": tabular_section.synonym,
+            "children": [{
+                "table": tabular_section.name,
+                "path": format!("Объект.{}", tabular_section.name),
+                "columns": columns,
+            }],
+        }));
+    }
+
+    pages_children.push(json!({
+        "page": "ГруппаДополнительно",
+        "title": "Дополнительно",
+        "children": [
+            {
+                "group": "horizontal",
+                "name": "ГруппаПараметры",
+                "showTitle": false,
+                "children": [
+                    {"group": "vertical", "name": "ГруппаПараметрыЛево", "showTitle": false, "children": []},
+                    {"group": "vertical", "name": "ГруппаПараметрыПраво", "showTitle": false, "children": []},
+                ],
+            },
+            {"group": "vertical", "name": "ГруппаДополнительныеРеквизиты"},
+        ],
+    }));
+
+    json!({
+        "title": meta.synonym,
+        "properties": {
+            "autoTitle": false,
+        },
+        "elements": [{
+            "pages": "ГруппаСтраницы",
+            "children": pages_children,
+        }],
+        "attributes": [{
+            "name": "Объект",
+            "type": format!("DocumentObject.{}", meta.name),
+            "main": true,
+        }],
+    })
+}
+
+pub(crate) fn form_compile_document_item_field(name: &str, path: &str, type_name: &str) -> Value {
+    if type_name.trim() == "xs:boolean" || type_name == "boolean" || type_name.contains("Boolean") {
+        json!({"check": name, "path": path})
+    } else {
+        json!({"input": name, "path": path})
+    }
 }
 
 pub(crate) fn form_add_supported_object_types() -> &'static [&'static str] {
@@ -4112,6 +4303,42 @@ pub(crate) fn emit_form_element(
         emit_form_command_bar_element(lines, object, name, indent, ids)?;
         return Ok(());
     }
+    if object.contains_key("pages") {
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| object.get("pages").and_then(Value::as_str))
+            .ok_or_else(|| "Form pages container is missing name".to_string())?;
+        emit_form_pages(lines, object, name, indent, ids)?;
+        return Ok(());
+    }
+    if object.contains_key("page") {
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| object.get("page").and_then(Value::as_str))
+            .ok_or_else(|| "Form page is missing name".to_string())?;
+        emit_form_page(lines, object, name, indent, ids)?;
+        return Ok(());
+    }
+    if object.contains_key("group") {
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| object.get("group").and_then(Value::as_str))
+            .ok_or_else(|| "Form group is missing name".to_string())?;
+        emit_form_group(lines, object, name, indent, ids)?;
+        return Ok(());
+    }
+    if object.contains_key("check") {
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| object.get("check").and_then(Value::as_str))
+            .ok_or_else(|| "Form checkbox is missing name".to_string())?;
+        emit_form_check(lines, object, name, indent, ids);
+        return Ok(());
+    }
     if object.contains_key("input") || object.contains_key("name") {
         let name = object
             .get("name")
@@ -4128,6 +4355,272 @@ pub(crate) fn emit_form_element(
         "Unsupported form element in native compiler: {}",
         serde_json::to_string(element).unwrap_or_else(|_| "<invalid>".to_string())
     ))
+}
+
+pub(crate) fn emit_form_group(
+    lines: &mut Vec<String>,
+    element: &Map<String, Value>,
+    name: &str,
+    indent: &str,
+    ids: &mut FormIdAllocator,
+) -> Result<(), String> {
+    let id = ids.next();
+    lines.push(format!(
+        "{indent}<UsualGroup name=\"{}\" id=\"{id}\">",
+        escape_xml(name)
+    ));
+    let inner = format!("{indent}\t");
+    if let Some(title) = element.get("title").and_then(Value::as_str) {
+        emit_form_mltext(lines, &inner, "Title", title);
+    }
+    if let Some(value) = element
+        .get("group")
+        .and_then(Value::as_str)
+        .and_then(form_compile_group_orientation)
+    {
+        lines.push(format!("{inner}<Group>{value}</Group>"));
+    }
+    if let Some(value) = element.get("behavior").and_then(Value::as_str) {
+        if let Some(behavior) = form_compile_group_behavior(value) {
+            lines.push(format!("{inner}<Behavior>{behavior}</Behavior>"));
+        }
+    } else if element.get("group").and_then(Value::as_str) == Some("collapsible") {
+        lines.push(format!("{inner}<Behavior>Collapsible</Behavior>"));
+    }
+    if element.get("collapsed").and_then(Value::as_bool) == Some(true) {
+        lines.push(format!("{inner}<Collapsed>true</Collapsed>"));
+    }
+    if let Some(value) = element.get("representation").and_then(Value::as_str) {
+        lines.push(format!(
+            "{inner}<Representation>{}</Representation>",
+            form_compile_group_representation(value)
+        ));
+    }
+    if let Some(value) = element.get("currentRowUse").and_then(Value::as_str) {
+        lines.push(format!(
+            "{inner}<CurrentRowUse>{}</CurrentRowUse>",
+            escape_xml(value)
+        ));
+    }
+    if let Some(value) = element.get("showTitle").and_then(Value::as_bool) {
+        lines.push(format!(
+            "{inner}<ShowTitle>{}</ShowTitle>",
+            if value { "true" } else { "false" }
+        ));
+    }
+    emit_form_common_flags(lines, element, &inner);
+    emit_form_companion(
+        lines,
+        "ExtendedTooltip",
+        &format!("{name}РасширеннаяПодсказка"),
+        &inner,
+        ids,
+    );
+    emit_form_children(lines, element, &inner, ids)?;
+    lines.push(format!("{indent}</UsualGroup>"));
+    Ok(())
+}
+
+pub(crate) fn emit_form_pages(
+    lines: &mut Vec<String>,
+    element: &Map<String, Value>,
+    name: &str,
+    indent: &str,
+    ids: &mut FormIdAllocator,
+) -> Result<(), String> {
+    let id = ids.next();
+    lines.push(format!(
+        "{indent}<Pages name=\"{}\" id=\"{id}\">",
+        escape_xml(name)
+    ));
+    let inner = format!("{indent}\t");
+    if let Some(title) = element.get("title").and_then(Value::as_str) {
+        emit_form_mltext(lines, &inner, "Title", title);
+    }
+    if let Some(value) = element.get("pagesRepresentation").and_then(Value::as_str) {
+        lines.push(format!(
+            "{inner}<PagesRepresentation>{}</PagesRepresentation>",
+            escape_xml(value)
+        ));
+    }
+    if let Some(value) = element.get("currentRowUse").and_then(Value::as_str) {
+        lines.push(format!(
+            "{inner}<CurrentRowUse>{}</CurrentRowUse>",
+            escape_xml(value)
+        ));
+    }
+    emit_form_common_flags(lines, element, &inner);
+    emit_form_companion(
+        lines,
+        "ExtendedTooltip",
+        &format!("{name}РасширеннаяПодсказка"),
+        &inner,
+        ids,
+    );
+    emit_form_element_events(lines, element, name, &inner);
+    emit_form_children(lines, element, &inner, ids)?;
+    lines.push(format!("{indent}</Pages>"));
+    Ok(())
+}
+
+pub(crate) fn emit_form_page(
+    lines: &mut Vec<String>,
+    element: &Map<String, Value>,
+    name: &str,
+    indent: &str,
+    ids: &mut FormIdAllocator,
+) -> Result<(), String> {
+    let id = ids.next();
+    lines.push(format!(
+        "{indent}<Page name=\"{}\" id=\"{id}\">",
+        escape_xml(name)
+    ));
+    let inner = format!("{indent}\t");
+    if let Some(title) = element.get("title").and_then(Value::as_str) {
+        emit_form_mltext(lines, &inner, "Title", title);
+    }
+    emit_form_common_flags(lines, element, &inner);
+    if let Some(value) = element
+        .get("group")
+        .and_then(Value::as_str)
+        .and_then(form_compile_group_orientation)
+    {
+        lines.push(format!("{inner}<Group>{value}</Group>"));
+    }
+    if let Some(value) = element.get("showTitle").and_then(Value::as_bool) {
+        lines.push(format!(
+            "{inner}<ShowTitle>{}</ShowTitle>",
+            if value { "true" } else { "false" }
+        ));
+    }
+    emit_form_companion(
+        lines,
+        "ExtendedTooltip",
+        &format!("{name}РасширеннаяПодсказка"),
+        &inner,
+        ids,
+    );
+    emit_form_children(lines, element, &inner, ids)?;
+    lines.push(format!("{indent}</Page>"));
+    Ok(())
+}
+
+pub(crate) fn emit_form_children(
+    lines: &mut Vec<String>,
+    element: &Map<String, Value>,
+    indent: &str,
+    ids: &mut FormIdAllocator,
+) -> Result<(), String> {
+    let Some(children) = element.get("children").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if children.is_empty() {
+        return Ok(());
+    }
+    lines.push(format!("{indent}<ChildItems>"));
+    for child in children {
+        emit_form_element(lines, child, &format!("{indent}\t"), ids)?;
+    }
+    lines.push(format!("{indent}</ChildItems>"));
+    Ok(())
+}
+
+pub(crate) fn form_compile_group_orientation(value: &str) -> Option<&'static str> {
+    match value.to_lowercase().as_str() {
+        "horizontal" => Some("Horizontal"),
+        "vertical" | "collapsible" => Some("Vertical"),
+        "alwayshorizontal" => Some("AlwaysHorizontal"),
+        "alwaysvertical" => Some("AlwaysVertical"),
+        "horizontalifpossible" => Some("HorizontalIfPossible"),
+        _ => None,
+    }
+}
+
+pub(crate) fn form_compile_group_behavior(value: &str) -> Option<&'static str> {
+    match value.to_lowercase().as_str() {
+        "usual" => Some("Usual"),
+        "collapsible" => Some("Collapsible"),
+        "popup" => Some("PopUp"),
+        _ => None,
+    }
+}
+
+pub(crate) fn form_compile_group_representation(value: &str) -> String {
+    match value {
+        "none" => "None".to_string(),
+        "normal" => "NormalSeparation".to_string(),
+        "weak" => "WeakSeparation".to_string(),
+        "strong" => "StrongSeparation".to_string(),
+        other => escape_xml(other),
+    }
+}
+
+pub(crate) fn emit_form_check(
+    lines: &mut Vec<String>,
+    element: &Map<String, Value>,
+    name: &str,
+    indent: &str,
+    ids: &mut FormIdAllocator,
+) {
+    let id = ids.next();
+    lines.push(format!(
+        "{indent}<CheckBoxField name=\"{}\" id=\"{id}\">",
+        escape_xml(name)
+    ));
+    let inner = format!("{indent}\t");
+    if let Some(path) = element.get("path").and_then(Value::as_str) {
+        lines.push(format!("{inner}<DataPath>{}</DataPath>", escape_xml(path)));
+    }
+    if let Some(title) = element.get("title").and_then(Value::as_str) {
+        emit_form_mltext(lines, &inner, "Title", title);
+    }
+    emit_form_common_flags(lines, element, &inner);
+    if let Some(value) = element.get("checkBoxType").and_then(Value::as_str) {
+        if !value.is_empty() {
+            let mapped = match value.to_lowercase().as_str() {
+                "auto" => "Auto",
+                "checkbox" => "CheckBox",
+                "switcher" => "Switcher",
+                "tumbler" => "Tumbler",
+                _ => value,
+            };
+            lines.push(format!("{inner}<CheckBoxType>{mapped}</CheckBoxType>"));
+        }
+    } else {
+        lines.push(format!("{inner}<CheckBoxType>Auto</CheckBoxType>"));
+    }
+    let title_location = element
+        .get("titleLocation")
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "none" => "None",
+            "left" => "Left",
+            "right" => "Right",
+            "top" => "Top",
+            "bottom" => "Bottom",
+            "auto" => "Auto",
+            other => other,
+        })
+        .unwrap_or("Right");
+    lines.push(format!(
+        "{inner}<TitleLocation>{title_location}</TitleLocation>"
+    ));
+    emit_form_companion(
+        lines,
+        "ContextMenu",
+        &format!("{name}КонтекстноеМеню"),
+        &inner,
+        ids,
+    );
+    emit_form_companion(
+        lines,
+        "ExtendedTooltip",
+        &format!("{name}РасширеннаяПодсказка"),
+        &inner,
+        ids,
+    );
+    emit_form_element_events(lines, element, name, &inner);
+    lines.push(format!("{indent}</CheckBoxField>"));
 }
 
 pub(crate) fn emit_form_input(
@@ -4732,6 +5225,22 @@ pub(crate) fn emit_form_companion(
     ));
 }
 
+pub(crate) fn form_compile_main_attribute_saves_data(type_name: &str) -> bool {
+    [
+        "CatalogObject.",
+        "DocumentObject.",
+        "ChartOfAccountsObject.",
+        "ChartOfCalculationTypesObject.",
+        "ChartOfCharacteristicTypesObject.",
+        "ExchangePlanObject.",
+        "BusinessProcessObject.",
+        "TaskObject.",
+    ]
+    .iter()
+    .any(|prefix| type_name.starts_with(prefix))
+        || type_name.contains("RecordManager.")
+}
+
 pub(crate) fn emit_form_attributes(
     lines: &mut Vec<String>,
     attrs: Option<&Value>,
@@ -4762,15 +5271,22 @@ pub(crate) fn emit_form_attributes(
         if let Some(title) = object.get("title").and_then(Value::as_str) {
             emit_form_mltext(lines, &inner, "Title", title);
         }
-        if let Some(type_name) = object.get("type").and_then(Value::as_str) {
+        let type_name = object.get("type").and_then(Value::as_str);
+        if let Some(type_name) = type_name {
             emit_form_type(lines, type_name, &inner);
         } else {
             lines.push(format!("{inner}<Type/>"));
         }
-        if object.get("main").and_then(Value::as_bool) == Some(true) {
+        let main_attribute = object.get("main").and_then(Value::as_bool) == Some(true);
+        if main_attribute {
             lines.push(format!("{inner}<MainAttribute>true</MainAttribute>"));
         }
-        if object.get("savedData").and_then(Value::as_bool) == Some(true) {
+        let saved_data = if object.contains_key("savedData") {
+            object.get("savedData").and_then(Value::as_bool) == Some(true)
+        } else {
+            main_attribute && type_name.is_some_and(form_compile_main_attribute_saves_data)
+        };
+        if saved_data {
             lines.push(format!("{inner}<SavedData>true</SavedData>"));
         }
         if object.get("type").and_then(Value::as_str) == Some("DynamicList") {
