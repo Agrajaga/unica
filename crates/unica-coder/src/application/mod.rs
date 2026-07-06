@@ -2117,6 +2117,220 @@ mod tests {
     }
 
     #[test]
+    fn meta_compile_preserves_single_configuration_bom() {
+        let root = temp_meta_compile_workspace("unica-meta-compile-single-bom");
+        let workspace = root.join("workspace");
+        let src = workspace.join("src");
+        let config_path = src.join("Configuration.xml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "\u{feff}{}",
+                support_test_configuration_xml("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            ),
+        )
+        .unwrap();
+        let json_path = workspace.join("report.json");
+        std::fs::write(
+            &json_path,
+            r#"{
+  "type": "Report",
+  "name": "MetaCompileBomReport",
+  "synonym": "MetaCompileBomReport"
+}"#,
+        )
+        .unwrap();
+
+        let result = call_meta_compile(&workspace, &json_path);
+
+        assert!(result.ok, "{:?}", result.errors);
+        let config_bytes = std::fs::read(&config_path).unwrap();
+        assert_eq!(leading_utf8_bom_count(&config_bytes), 1);
+        let config_text = String::from_utf8_lossy(&config_bytes).to_string();
+        assert!(config_text.contains("<Report>MetaCompileBomReport</Report>"));
+        roxmltree::Document::parse(config_text.trim_start_matches('\u{feff}')).unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn meta_compile_preserves_configuration_child_objects_formatting() {
+        let root = temp_meta_compile_workspace("unica-meta-compile-child-format");
+        let workspace = root.join("workspace");
+        let src = workspace.join("src");
+        let config_path = src.join("Configuration.xml");
+        std::fs::write(
+            &config_path,
+            concat!(
+                "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n",
+                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.17\">\r\n",
+                "\t<Configuration uuid=\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\">\r\n",
+                "\t\t<Properties>\r\n",
+                "\t\t\t<Name>Demo</Name>\r\n",
+                "\t\t</Properties>\r\n",
+                "\t\t<ChildObjects>\r\n",
+                "\t\t\t<Catalog>Items</Catalog>\r\n",
+                "\t\t</ChildObjects>\r\n",
+                "\t</Configuration>\r\n",
+                "</MetaDataObject>"
+            ),
+        )
+        .unwrap();
+        let json_path = workspace.join("report.json");
+        std::fs::write(
+            &json_path,
+            r#"{
+  "type": "Report",
+  "name": "MetaCompileFormatReport",
+  "synonym": "MetaCompileFormatReport"
+}"#,
+        )
+        .unwrap();
+
+        let result = call_meta_compile(&workspace, &json_path);
+
+        assert!(result.ok, "{:?}", result.errors);
+        let config_text =
+            String::from_utf8_lossy(&std::fs::read(&config_path).unwrap()).to_string();
+        assert!(config_text.contains(concat!(
+            "\r\n\t\t\t<Catalog>Items</Catalog>\r\n",
+            "\t\t\t<Report>MetaCompileFormatReport</Report>\n",
+            "\t\t</ChildObjects>"
+        )));
+        assert!(!config_text.contains("\t\t\t\t\t<Report>MetaCompileFormatReport</Report>"));
+        assert!(!config_text
+            .contains("<Report>MetaCompileFormatReport</Report>\r\n\t\t</ChildObjects>"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn template_add_preserves_single_object_bom() {
+        let root = temp_meta_compile_workspace("unica-template-add-single-bom");
+        let workspace = root.join("workspace");
+        let json_path = workspace.join("report.json");
+        std::fs::write(
+            &json_path,
+            r#"{
+  "type": "Report",
+  "name": "TemplateBomReport",
+  "synonym": "TemplateBomReport"
+}"#,
+        )
+        .unwrap();
+        let result = call_meta_compile(&workspace, &json_path);
+        assert!(result.ok, "{:?}", result.errors);
+
+        let report_path = workspace
+            .join("src")
+            .join("Reports")
+            .join("TemplateBomReport.xml");
+        let report_bytes = std::fs::read(&report_path).unwrap();
+        assert_eq!(leading_utf8_bom_count(&report_bytes), 1);
+
+        let mut args = Map::new();
+        args.insert(
+            "cwd".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        args.insert("dryRun".to_string(), Value::Bool(false));
+        args.insert(
+            "ObjectName".to_string(),
+            Value::String("TemplateBomReport".to_string()),
+        );
+        args.insert(
+            "TemplateName".to_string(),
+            Value::String("ОсновнаяСхемаКомпоновкиДанных".to_string()),
+        );
+        args.insert(
+            "TemplateType".to_string(),
+            Value::String("DataCompositionSchema".to_string()),
+        );
+        args.insert(
+            "SrcDir".to_string(),
+            Value::String("src/Reports".to_string()),
+        );
+
+        let template_result = UnicaApplication::new()
+            .call_tool("unica.template.add", &args)
+            .unwrap();
+
+        assert!(template_result.ok, "{:?}", template_result.errors);
+        let report_bytes = std::fs::read(&report_path).unwrap();
+        assert_eq!(leading_utf8_bom_count(&report_bytes), 1);
+        assert!(String::from_utf8_lossy(&report_bytes)
+            .contains("<Template>ОсновнаяСхемаКомпоновкиДанных</Template>"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn template_add_repairs_repeated_object_bom() {
+        let root = temp_meta_compile_workspace("unica-template-add-repeated-bom");
+        let workspace = root.join("workspace");
+        let json_path = workspace.join("report.json");
+        std::fs::write(
+            &json_path,
+            r#"{
+  "type": "Report",
+  "name": "TemplateRepeatedBomReport",
+  "synonym": "TemplateRepeatedBomReport"
+}"#,
+        )
+        .unwrap();
+        let result = call_meta_compile(&workspace, &json_path);
+        assert!(result.ok, "{:?}", result.errors);
+
+        let report_path = workspace
+            .join("src")
+            .join("Reports")
+            .join("TemplateRepeatedBomReport.xml");
+        let report_bytes = std::fs::read(&report_path).unwrap();
+        assert_eq!(leading_utf8_bom_count(&report_bytes), 1);
+
+        let mut damaged = b"\xef\xbb\xbf".to_vec();
+        damaged.extend_from_slice(&report_bytes);
+        std::fs::write(&report_path, damaged).unwrap();
+        let report_bytes = std::fs::read(&report_path).unwrap();
+        assert_eq!(leading_utf8_bom_count(&report_bytes), 2);
+
+        let mut args = Map::new();
+        args.insert(
+            "cwd".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        args.insert("dryRun".to_string(), Value::Bool(false));
+        args.insert(
+            "ObjectName".to_string(),
+            Value::String("TemplateRepeatedBomReport".to_string()),
+        );
+        args.insert(
+            "TemplateName".to_string(),
+            Value::String("ОсновнаяСхемаКомпоновкиДанных".to_string()),
+        );
+        args.insert(
+            "TemplateType".to_string(),
+            Value::String("DataCompositionSchema".to_string()),
+        );
+        args.insert(
+            "SrcDir".to_string(),
+            Value::String("src/Reports".to_string()),
+        );
+
+        let template_result = UnicaApplication::new()
+            .call_tool("unica.template.add", &args)
+            .unwrap();
+
+        assert!(template_result.ok, "{:?}", template_result.errors);
+        let report_bytes = std::fs::read(&report_path).unwrap();
+        assert_eq!(leading_utf8_bom_count(&report_bytes), 1);
+        assert!(String::from_utf8_lossy(&report_bytes)
+            .contains("<Template>ОсновнаяСхемаКомпоновкиДанных</Template>"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn meta_validate_supports_pipe_separated_batch_paths() {
         let root = std::env::temp_dir().join(format!("unica-meta-batch-{}", std::process::id()));
         let workspace = root.join("workspace");
@@ -3184,6 +3398,13 @@ mod tests {
         UnicaApplication::new()
             .call_tool("unica.meta.validate", &args)
             .unwrap()
+    }
+
+    fn leading_utf8_bom_count(bytes: &[u8]) -> usize {
+        bytes
+            .chunks_exact(3)
+            .take_while(|chunk| *chunk == [0xEF, 0xBB, 0xBF])
+            .count()
     }
 
     fn assert_valid_root_uuid(xml: &str, tag_name: &str) {
