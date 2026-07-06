@@ -90,8 +90,8 @@ pub struct IndexBackgroundJob {
     pub primary: IndexCommand,
     pub info: IndexCommand,
     pub status_path: PathBuf,
+    #[cfg(test)]
     pub lock_path: PathBuf,
-    pub lock_id: String,
     pub lock_lease: IndexLockLease,
 }
 
@@ -337,8 +337,6 @@ impl<'a> WorkspaceIndexService<'a> {
                 return IndexStartReport::default();
             }
         };
-        let lock_id = lock_lease.lock_id().to_string();
-
         let status_path = status_path(context);
         let _ = write_status_path(
             &status_path,
@@ -351,8 +349,8 @@ impl<'a> WorkspaceIndexService<'a> {
             primary,
             info,
             status_path,
+            #[cfg(test)]
             lock_path: lock.clone(),
-            lock_id: lock_id.clone(),
             lock_lease,
         };
         if let Err(error) = self.runner.start_background(job) {
@@ -1442,7 +1440,6 @@ mod tests {
             ),
             status_path: status.clone(),
             lock_path: lock.clone(),
-            lock_id: lock_lease.lock_id().to_string(),
             lock_lease,
         });
 

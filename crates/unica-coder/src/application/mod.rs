@@ -1766,6 +1766,25 @@ mod tests {
     }
 
     #[test]
+    fn native_descriptors_expose_required_adapter_arguments() {
+        let required_by_operation = [
+            ("meta-compile", &["JsonPath", "OutputDir"][..]),
+            ("role-compile", &["JsonPath", "OutputDir"][..]),
+            ("mxl-compile", &["JsonPath", "OutputPath"][..]),
+        ];
+
+        for (operation, expected_required) in required_by_operation {
+            let descriptor = operation_descriptors::native_operation_descriptor(operation).unwrap();
+            for expected in expected_required {
+                assert!(
+                    descriptor.required_args.contains(expected),
+                    "{operation} descriptor should require {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn application_dispatches_workspace_cache_and_handlers_through_ports() {
         use std::cell::RefCell;
         use std::rc::Rc;
@@ -3857,6 +3876,104 @@ mod tests {
 
         assert!(error.contains("sourceFormat=edt"));
         assert!(error.contains("platform_xml"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_only_native_outfile_is_workspace_write_guarded() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-read-outfile-write-guard-{}",
+            std::process::id()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside").join("report.txt");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("src/Configuration.xml"),
+            support_test_configuration_xml("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let mut args = Map::new();
+        args.insert(
+            "cwd".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        args.insert(
+            "ConfigPath".to_string(),
+            Value::String("src/Configuration.xml".to_string()),
+        );
+        args.insert(
+            "OutFile".to_string(),
+            Value::String(outside.display().to_string()),
+        );
+
+        let error = match UnicaApplication::new().call_tool("unica.cf.info", &args) {
+            Ok(result) => panic!("expected OutFile write guard, got {}", result.summary),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("outside workspace root"), "{error}");
+        assert!(!outside.exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cfe_borrow_rejects_edt_config_source_set_target() {
+        let root =
+            std::env::temp_dir().join(format!("unica-cfe-borrow-edt-guard-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join("cfg/Configuration")).unwrap();
+        std::fs::create_dir_all(workspace.join("ext")).unwrap();
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            "format: EDT\nsource-set:\n  - name: cfg\n    type: CONFIGURATION\n    path: cfg\n  - name: ext\n    type: EXTENSION\n    path: ext\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("cfg/.project"), "<projectDescription/>").unwrap();
+        std::fs::write(
+            workspace.join("cfg/Configuration/Configuration.mdo"),
+            "<mdclass:Configuration/>",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("ext/Configuration.xml"),
+            support_test_configuration_xml("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+        )
+        .unwrap();
+        let mut args = Map::new();
+        args.insert(
+            "cwd".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        args.insert("dryRun".to_string(), Value::Bool(false));
+        args.insert(
+            "ExtensionPath".to_string(),
+            Value::String("ext/Configuration.xml".to_string()),
+        );
+        args.insert(
+            "ConfigPath".to_string(),
+            Value::String("cfg/Configuration.xml".to_string()),
+        );
+        args.insert(
+            "Object".to_string(),
+            Value::String("Catalog.Items".to_string()),
+        );
+
+        let error = match UnicaApplication::new().call_tool("unica.cfe.borrow", &args) {
+            Ok(result) => panic!("expected EDT source-set guard, got {}", result.summary),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("source-set `cfg`"), "{error}");
+        assert!(error.contains("sourceFormat=edt"), "{error}");
 
         let _ = std::fs::remove_dir_all(root);
     }

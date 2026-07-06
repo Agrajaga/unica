@@ -33,6 +33,7 @@ ALLOWED_DECISIONS = {
     "ported",
     "ignored-with-reason",
     "blocked-by-product-contract",
+    "script-backed-utility-exception",
     "needs-tool-update",
     "needs-review",
 }
@@ -181,8 +182,11 @@ def validate_index(
             if decision is not None:
                 if decision not in ALLOWED_DECISIONS:
                     errors.append(f"{entry_label}: unsupported decision: {decision}")
-                if decision == "ignored-with-reason" and not entry.get("decisionReason"):
-                    errors.append(f"{entry_label}: decisionReason is required for ignored-with-reason")
+                if decision in {
+                    "ignored-with-reason",
+                    "script-backed-utility-exception",
+                } and not entry.get("decisionReason"):
+                    errors.append(f"{entry_label}: decisionReason is required for {decision}")
             if upstream.get("toolLockRef") and "baselineCommit" in entry:
                 errors.append(f"{entry_label}: baselineCommit must not be set on entries for toolLockRef upstreams")
             if "baselineCommit" in entry and not isinstance(entry.get("baselineCommit"), str):

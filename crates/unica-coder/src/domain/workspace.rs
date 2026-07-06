@@ -74,3 +74,28 @@ fn hash_path(hasher: &mut DefaultHasher, root: &Path, rel: &str) {
         secs.hash(hasher);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::WorkspaceContext;
+
+    #[test]
+    fn discovers_workspace_root_and_default_cache_under_build_unica() {
+        let root =
+            std::env::temp_dir().join(format!("unica-workspace-discovery-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        let nested = workspace.join("src/catalogs");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(workspace.join("v8project.yaml"), "format: DESIGNER\n").unwrap();
+
+        let context = WorkspaceContext::discover(nested).unwrap();
+
+        assert_eq!(context.workspace_root, workspace);
+        assert_eq!(
+            context.cache_root,
+            context.workspace_root.join(".build/unica")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

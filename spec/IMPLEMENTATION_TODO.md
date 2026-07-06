@@ -4,9 +4,7 @@ This file tracks open implementation work only.
 
 ## Current Tasks
 
-- [ ] Resolve the remaining prompt-visible script-backed skills (`img-grid`,
-  `web-test`): either move them behind an approved MCP/native boundary or
-  document and test explicit ADR exceptions for non-XML/DSL utilities.
+- None.
 
 ## Rules
 

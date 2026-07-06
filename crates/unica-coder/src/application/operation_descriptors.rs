@@ -28,7 +28,9 @@ const CF_PATH: &[&str] = &["ConfigPath", "configPath", "Path", "path"];
 const CONFIG_PATH: &[&str] = &["ConfigPath", "configPath"];
 const CONFIG_DIR: &[&str] = &["ConfigDir", "configDir"];
 const OUTPUT_DIR: &[&str] = &["OutputDir", "outputDir"];
+const OUT_FILE: &[&str] = &["OutFile", "outFile"];
 const EXTENSION_PATH: &[&str] = &["ExtensionPath", "extensionPath"];
+const CFE_BORROW_SOURCE: &[&str] = &["ExtensionPath", "ConfigPath", "extensionPath", "configPath"];
 const OBJECT_PATH: &[&str] = &["ObjectPath", "objectPath", "Path", "path"];
 const OBJECT_PATH_REQUIRED: &[&str] = &["ObjectPath"];
 const SRC_DIR: &[&str] = &["SrcDir", "srcDir"];
@@ -47,8 +49,21 @@ const RIGHTS_PATH_REQUIRED: &[&str] = &["RightsPath"];
 const SUPPORT_PATH: &[&str] = &["Path", "path", "TargetPath", "targetPath"];
 const META_REMOVE_REQUIRED: &[&str] = EMPTY;
 const CFE_DIFF_REQUIRED: &[&str] = &["ExtensionPath", "ConfigPath"];
+const CFE_BORROW_REQUIRED: &[&str] = &["ExtensionPath", "ConfigPath", "Object"];
+const CFE_PATCH_METHOD_REQUIRED: &[&str] = &[
+    "ExtensionPath",
+    "ModulePath",
+    "MethodName",
+    "InterceptorType",
+];
 const CFE_VALIDATE_REQUIRED: &[&str] = &["ExtensionPath"];
 const OBJECT_NAME_REQUIRED: &[&str] = &["ObjectName"];
+const META_COMPILE_REQUIRED: &[&str] = &["JsonPath", "OutputDir"];
+const FORM_COMPILE_REQUIRED: &[&str] = &["OutputPath"];
+const FORM_EDIT_REQUIRED: &[&str] = &["FormPath", "JsonPath"];
+const SUBSYSTEM_COMPILE_REQUIRED: &[&str] = &["OutputDir"];
+const MXL_COMPILE_REQUIRED: &[&str] = &["JsonPath", "OutputPath"];
+const ROLE_COMPILE_REQUIRED: &[&str] = &["JsonPath", "OutputDir"];
 
 pub(super) fn native_operation_descriptor(operation: &str) -> Option<&'static OperationDescriptor> {
     NATIVE_OPERATION_DESCRIPTORS
@@ -64,11 +79,17 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         CF_PATH,
         Some(path_guard(CF_PATH, SupportGuardRequirement::Editable)),
     ),
-    descriptor("cf-info", &["ConfigPath"], EMPTY, CONFIG_PATH, None),
+    descriptor("cf-info", &["ConfigPath"], OUT_FILE, CONFIG_PATH, None),
     descriptor("cf-init", EMPTY, OUTPUT_DIR, OUTPUT_DIR, None),
-    descriptor("cf-validate", &["ConfigPath"], EMPTY, CONFIG_PATH, None),
+    descriptor("cf-validate", &["ConfigPath"], OUT_FILE, CONFIG_PATH, None),
     descriptor("support-edit", EMPTY, SUPPORT_PATH, SUPPORT_PATH, None),
-    descriptor("cfe-borrow", EMPTY, EXTENSION_PATH, EXTENSION_PATH, None),
+    descriptor(
+        "cfe-borrow",
+        CFE_BORROW_REQUIRED,
+        EXTENSION_PATH,
+        CFE_BORROW_SOURCE,
+        None,
+    ),
     descriptor(
         "cfe-diff",
         CFE_DIFF_REQUIRED,
@@ -79,7 +100,7 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
     descriptor("cfe-init", EMPTY, OUTPUT_DIR, OUTPUT_DIR, None),
     descriptor(
         "cfe-patch-method",
-        EMPTY,
+        CFE_PATCH_METHOD_REQUIRED,
         EXTENSION_PATH,
         EXTENSION_PATH,
         None,
@@ -87,13 +108,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
     descriptor(
         "cfe-validate",
         CFE_VALIDATE_REQUIRED,
-        EMPTY,
+        OUT_FILE,
         EXTENSION_PATH,
         None,
     ),
     descriptor(
         "meta-compile",
-        EMPTY,
+        META_COMPILE_REQUIRED,
         OUTPUT_DIR,
         OUTPUT_DIR,
         Some(path_guard(OUTPUT_DIR, SupportGuardRequirement::Editable)),
@@ -105,7 +126,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         OBJECT_PATH,
         Some(path_guard(OBJECT_PATH, SupportGuardRequirement::Editable)),
     ),
-    descriptor("meta-info", OBJECT_PATH_REQUIRED, EMPTY, OBJECT_PATH, None),
+    descriptor(
+        "meta-info",
+        OBJECT_PATH_REQUIRED,
+        OUT_FILE,
+        OBJECT_PATH,
+        None,
+    ),
     descriptor(
         "meta-remove",
         META_REMOVE_REQUIRED,
@@ -116,7 +143,7 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
     descriptor(
         "meta-validate",
         OBJECT_PATH_REQUIRED,
-        EMPTY,
+        OUT_FILE,
         OBJECT_PATH,
         None,
     ),
@@ -136,14 +163,14 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
     ),
     descriptor(
         "form-compile",
-        EMPTY,
+        FORM_COMPILE_REQUIRED,
         OUTPUT_PATH,
         OUTPUT_PATH,
         Some(path_guard(OUTPUT_PATH, SupportGuardRequirement::Editable)),
     ),
     descriptor(
         "form-edit",
-        FORM_PATH_REQUIRED,
+        FORM_EDIT_REQUIRED,
         FORM_PATH,
         FORM_PATH,
         Some(path_guard(FORM_PATH, SupportGuardRequirement::Editable)),
@@ -164,10 +191,16 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         CI_PATH,
         Some(path_guard(CI_PATH, SupportGuardRequirement::Editable)),
     ),
-    descriptor("interface-validate", CI_PATH_REQUIRED, EMPTY, CI_PATH, None),
+    descriptor(
+        "interface-validate",
+        CI_PATH_REQUIRED,
+        OUT_FILE,
+        CI_PATH,
+        None,
+    ),
     descriptor(
         "subsystem-compile",
-        EMPTY,
+        SUBSYSTEM_COMPILE_REQUIRED,
         SUBSYSTEM_COMPILE_WRITE,
         SUBSYSTEM_COMPILE_WRITE,
         Some(path_guard(OUTPUT_DIR, SupportGuardRequirement::Editable)),
@@ -185,14 +218,14 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
     descriptor(
         "subsystem-info",
         SUBSYSTEM_PATH_REQUIRED,
-        EMPTY,
+        OUT_FILE,
         SUBSYSTEM_PATH,
         None,
     ),
     descriptor(
         "subsystem-validate",
         SUBSYSTEM_PATH_REQUIRED,
-        EMPTY,
+        OUT_FILE,
         SUBSYSTEM_PATH,
         None,
     ),
@@ -227,20 +260,20 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
     descriptor(
         "skd-info",
         TEMPLATE_PATH_REQUIRED,
-        EMPTY,
+        OUT_FILE,
         TEMPLATE_PATH,
         None,
     ),
     descriptor(
         "skd-validate",
         TEMPLATE_PATH_REQUIRED,
-        EMPTY,
+        OUT_FILE,
         TEMPLATE_PATH,
         None,
     ),
     descriptor(
         "mxl-compile",
-        EMPTY,
+        MXL_COMPILE_REQUIRED,
         OUTPUT_PATH,
         OUTPUT_PATH,
         Some(path_guard(OUTPUT_PATH, SupportGuardRequirement::Editable)),
@@ -268,16 +301,22 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
     ),
     descriptor(
         "role-compile",
-        EMPTY,
+        ROLE_COMPILE_REQUIRED,
         OUTPUT_DIR,
         OUTPUT_DIR,
         Some(path_guard(OUTPUT_DIR, SupportGuardRequirement::Editable)),
     ),
-    descriptor("role-info", RIGHTS_PATH_REQUIRED, EMPTY, RIGHTS_PATH, None),
+    descriptor(
+        "role-info",
+        RIGHTS_PATH_REQUIRED,
+        OUT_FILE,
+        RIGHTS_PATH,
+        None,
+    ),
     descriptor(
         "role-validate",
         RIGHTS_PATH_REQUIRED,
-        EMPTY,
+        OUT_FILE,
         RIGHTS_PATH,
         None,
     ),

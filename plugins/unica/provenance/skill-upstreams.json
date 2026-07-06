@@ -492,8 +492,8 @@
             "tests/ci/test_unica_skills.py"
           ],
           "baselineCommit": "78b5b73fa7f835462dc4073ae7a9fc841e7c62fb",
-          "decision": "ported",
-          "decisionReason": "Ported 78b5b73 img-grid input validation into the packaged script and covered it with a static contract test."
+          "decision": "script-backed-utility-exception",
+          "decisionReason": "ADR-0007 records img-grid as a permanent script-backed utility exception for non-XML image annotation; donor validation fixes are adapted locally without creating a typed unica.* tool."
         },
         {
           "skill": "interface-edit",
@@ -1054,7 +1054,7 @@
         {
           "skill": "web-test",
           "status": "still-local-script",
-          "decision": "ported",
+          "decision": "script-backed-utility-exception",
           "baselineCommit": "78b5b73fa7f835462dc4073ae7a9fc841e7c62fb",
           "notes": "2026-07-04 78b5b73 refresh: ported donor web-test multi-select and headerless-grid fixes while preserving Unica URL/autonomous-server guidance. Scripts now share ROW_CLICK_POINT_FN/HEADERLESS_GRID_FN, expose readCloudDDScript, support selectValue(field, array), fillFields array delegation, checkbox-before-click row fill, and robust headerless read/write mapping.",
           "upstreamPaths": [
@@ -1071,7 +1071,7 @@
           "contractPaths": [
             "tests/ci/test_unica_skills.py"
           ],
-          "decisionReason": "Ported 78b5b73 web-test runtime fixes into packaged scripts and adapted the prompt-visible docs without reintroducing CLAUDE_SKILL_DIR or web-publish guidance."
+          "decisionReason": "ADR-0007 records web-test as a permanent script-backed utility exception for browser automation; donor runtime fixes are adapted locally without creating typed unica.web_test.* tools."
         }
       ],
       "lastAdaptedLocalCommit": "795505f2243cf3c93a95918467f99135af758e1b",

@@ -7,7 +7,6 @@ use crate::infrastructure::internal_adapters::{
     StandardsAdapter,
 };
 use crate::infrastructure::native_operations::NativeOperationAdapter;
-use crate::infrastructure::workspace_discovery::discover_workspace_context;
 use crate::infrastructure::workspace_services::WorkspaceServiceManager;
 use crate::infrastructure::workspace_state::WorkspaceStateRepository;
 use crate::infrastructure::AdapterOutcome;
@@ -40,7 +39,7 @@ pub(crate) struct DefaultApplicationPorts;
 
 impl ApplicationPorts for DefaultApplicationPorts {
     fn discover_workspace(&self, cwd: PathBuf) -> Result<WorkspaceContext, String> {
-        discover_workspace_context(cwd)
+        WorkspaceContext::discover(cwd)
     }
 
     fn invoke_handler(

@@ -14,10 +14,6 @@ impl<'a> WorkspacePathPolicy<'a> {
         self.resolve_workspace_path(path.into(), "write")
     }
 
-    pub fn resolve_remove(&self, path: impl Into<PathBuf>) -> Result<PathBuf, String> {
-        self.resolve_workspace_path(path.into(), "remove")
-    }
-
     fn resolve_workspace_path(&self, path: PathBuf, operation: &str) -> Result<PathBuf, String> {
         let cwd = canonical_or_lexical(&self.context.cwd);
         let raw = if path.is_absolute() {

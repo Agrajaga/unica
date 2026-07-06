@@ -17,8 +17,10 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
         required_paths = [
             ".agents/plugins/marketplace.json",
             ".github/workflows/unica-plugin-release.yml",
+            "AGENTS.md",
             "Cargo.toml",
             "Cargo.lock",
+            "README.md",
             "crates/unica-coder/**",
             "plugins/unica/**",
             "scripts/ci/**",
@@ -27,6 +29,7 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
             "tests/ci/**",
             "tests/fixtures/**",
             "docs/releases/**",
+            "docs/superpowers/plans/**",
             "spec/**",
         ]
 

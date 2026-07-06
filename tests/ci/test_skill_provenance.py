@@ -221,11 +221,10 @@ class SkillProvenanceTests(unittest.TestCase):
         target = "78b5b73fa7f835462dc4073ae7a9fc841e7c62fb"
         functional_skills = {
             "form-remove",
-            "img-grid",
             "skd-edit",
             "subsystem-compile",
-            "web-test",
         }
+        script_backed_exceptions = {"img-grid", "web-test"}
         previous_functional_skills = {"cfe-borrow", "cfe-init", "form-validate"}
         decisions = {
             item["skill"]: item
@@ -243,6 +242,12 @@ class SkillProvenanceTests(unittest.TestCase):
             self.assertEqual(decisions[skill]["decision"], "ported")
             self.assertEqual(decisions[skill]["baselineCommit"], previous_target)
 
+        for skill in script_backed_exceptions:
+            self.assertIn(skill, upstreams["cc-1c-skills"]["reviewedEntries"])
+            self.assertEqual(decisions[skill]["decision"], "script-backed-utility-exception")
+            self.assertEqual(decisions[skill]["baselineCommit"], target)
+            self.assertIn("ADR-0007", decisions[skill]["decisionReason"])
+
         self.assertIn("HEADERLESS_GRID_FN", decisions["web-test"]["evidence"])
         self.assertIn("selectValuesMulti", decisions["web-test"]["evidence"])
         self.assertIn("Default*Form", decisions["form-remove"]["evidence"])
@@ -253,7 +258,7 @@ class SkillProvenanceTests(unittest.TestCase):
         self.assertIn("MDClasses format version", decisions["cfe-init"]["evidence"])
         self.assertIn("type_error_count", decisions["form-validate"]["evidence"])
 
-        ignored_skills = set(decisions) - functional_skills - previous_functional_skills
+        ignored_skills = set(decisions) - functional_skills - script_backed_exceptions - previous_functional_skills
         self.assertIn("cf-edit", ignored_skills)
         self.assertIn("epf-bsp-init", ignored_skills)
         self.assertIn("help-add", ignored_skills)

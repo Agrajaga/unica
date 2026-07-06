@@ -39,7 +39,6 @@ pub trait ProcessRunner {
 
 #[derive(Debug, Clone)]
 pub struct BslMcpCommand {
-    pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub source_dir: PathBuf,
@@ -113,6 +112,7 @@ impl<'a> CliAdapter<'a> {
         }
     }
 
+    #[cfg(test)]
     pub fn with_runner(
         tool_name: &'static str,
         default_command: &'static [&'static str],
@@ -227,6 +227,7 @@ impl<'a> RuntimeAdapter<'a> {
         }
     }
 
+    #[cfg(test)]
     pub fn with_runner(runner: &'a dyn ProcessRunner) -> Self {
         Self { runner }
     }
@@ -329,6 +330,7 @@ impl<'a> CodeSearchAdapter<'a> {
         }
     }
 
+    #[cfg(test)]
     pub fn with_runners(
         analyzer_runner: &'a dyn ProcessRunner,
         index_runner: &'a dyn IndexRunner,
@@ -341,6 +343,7 @@ impl<'a> CodeSearchAdapter<'a> {
         }
     }
 
+    #[cfg(test)]
     pub fn with_backend_runners(
         bsl_runner: &'a dyn ProcessRunner,
         grep_runner: &'a dyn ProcessRunner,
@@ -687,6 +690,7 @@ impl<'a> CodeNavigationAdapter<'a> {
         }
     }
 
+    #[cfg(test)]
     pub fn with_runners(
         index_runner: &'a dyn IndexRunner,
         grep_runner: &'a dyn ProcessRunner,
@@ -945,6 +949,7 @@ impl<'a> BslAnalyzerMcpAdapter<'a> {
         }
     }
 
+    #[cfg(test)]
     pub fn with_runner(runner: &'a dyn BslMcpRunner) -> Self {
         Self { runner }
     }
@@ -968,13 +973,7 @@ impl<'a> BslAnalyzerMcpAdapter<'a> {
         let source_dir = resolve_source_dir(context, args)?;
         let (remote_tool, tool_args) = bsl_mcp_tool_request(tool_name, args)?;
         let bundled_tool = resolve_bundled_tool(&plugin_root, "bsl-analyzer", !dry_run)?;
-        let command = bsl_mcp_command(
-            &bundled_tool.program,
-            &source_dir,
-            context,
-            remote_tool,
-            tool_args,
-        );
+        let command = bsl_mcp_command(&source_dir, context, remote_tool, tool_args);
         let mut reported_command = vec![bundled_tool.program.display().to_string()];
         reported_command.extend(command.args.clone());
 
@@ -1829,14 +1828,12 @@ fn diagnostics_analyze_args(args: &Map<String, Value>) -> Map<String, Value> {
 }
 
 fn bsl_mcp_command(
-    program: &Path,
     source_dir: &Path,
     context: &WorkspaceContext,
     remote_tool: &'static str,
     tool_args: Value,
 ) -> BslMcpCommand {
     BslMcpCommand {
-        program: program.to_path_buf(),
         args: vec![
             "mcp".to_string(),
             "serve".to_string(),

@@ -54,6 +54,16 @@ def git_tracked_plugin_files(repo_root: Path, plugin_src: Path) -> list[str]:
     ]
 
 
+def validate_tracked_plugin_source_path(rel_path: Path) -> None:
+    if rel_path.is_absolute() or ".." in rel_path.parts:
+        raise SystemExit(f"git tracked plugin file escapes plugin root: {rel_path.as_posix()}")
+    ignored_parts = set(rel_path.parts) & SOURCE_PACKAGE_IGNORES
+    if ignored_parts:
+        raise SystemExit(
+            f"source package path is generated or ignored: {rel_path.as_posix()}"
+        )
+
+
 def copy_tracked_plugin_source(repo_root: Path, plugin_src: Path, dst: Path) -> None:
     if dst.exists():
         shutil.rmtree(dst)
@@ -61,9 +71,10 @@ def copy_tracked_plugin_source(repo_root: Path, plugin_src: Path, dst: Path) -> 
 
     for rel in git_tracked_plugin_files(repo_root, plugin_src):
         rel_path = Path(rel)
-        if rel_path.is_absolute() or ".." in rel_path.parts:
-            raise SystemExit(f"git tracked plugin file escapes plugin root: {rel}")
+        validate_tracked_plugin_source_path(rel_path)
         source = plugin_src / rel_path
+        if source.is_symlink():
+            raise SystemExit(f"tracked plugin source symlink is not allowed: {rel_path.as_posix()}")
         target = dst / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)

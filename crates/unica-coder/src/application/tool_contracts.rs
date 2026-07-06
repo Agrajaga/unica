@@ -699,15 +699,20 @@ pub fn validate_workspace_paths(
     dry_run: bool,
     context: &WorkspaceContext,
 ) -> Result<(), String> {
-    if dry_run || !tool.mutating {
+    if dry_run {
         return Ok(());
     }
     if !is_native_xml_tool(tool) && !matches!(tool.handler, ToolHandler::RuntimeAdapter) {
         return Ok(());
     }
 
+    let write_args = write_path_args(tool);
+    if write_args.is_empty() {
+        return Ok(());
+    }
+
     let policy = WorkspacePathPolicy::new(context);
-    for key in write_path_args(tool) {
+    for key in write_args {
         if let Some(Value::String(path)) = args.get(*key) {
             policy.resolve_write(path.as_str())?;
         }
