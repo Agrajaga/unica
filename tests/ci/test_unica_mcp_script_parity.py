@@ -47,6 +47,9 @@ BSP_META_ENUM_FIXTURE = "bsp/meta/Enums/ВажностьПроблемыУчет
 BSP_META_INFORMATION_REGISTER_FIXTURE = "bsp/meta/InformationRegisters/АдминистративнаяИерархия.xml"
 BSP_SUBSYSTEM_FIXTURE = "bsp/subsystems/Администрирование.xml"
 BSP_SUBSYSTEM_COMMAND_INTERFACE_FIXTURE = "bsp/subsystems/Администрирование/Ext/CommandInterface.xml"
+BSP_FORM_BUSINESS_PROCESS_FIXTURE = (
+    "bsp/forms/BusinessProcesses__Задание__ФормаБизнесПроцесса/Form.xml"
+)
 BSP_ROLE_ADMIN_RIGHTS_FIXTURE = "bsp/roles/АдминистраторСистемы/Rights.xml"
 BSP_ROLE_ADMINISTRATION_RIGHTS_FIXTURE = "bsp/roles/Администрирование/Rights.xml"
 BSP_MXL_RECEIPT_FIXTURE = (
@@ -395,6 +398,53 @@ SUCCESS_SCENARIOS = [
         fixtures=(
             FileFixture(BSP_CF_CONFIGURATION_FIXTURE, "src/Configuration.xml"),
             FileFixture(BSP_META_DOCUMENT_FIXTURE, "src/Documents/АктОбУничтоженииПерсональныхДанных.xml"),
+        ),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-cfe-borrow-business-process-form-main-attribute",
+        tool="unica.cfe.borrow",
+        skill="cfe-borrow",
+        script="cfe-borrow.py",
+        arguments={
+            "ExtensionPath": "src-cfe",
+            "ConfigPath": "src",
+            "Object": "BusinessProcess.Задание.Form.ФормаБизнесПроцесса",
+            "BorrowMainAttribute": "Form",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="cfe-init",
+                script="cfe-init.py",
+                tool="unica.cfe.init",
+                arguments={
+                    "Name": "ParityExtension",
+                    "Synonym": "Parity extension",
+                    "NamePrefix": "PE_",
+                    "OutputDir": "src-cfe",
+                    "Purpose": "Customization",
+                    "Version": "1.0.0.1",
+                    "Vendor": "Unica",
+                    "CompatibilityMode": "Version8_3_24",
+                    "NoRole": True,
+                },
+            ),
+        ),
+        fixtures=(
+            FileFixture(BSP_CF_CONFIGURATION_FIXTURE, "src/Configuration.xml"),
+            FileFixture(
+                "cfe-borrow-bsp-form/BusinessProcesses/Задание.xml",
+                "src/BusinessProcesses/Задание.xml",
+            ),
+            FileFixture(
+                "cfe-borrow-bsp-form/BusinessProcesses/Задание/Forms/ФормаБизнесПроцесса.xml",
+                "src/BusinessProcesses/Задание/Forms/ФормаБизнесПроцесса.xml",
+            ),
+            FileFixture(
+                BSP_FORM_BUSINESS_PROCESS_FIXTURE,
+                "src/BusinessProcesses/Задание/Forms/ФормаБизнесПроцесса/Ext/Form.xml",
+            ),
         ),
         expect_ok=True,
         compare_files=True,
