@@ -971,11 +971,11 @@ pub(crate) fn decompile_mxl(
             }
         }
 
-        let mut col_width_map = BTreeMap::<String, i64>::new();
+        let mut col_width_map = BTreeMap::<i64, i64>::new();
         for (col0, fmt_idx) in &col_format_indices {
             if let Some(format) = mxl_decompile_format(&raw_formats, *fmt_idx) {
                 if format.width > 0 && format.width != default_width {
-                    col_width_map.insert((*col0 + 1).to_string(), format.width);
+                    col_width_map.insert(*col0 + 1, format.width);
                 }
             }
         }
@@ -1695,43 +1695,43 @@ pub(crate) fn mxl_decompile_compress_empty_rows(rows: Vec<OrderedJson>) -> Vec<O
 }
 
 pub(crate) fn mxl_decompile_compress_widths(
-    widths: &BTreeMap<String, i64>,
+    widths: &BTreeMap<i64, i64>,
 ) -> Vec<(String, OrderedJson)> {
-    let mut by_width = Vec::<(i64, Vec<String>)>::new();
+    let mut by_width = Vec::<(i64, Vec<i64>)>::new();
     for (col, width) in widths {
         if let Some((_, cols)) = by_width.iter_mut().find(|(existing, _)| existing == width) {
-            cols.push(col.clone());
+            cols.push(*col);
         } else {
-            by_width.push((*width, vec![col.clone()]));
+            by_width.push((*width, vec![*col]));
         }
     }
 
     let mut result = Vec::<(String, OrderedJson)>::new();
     for (width, mut cols) in by_width {
-        cols.sort_by_key(|col| col.parse::<i64>().unwrap_or(0));
+        cols.sort();
         if cols.is_empty() {
             continue;
         }
-        let mut range_start = cols[0].clone();
-        let mut range_prev = cols[0].clone();
+        let mut range_start = cols[0];
+        let mut range_prev = cols[0];
         for col in cols.iter().skip(1) {
-            if col.parse::<i64>().unwrap_or(0) == range_prev.parse::<i64>().unwrap_or(0) + 1 {
-                range_prev = col.clone();
+            if *col == range_prev + 1 {
+                range_prev = *col;
             } else {
                 if range_start == range_prev {
-                    result.push((range_start.clone(), OrderedJson::Int(width)));
+                    result.push((range_start.to_string(), OrderedJson::Int(width)));
                 } else {
                     result.push((
                         format!("{range_start}-{range_prev}"),
                         OrderedJson::Int(width),
                     ));
                 }
-                range_start = col.clone();
-                range_prev = col.clone();
+                range_start = *col;
+                range_prev = *col;
             }
         }
         if range_start == range_prev {
-            result.push((range_start, OrderedJson::Int(width)));
+            result.push((range_start.to_string(), OrderedJson::Int(width)));
         } else {
             result.push((
                 format!("{range_start}-{range_prev}"),

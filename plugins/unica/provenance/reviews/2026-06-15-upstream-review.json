@@ -218,7 +218,7 @@
           "skill": "form-validate",
           "decision": "ported",
           "baselineCommit": "cbde49efdaeec190432fdf4a53201a87e83c69de",
-          "evidence": "Ported donor v1.8 behavior: all binding path tags are validated with existing skip rules preserved, and the type_error_count bug is fixed in both legacy adapter and parity fixture. Unica intentionally adapts bare Type values from donor warning to validation error because such forms fail platform XDTO import."
+          "evidence": "Ported donor v1.8 behavior: all binding path tags are validated with existing skip rules preserved, and the type_error_count bug is fixed in both the native Rust handler and parity fixture. Unica intentionally adapts bare Type values from donor warning to validation error because such forms fail platform XDTO import."
         },
         {
           "skill": "help-add",
@@ -563,7 +563,7 @@
       ],
       "decision": "ported",
       "baselineCommit": "ae8241237753850307d94b10df93e5293e29dc74",
-      "notes": "Ported SKD DSL/reference updates, Raw query export, value-list/availableValue parameter editing, @once patch-query, and donor-compatible SKD scripts behind typed unica.skd.* hidden legacy adapters; no donor URLs or raw script routing were added to prompt-visible skills."
+      "notes": "Ported SKD DSL/reference updates, Raw query export, value-list/availableValue parameter editing, and @once patch-query into native Rust runtime behind typed unica.skd.* tools; donor-compatible Python scripts remain only as parity reference fixtures under tests/fixtures/unica_mcp_script_parity/reference_skills. No donor URLs or raw script routing were added to prompt-visible skills."
     },
     {
       "id": "cc-form-dsl-and-tools",
@@ -579,7 +579,7 @@
       ],
       "decision": "ported",
       "baselineCommit": "ae8241237753850307d94b10df93e5293e29dc74",
-      "notes": "Ported Form DSL/reference updates and donor-compatible form add/compile/edit/info/remove/validate scripts behind typed unica.form.* hidden legacy adapters; prompt-visible skills route only through MCP and references use Unica wording. form-validate intentionally escalates bare Type values from donor warning to error to match platform XDTO import behavior."
+      "notes": "Ported Form DSL/reference updates into native Rust runtime behind typed unica.form.* tools; donor-compatible Python scripts remain only as parity reference fixtures under tests/fixtures/unica_mcp_script_parity/reference_skills. Prompt-visible skills route only through MCP and references use Unica wording. form-validate intentionally escalates bare Type values from donor warning to error to match platform XDTO import behavior."
     },
     {
       "id": "cc-metadata-presentations-and-choice-history",

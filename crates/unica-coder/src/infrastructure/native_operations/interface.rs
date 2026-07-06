@@ -75,6 +75,7 @@ pub(crate) fn edit_interface(
         } else {
             String::new()
         };
+        text = lxml_parser_normalized_text(&text);
         if text.is_empty() {
             text = emit_empty_command_interface_document(&format_version);
         }

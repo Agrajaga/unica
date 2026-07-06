@@ -176,10 +176,13 @@ def write_manifest(plugin_dir: Path, grouped_tools: dict[str, dict], lock_file: 
 def write_packaged_mcp_launcher(plugin_dir: Path, grouped_tools: dict[str, dict]) -> None:
     unica = grouped_tools.get("unica")
     if not unica:
-        return
+        raise SystemExit("packaged Unica plugin requires a bundled unica binary")
     binaries = unica.get("binaries", {})
     if len(binaries) != 1:
-        return
+        raise SystemExit(
+            "packaged Unica launcher requires exactly one target-specific unica binary; "
+            f"got {len(binaries)} targets: {', '.join(sorted(binaries))}"
+        )
 
     _target, binary = next(iter(binaries.items()))
     binary_path = binary["binaryPath"]

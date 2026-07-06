@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import stat
@@ -78,6 +79,47 @@ class PackageUnicaPluginTests(unittest.TestCase):
         )
 
         self.assertEqual(wrappers, [])
+
+    def test_parity_fixtures_do_not_contain_runtime_cache_artifacts(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        fixture_root = repo_root / "tests" / "fixtures" / "unica_mcp_script_parity"
+        forbidden = []
+        for path in fixture_root.rglob("*"):
+            rel = path.relative_to(fixture_root).as_posix()
+            if "/.build/" in f"/{rel}/" or rel.endswith((".db", ".db-wal", ".db-shm")):
+                forbidden.append(rel)
+        self.assertEqual(forbidden, [])
+
+    def test_bsp_parity_manifest_matches_committed_fixture_files(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        bsp_root = repo_root / "tests" / "fixtures" / "unica_mcp_script_parity" / "bsp"
+        manifest = json.loads((bsp_root / "manifest.json").read_text(encoding="utf-8"))
+        manifest_targets = {entry["target"] for entry in manifest["files"]}
+        fixture_files = {
+            path.relative_to(bsp_root).as_posix()
+            for path in bsp_root.rglob("*")
+            if path.is_file() and path.name != "manifest.json"
+        }
+        self.assertEqual(fixture_files, manifest_targets)
+
+    def test_bsp_parity_manifest_hashes_match_committed_fixture_files(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        bsp_root = repo_root / "tests" / "fixtures" / "unica_mcp_script_parity" / "bsp"
+        manifest = json.loads((bsp_root / "manifest.json").read_text(encoding="utf-8"))
+
+        mismatches = []
+        for entry in manifest["files"]:
+            path = bsp_root / entry["target"]
+            payload = path.read_bytes()
+            actual = {
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            expected = {"size": entry["size"], "sha256": entry["sha256"]}
+            if actual != expected:
+                mismatches.append({"target": entry["target"], "expected": expected, "actual": actual})
+
+        self.assertEqual(mismatches, [])
 
     def test_unica_coder_has_no_runtime_operation_script_fallback(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -213,6 +255,46 @@ class PackageUnicaPluginTests(unittest.TestCase):
         self.assertEqual(server["cwd"], ".")
         self.assertNotIn("bash", server["command"])
         self.assertNotIn("run-unica.sh", json.dumps(server))
+
+    def test_packaged_mcp_requires_bundled_unica_binary(self) -> None:
+        module = load_package_module()
+        repo_root = Path(__file__).resolve().parents[2]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_dir = Path(tmp) / "plugins" / "unica"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / ".mcp.json").write_text(
+                (repo_root / "plugins" / "unica" / ".mcp.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(SystemExit, "requires a bundled unica binary"):
+                module.write_packaged_mcp_launcher(plugin_dir, {})
+
+    def test_packaged_mcp_rejects_ambiguous_unica_binary_targets(self) -> None:
+        module = load_package_module()
+        repo_root = Path(__file__).resolve().parents[2]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_dir = Path(tmp) / "plugins" / "unica"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / ".mcp.json").write_text(
+                (repo_root / "plugins" / "unica" / ".mcp.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(SystemExit, "exactly one target-specific unica binary"):
+                module.write_packaged_mcp_launcher(
+                    plugin_dir,
+                    {
+                        "unica": {
+                            "binaries": {
+                                "darwin-arm64": {"binaryPath": "bin/darwin-arm64/unica"},
+                                "linux-x64": {"binaryPath": "bin/linux-x64/unica"},
+                            }
+                        }
+                    },
+                )
 
     def write_bundle(self, root: Path, target: str, module) -> Path:
         bundle = root / f"unica-tools-{target}"

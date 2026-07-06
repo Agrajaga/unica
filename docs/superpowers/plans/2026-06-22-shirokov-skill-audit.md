@@ -56,7 +56,7 @@ batch.
 
 ## Recommended Next Batches
 
-1. Commit the support-state info batch: shared parser, hidden legacy parity for
+1. Commit the support-state info batch: shared parser, native runtime parity for
    `form-info`/`skd-info`, skill docs, and updated provenance.
 2. Add support-guard for mutating tools, but only after deciding the Unica escape
    hatch: `deny`, `warn`, `off`, and whether to implement `unica.support.edit`.

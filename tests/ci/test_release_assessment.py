@@ -19,6 +19,16 @@ def load_assessment_module():
     return module
 
 
+def load_bsp_harvest_module():
+    module_path = Path(__file__).resolve().parents[2] / "scripts" / "ci" / "harvest-bsp-parity-fixtures.py"
+    spec = importlib.util.spec_from_file_location("harvest_bsp_parity_fixtures", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class ReleaseAssessmentTests(unittest.TestCase):
     def write_fake_mcp(self, path: Path) -> None:
         path.write_text(
@@ -196,6 +206,208 @@ for raw in sys.stdin:
 
         self.assertNotEqual(module.BSP_REF, "master")
         self.assertEqual(module.BSP_REF, "3.2.1.446")
+
+    def test_bsp_parity_harvest_selects_text_fixtures_and_writes_manifest(self) -> None:
+        module = load_bsp_harvest_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bsp = root / "bsp"
+            src = bsp / "src" / "cf"
+            (src / "Catalogs" / "Партнеры" / "Forms" / "ФормаЭлемента" / "Ext").mkdir(parents=True)
+            (
+                src
+                / "Reports"
+                / "ОтчетПродажи"
+                / "Templates"
+                / "ОсновнаяСхемаКомпоновкиДанных"
+                / "Ext"
+            ).mkdir(parents=True)
+            (src / "Roles" / "ПолныеПрава" / "Ext").mkdir(parents=True)
+            (src / ".build").mkdir(parents=True)
+            (src / ".build" / "bsl-search.db").write_bytes(b"cache")
+            (src / "Configuration.xml").write_text("<MetaDataObject/>", encoding="utf-8")
+            (src / "Catalogs" / "Партнеры.xml").write_text("<MetaDataObject/>", encoding="utf-8")
+            (src / "Catalogs" / "Партнеры" / "Forms" / "ФормаЭлемента" / "Ext" / "Form.xml").write_text(
+                "<Form/>", encoding="utf-8"
+            )
+            (
+                src
+                / "Reports"
+                / "ОтчетПродажи"
+                / "Templates"
+                / "ОсновнаяСхемаКомпоновкиДанных"
+                / "Ext"
+                / "Template.xml"
+            ).write_text("<DataCompositionSchema/>", encoding="utf-8")
+            (src / "Roles" / "ПолныеПрава" / "Ext" / "Rights.xml").write_text("<Rights/>", encoding="utf-8")
+
+            out = root / "fixtures"
+            manifest = module.harvest(bsp_root=bsp, out_root=out, bsp_ref="test-ref", bsp_commit="abc123")
+
+            self.assertEqual(manifest["bsp"]["ref"], "test-ref")
+            self.assertEqual(manifest["bsp"]["commit"], "abc123")
+            self.assertEqual(json.loads((out / "manifest.json").read_text(encoding="utf-8")), manifest)
+            self.assertEqual(
+                manifest["files"],
+                sorted(manifest["files"], key=lambda entry: (entry["target"], entry["source"])),
+            )
+            self.assertTrue(
+                all({"category", "sha256", "size", "source", "target"} <= set(entry) for entry in manifest["files"])
+            )
+            self.assertEqual(
+                module.harvest(bsp_root=bsp, out_root=out, bsp_ref="test-ref", bsp_commit="abc123"),
+                manifest,
+            )
+            harvested = sorted(path.relative_to(out).as_posix() for path in out.rglob("*") if path.is_file())
+            self.assertIn("manifest.json", harvested)
+            self.assertIn("cf/Configuration.xml", harvested)
+            self.assertTrue(any(path.startswith("forms/") and path.endswith("/Form.xml") for path in harvested))
+            self.assertTrue(any(path.startswith("skd/") and path.endswith("/Template.xml") for path in harvested))
+            self.assertTrue(any(path.startswith("roles/") and path.endswith("/Rights.xml") for path in harvested))
+            self.assertFalse(any(".build" in path or path.endswith(".db") for path in harvested))
+
+    def test_bsp_parity_harvest_rejects_dangerous_out_root_and_leaves_sentinel(self) -> None:
+        module = load_bsp_harvest_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bsp = root / "bsp"
+            src = bsp / "src" / "cf"
+            src.mkdir(parents=True)
+            (src / "Configuration.xml").write_text("<MetaDataObject/>", encoding="utf-8")
+            sentinel = bsp / "sentinel.txt"
+            sentinel.write_text("keep", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                module.harvest(bsp_root=bsp, out_root=bsp, bsp_ref="test-ref", bsp_commit="abc123")
+
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+
+            symlink_target = root / "symlink-target"
+            symlink_target.mkdir()
+            symlink_sentinel = symlink_target / "sentinel.txt"
+            symlink_sentinel.write_text("keep", encoding="utf-8")
+            symlink_out = root / "out-link"
+            try:
+                symlink_out.symlink_to(symlink_target, target_is_directory=True)
+            except (NotImplementedError, OSError):
+                return
+
+            with self.assertRaises(ValueError):
+                module.harvest(bsp_root=bsp, out_root=symlink_out, bsp_ref="test-ref", bsp_commit="abc123")
+
+            self.assertEqual(symlink_sentinel.read_text(encoding="utf-8"), "keep")
+
+    def test_bsp_parity_harvest_rejects_existing_unmarked_directory(self) -> None:
+        module = load_bsp_harvest_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bsp = root / "bsp"
+            src = bsp / "src" / "cf"
+            src.mkdir(parents=True)
+            (src / "Configuration.xml").write_text("<MetaDataObject/>", encoding="utf-8")
+            out = root / "fixtures"
+            out.mkdir()
+            sentinel = out / "sentinel.txt"
+            sentinel.write_text("keep", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "without BSP harvest manifest marker"):
+                module.harvest(bsp_root=bsp, out_root=out, bsp_ref="test-ref", bsp_commit="abc123")
+
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+
+    def test_bsp_parity_harvest_rejects_parity_fixture_parent(self) -> None:
+        module = load_bsp_harvest_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bsp = root / "bsp"
+            src = bsp / "src" / "cf"
+            src.mkdir(parents=True)
+            (src / "Configuration.xml").write_text("<MetaDataObject/>", encoding="utf-8")
+            fixture_parent = root / "tests" / "fixtures" / "unica_mcp_script_parity"
+            fixture_parent.mkdir(parents=True)
+            sentinel = fixture_parent / "existing-fixture.xml"
+            sentinel.write_text("<Fixture/>", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "without BSP harvest manifest marker"):
+                module.harvest(
+                    bsp_root=bsp,
+                    out_root=fixture_parent,
+                    bsp_ref="test-ref",
+                    bsp_commit="abc123",
+                )
+
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "<Fixture/>")
+
+    def test_bsp_parity_harvest_skips_symlinked_source_file(self) -> None:
+        module = load_bsp_harvest_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bsp = root / "bsp"
+            src = bsp / "src" / "cf"
+            catalogs = src / "Catalogs"
+            catalogs.mkdir(parents=True)
+            external = root / "external.xml"
+            external.write_text("<MetaDataObject/>", encoding="utf-8")
+            try:
+                (catalogs / "Linked.xml").symlink_to(external)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink not available: {exc}")
+
+            out = root / "fixtures"
+            manifest = module.harvest(bsp_root=bsp, out_root=out, bsp_ref="test-ref", bsp_commit="abc123")
+
+            targets = {entry["target"] for entry in manifest["files"]}
+            self.assertNotIn("meta/Catalogs/Linked.xml", targets)
+            self.assertFalse((out / "meta" / "Catalogs" / "Linked.xml").exists())
+
+    def test_bsp_parity_harvest_includes_common_module_descriptor_and_bsl(self) -> None:
+        module = load_bsp_harvest_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bsp = root / "bsp"
+            src = bsp / "src" / "cf"
+            module_dir = src / "CommonModules" / "Demo" / "Ext"
+            module_dir.mkdir(parents=True)
+            (src / "CommonModules" / "Demo.xml").write_text("<MetaDataObject/>", encoding="utf-8")
+            (module_dir / "Module.bsl").write_text("Процедура Demo()\nКонецПроцедуры\n", encoding="utf-8")
+
+            out = root / "fixtures"
+            manifest = module.harvest(bsp_root=bsp, out_root=out, bsp_ref="test-ref", bsp_commit="abc123")
+
+            targets = {entry["target"] for entry in manifest["files"]}
+            self.assertIn("meta/CommonModules/Demo.xml", targets)
+            self.assertIn("meta/CommonModules/Demo/Module.bsl", targets)
+            self.assertEqual(
+                (out / "meta" / "CommonModules" / "Demo" / "Module.bsl").read_text(encoding="utf-8"),
+                "Процедура Demo()\nКонецПроцедуры\n",
+            )
+
+    def test_bsp_parity_harvest_skips_non_utf8_and_large_fixture_candidates(self) -> None:
+        module = load_bsp_harvest_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bsp = root / "bsp"
+            src = bsp / "src" / "cf"
+            (src / "Catalogs").mkdir(parents=True)
+            (src / "Documents").mkdir(parents=True)
+            (src / "Catalogs" / "BadEncoding.xml").write_bytes(b"\xff\xfe\x00")
+            (src / "Documents" / "Huge.xml").write_text("x" * (256 * 1024 + 1), encoding="utf-8")
+
+            out = root / "fixtures"
+            manifest = module.harvest(bsp_root=bsp, out_root=out, bsp_ref="test-ref", bsp_commit="abc123")
+
+            targets = {entry["target"] for entry in manifest["files"]}
+            self.assertNotIn("meta/Catalogs/BadEncoding.xml", targets)
+            self.assertNotIn("meta/Documents/Huge.xml", targets)
+            self.assertFalse((out / "meta" / "Catalogs" / "BadEncoding.xml").exists())
+            self.assertFalse((out / "meta" / "Documents" / "Huge.xml").exists())
 
     def test_versioned_pages_copy_preserves_existing_versions_and_latest(self) -> None:
         module = load_assessment_module()

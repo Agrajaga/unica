@@ -1191,6 +1191,10 @@ pub(crate) fn lxml_tree_serialized_text(text: &str) -> String {
     output
 }
 
+pub(crate) fn lxml_parser_normalized_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 pub(crate) fn unescape_xml(value: &str) -> String {
     value
         .replace("&quot;", "\"")

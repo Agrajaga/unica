@@ -1384,8 +1384,8 @@ mod tests {
             "unica.role.compile",
             "unica.role.info",
             "unica.role.validate",
-            "unica.support.edit",
         ];
+        const REPO_OWNED_NATIVE_TOOLS: &[&str] = &["unica.support.edit"];
 
         for tool in tools() {
             if !tool.name.starts_with("unica.cf.")
@@ -1410,8 +1410,9 @@ mod tests {
             match tool.handler {
                 ToolHandler::NativeOperation { operation, .. } => {
                     assert!(
-                        PARITY_COVERED_TOOLS.contains(&tool.name),
-                        "{} routes to native operation {} without a parity fixture proving script-equivalent behavior",
+                        PARITY_COVERED_TOOLS.contains(&tool.name)
+                            || REPO_OWNED_NATIVE_TOOLS.contains(&tool.name),
+                        "{} routes to native operation {} without a parity fixture or repo-owned native contract exception",
                         tool.name,
                         operation
                     );
@@ -1614,6 +1615,52 @@ mod tests {
         assert!(result.summary.contains("support guard"));
         assert!(result.errors.join("\n").contains("на замке"));
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cf_edit_normalizes_crlf_before_lxml_compatible_write() {
+        let root = std::env::temp_dir().join(format!("unica-cf-crlf-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        let src = workspace.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        )
+        .unwrap();
+        let config_path = src.join("Configuration.xml");
+        let crlf_config = support_test_configuration_xml("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            .replace('\n', "\r\n");
+        assert!(crlf_config.contains("\r\n"));
+        std::fs::write(&config_path, crlf_config).unwrap();
+
+        let mut args = Map::new();
+        args.insert(
+            "cwd".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        args.insert("dryRun".to_string(), Value::Bool(false));
+        args.insert("ConfigPath".to_string(), Value::String("src".to_string()));
+        args.insert(
+            "Operation".to_string(),
+            Value::String("modify-property".to_string()),
+        );
+        args.insert(
+            "Value".to_string(),
+            Value::String("Version=2.0".to_string()),
+        );
+        args.insert("NoValidate".to_string(), Value::Bool(true));
+
+        let result = UnicaApplication::new()
+            .call_tool("unica.cf.edit", &args)
+            .unwrap();
+
+        assert!(result.ok, "{result:?}");
+        let after = std::fs::read_to_string(&config_path).unwrap();
+        assert!(after.contains("<Version>2.0</Version>"));
+        assert!(!after.contains("&#13;"));
 
         let _ = std::fs::remove_dir_all(root);
     }

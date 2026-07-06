@@ -18,6 +18,45 @@ PLUGIN_ROOT = REPO_ROOT / "plugins" / "unica"
 SKILLS_ROOT = PLUGIN_ROOT / "skills"
 FIXTURES_ROOT = REPO_ROOT / "tests" / "fixtures" / "unica_mcp_script_parity"
 REFERENCE_SKILLS_ROOT = FIXTURES_ROOT / "reference_skills"
+BSP_SKD_QUERY_FIXTURE = (
+    "bsp/skd/Catalogs__ПравилаОбработкиЭлектроннойПочты__"
+    "СхемаПравилаОбработкиЭлектроннойПочты/Template.xml"
+)
+BSP_SKD_UNION_FIXTURE = (
+    "bsp/skd/DataProcessors__ВыгрузкаЗагрузкаEnterpriseData__"
+    "СхемаКомпоновкиДанных/Template.xml"
+)
+BSP_SKD_OBJECT_FIXTURE = (
+    "bsp/skd/DataProcessors__ЗаменаИОбъединениеЭлементов__"
+    "ОсновнаяСхемаКомпоновкиДанных/Template.xml"
+)
+BSP_CF_CONFIGURATION_FIXTURE = "bsp/cf/Configuration.xml"
+BSP_META_CATALOG_FIXTURE = "bsp/meta/Catalogs/Валюты.xml"
+BSP_META_DOCUMENT_FIXTURE = "bsp/meta/Documents/АктОбУничтоженииПерсональныхДанных.xml"
+BSP_META_REPORT_FIXTURE = "bsp/meta/Reports/АнализВерсийОбъектов.xml"
+BSP_META_REPORT_TEMPLATE_FIXTURE = (
+    "bsp/meta/Reports/АнализВерсийОбъектов/Templates/ОсновнаяСхемаКомпоновкиДанных.xml"
+)
+BSP_META_REPORT_TEMPLATE_CONTENT_FIXTURE = (
+    "bsp/meta/Reports/АнализВерсийОбъектов/Templates/"
+    "ОсновнаяСхемаКомпоновкиДанных/Ext/Template.xml"
+)
+BSP_META_COMMON_MODULE_FIXTURE = "bsp/meta/CommonModules/GoogleПереводчик.xml"
+BSP_META_COMMON_MODULE_BSL_FIXTURE = "bsp/meta/CommonModules/GoogleПереводчик/Module.bsl"
+BSP_META_ENUM_FIXTURE = "bsp/meta/Enums/ВажностьПроблемыУчета.xml"
+BSP_META_INFORMATION_REGISTER_FIXTURE = "bsp/meta/InformationRegisters/АдминистративнаяИерархия.xml"
+BSP_SUBSYSTEM_FIXTURE = "bsp/subsystems/Администрирование.xml"
+BSP_SUBSYSTEM_COMMAND_INTERFACE_FIXTURE = "bsp/subsystems/Администрирование/Ext/CommandInterface.xml"
+BSP_ROLE_ADMIN_RIGHTS_FIXTURE = "bsp/roles/АдминистраторСистемы/Rights.xml"
+BSP_ROLE_ADMINISTRATION_RIGHTS_FIXTURE = "bsp/roles/Администрирование/Rights.xml"
+BSP_MXL_RECEIPT_FIXTURE = (
+    "bsp/mxl/Catalogs__МашиночитаемыеДоверенности__"
+    "ПФ_MXL_Квитанция/Template.xml"
+)
+BSP_MXL_POWER_OF_ATTORNEY_FIXTURE = (
+    "bsp/mxl/Catalogs__МашиночитаемыеДоверенности__"
+    "ПФ_MXL_Доверенность/Template.xml"
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -25,6 +64,7 @@ class SetupStep:
     skill: str
     script: str
     arguments: dict[str, Any]
+    tool: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -251,6 +291,76 @@ SUCCESS_SCENARIOS = [
         compare_files=True,
     ),
     ParityScenario(
+        name="bsp-cfe-borrow-real-catalog-object",
+        tool="unica.cfe.borrow",
+        skill="cfe-borrow",
+        script="cfe-borrow.py",
+        arguments={
+            "ExtensionPath": "src-cfe",
+            "ConfigPath": "src",
+            "Object": "Catalog.Валюты",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="cfe-init",
+                script="cfe-init.py",
+                tool="unica.cfe.init",
+                arguments={
+                    "Name": "ParityExtension",
+                    "Synonym": "Parity extension",
+                    "NamePrefix": "PE_",
+                    "OutputDir": "src-cfe",
+                    "Purpose": "Customization",
+                    "Version": "1.0.0.1",
+                    "Vendor": "Unica",
+                    "CompatibilityMode": "Version8_3_24",
+                    "NoRole": True,
+                },
+            ),
+        ),
+        fixtures=(
+            FileFixture(BSP_CF_CONFIGURATION_FIXTURE, "src/Configuration.xml"),
+            FileFixture(BSP_META_CATALOG_FIXTURE, "src/Catalogs/Валюты.xml"),
+        ),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-cfe-borrow-real-document-object",
+        tool="unica.cfe.borrow",
+        skill="cfe-borrow",
+        script="cfe-borrow.py",
+        arguments={
+            "ExtensionPath": "src-cfe",
+            "ConfigPath": "src",
+            "Object": "Document.АктОбУничтоженииПерсональныхДанных",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="cfe-init",
+                script="cfe-init.py",
+                tool="unica.cfe.init",
+                arguments={
+                    "Name": "ParityExtension",
+                    "Synonym": "Parity extension",
+                    "NamePrefix": "PE_",
+                    "OutputDir": "src-cfe",
+                    "Purpose": "Customization",
+                    "Version": "1.0.0.1",
+                    "Vendor": "Unica",
+                    "CompatibilityMode": "Version8_3_24",
+                    "NoRole": True,
+                },
+            ),
+        ),
+        fixtures=(
+            FileFixture(BSP_CF_CONFIGURATION_FIXTURE, "src/Configuration.xml"),
+            FileFixture(BSP_META_DOCUMENT_FIXTURE, "src/Documents/АктОбУничтоженииПерсональныхДанных.xml"),
+        ),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
         name="cfe-diff-empty-extension-mode-a",
         tool="unica.cfe.diff",
         skill="cfe-diff",
@@ -297,6 +407,48 @@ SUCCESS_SCENARIOS = [
         compare_files=True,
     ),
     ParityScenario(
+        name="cf-info-full-with-interface-ext",
+        tool="unica.cf.info",
+        skill="cf-info",
+        script="cf-info.py",
+        arguments={
+            "ConfigPath": "src/Configuration.xml",
+            "Mode": "full",
+            "Limit": 120,
+        },
+        fixtures=(
+            FileFixture("cf-info/Configuration.xml", "src/Configuration.xml"),
+            FileFixture(
+                "cf-info/Ext/ClientApplicationInterface.xml",
+                "src/Ext/ClientApplicationInterface.xml",
+            ),
+            FileFixture(
+                "cf-info/Ext/HomePageWorkArea.xml",
+                "src/Ext/HomePageWorkArea.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="cf-info-home-page-section",
+        tool="unica.cf.info",
+        skill="cf-info",
+        script="cf-info.py",
+        arguments={
+            "ConfigPath": "src/Configuration.xml",
+            "Section": "home-page",
+            "Limit": 120,
+        },
+        fixtures=(
+            FileFixture("cf-info/Configuration.xml", "src/Configuration.xml"),
+            FileFixture(
+                "cf-info/Ext/HomePageWorkArea.xml",
+                "src/Ext/HomePageWorkArea.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
         name="cf-validate-detailed-outfile",
         tool="unica.cf.validate",
         skill="cf-validate",
@@ -312,6 +464,45 @@ SUCCESS_SCENARIOS = [
         ),
         expect_ok=True,
         compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-cf-info-brief",
+        tool="unica.cf.info",
+        skill="cf-info",
+        script="cf-info.py",
+        arguments={
+            "ConfigPath": "src/Configuration.xml",
+            "Mode": "brief",
+            "Limit": 200,
+        },
+        fixtures=(FileFixture(BSP_CF_CONFIGURATION_FIXTURE, "src/Configuration.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-cf-info-full",
+        tool="unica.cf.info",
+        skill="cf-info",
+        script="cf-info.py",
+        arguments={
+            "ConfigPath": "src/Configuration.xml",
+            "Mode": "full",
+            "Limit": 200,
+        },
+        fixtures=(FileFixture(BSP_CF_CONFIGURATION_FIXTURE, "src/Configuration.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-cf-validate-detailed",
+        tool="unica.cf.validate",
+        skill="cf-validate",
+        script="cf-validate.py",
+        arguments={
+            "ConfigPath": "src/Configuration.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(FileFixture(BSP_CF_CONFIGURATION_FIXTURE, "src/Configuration.xml"),),
+        expect_ok=True,
     ),
     ParityScenario(
         name="cf-edit-definition-file-all-ops",
@@ -417,6 +608,215 @@ SUCCESS_SCENARIOS = [
         compare_files=True,
     ),
     ParityScenario(
+        name="help-add-catalog",
+        tool="unica.help.add",
+        skill="help-add",
+        script="add-help.py",
+        arguments={
+            "ObjectName": "Catalogs/ParityCatalog",
+            "SrcDir": "src",
+            "Lang": "ru",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="meta-compile",
+                script="meta-compile.py",
+                arguments={"JsonPath": "fixtures/meta-catalog.json", "OutputDir": "src"},
+            ),
+        ),
+        fixtures=(FileFixture("meta-catalog.json", "fixtures/meta-catalog.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-info-catalog-full",
+        tool="unica.meta.info",
+        skill="meta-info",
+        script="meta-info.py",
+        arguments={
+            "ObjectPath": "src/Catalogs/Валюты.xml",
+            "Mode": "full",
+            "Limit": 200,
+        },
+        fixtures=(FileFixture(BSP_META_CATALOG_FIXTURE, "src/Catalogs/Валюты.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-validate-catalog-detailed",
+        tool="unica.meta.validate",
+        skill="meta-validate",
+        script="meta-validate.py",
+        arguments={
+            "ObjectPath": "src/Catalogs/Валюты.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(FileFixture(BSP_META_CATALOG_FIXTURE, "src/Catalogs/Валюты.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-info-document-full",
+        tool="unica.meta.info",
+        skill="meta-info",
+        script="meta-info.py",
+        arguments={
+            "ObjectPath": "src/Documents/АктОбУничтоженииПерсональныхДанных.xml",
+            "Mode": "full",
+            "Limit": 200,
+        },
+        fixtures=(
+            FileFixture(
+                BSP_META_DOCUMENT_FIXTURE,
+                "src/Documents/АктОбУничтоженииПерсональныхДанных.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-validate-document-detailed",
+        tool="unica.meta.validate",
+        skill="meta-validate",
+        script="meta-validate.py",
+        arguments={
+            "ObjectPath": "src/Documents/АктОбУничтоженииПерсональныхДанных.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(
+            FileFixture(
+                BSP_META_DOCUMENT_FIXTURE,
+                "src/Documents/АктОбУничтоженииПерсональныхДанных.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-info-report-full",
+        tool="unica.meta.info",
+        skill="meta-info",
+        script="meta-info.py",
+        arguments={
+            "ObjectPath": "src/Reports/АнализВерсийОбъектов.xml",
+            "Mode": "full",
+            "Limit": 200,
+        },
+        fixtures=(FileFixture(BSP_META_REPORT_FIXTURE, "src/Reports/АнализВерсийОбъектов.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-validate-report-detailed",
+        tool="unica.meta.validate",
+        skill="meta-validate",
+        script="meta-validate.py",
+        arguments={
+            "ObjectPath": "src/Reports/АнализВерсийОбъектов.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(FileFixture(BSP_META_REPORT_FIXTURE, "src/Reports/АнализВерсийОбъектов.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-info-common-module-full",
+        tool="unica.meta.info",
+        skill="meta-info",
+        script="meta-info.py",
+        arguments={
+            "ObjectPath": "src/CommonModules/GoogleПереводчик.xml",
+            "Mode": "full",
+            "Limit": 200,
+        },
+        fixtures=(
+            FileFixture(BSP_META_COMMON_MODULE_FIXTURE, "src/CommonModules/GoogleПереводчик.xml"),
+            FileFixture(
+                BSP_META_COMMON_MODULE_BSL_FIXTURE,
+                "src/CommonModules/GoogleПереводчик/Ext/Module.bsl",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-validate-common-module-detailed",
+        tool="unica.meta.validate",
+        skill="meta-validate",
+        script="meta-validate.py",
+        arguments={
+            "ObjectPath": "src/CommonModules/GoogleПереводчик.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(
+            FileFixture(BSP_META_COMMON_MODULE_FIXTURE, "src/CommonModules/GoogleПереводчик.xml"),
+            FileFixture(
+                BSP_META_COMMON_MODULE_BSL_FIXTURE,
+                "src/CommonModules/GoogleПереводчик/Ext/Module.bsl",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-info-enum-full",
+        tool="unica.meta.info",
+        skill="meta-info",
+        script="meta-info.py",
+        arguments={
+            "ObjectPath": "src/Enums/ВажностьПроблемыУчета.xml",
+            "Mode": "full",
+            "Limit": 200,
+        },
+        fixtures=(FileFixture(BSP_META_ENUM_FIXTURE, "src/Enums/ВажностьПроблемыУчета.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-validate-enum-detailed",
+        tool="unica.meta.validate",
+        skill="meta-validate",
+        script="meta-validate.py",
+        arguments={
+            "ObjectPath": "src/Enums/ВажностьПроблемыУчета.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(FileFixture(BSP_META_ENUM_FIXTURE, "src/Enums/ВажностьПроблемыУчета.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-info-information-register-full",
+        tool="unica.meta.info",
+        skill="meta-info",
+        script="meta-info.py",
+        arguments={
+            "ObjectPath": "src/InformationRegisters/АдминистративнаяИерархия.xml",
+            "Mode": "full",
+            "Limit": 200,
+        },
+        fixtures=(
+            FileFixture(
+                BSP_META_INFORMATION_REGISTER_FIXTURE,
+                "src/InformationRegisters/АдминистративнаяИерархия.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-meta-validate-information-register-detailed",
+        tool="unica.meta.validate",
+        skill="meta-validate",
+        script="meta-validate.py",
+        arguments={
+            "ObjectPath": "src/InformationRegisters/АдминистративнаяИерархия.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(
+            FileFixture(
+                BSP_META_INFORMATION_REGISTER_FIXTURE,
+                "src/InformationRegisters/АдминистративнаяИерархия.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
         name="form-compile-simple",
         tool="unica.form.compile",
         skill="form-compile",
@@ -451,6 +851,118 @@ SUCCESS_SCENARIOS = [
         fixtures=(
             FileFixture("form-simple.json", "fixtures/form-simple.json"),
             FileFixture("form-edit/additions.json", "fixtures/form-edit-additions.json"),
+        ),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-form-info-real-form-full",
+        tool="unica.form.info",
+        skill="form-info",
+        script="form-info.py",
+        arguments={
+            "FormPath": "src/Form.xml",
+            "Expand": "*",
+            "Limit": 200,
+        },
+        fixtures=(
+            FileFixture(
+                "bsp/forms/BusinessProcesses__Задание__ФормаСписка/Form.xml",
+                "src/Form.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-form-validate-real-form-detailed",
+        tool="unica.form.validate",
+        skill="form-validate",
+        script="form-validate.py",
+        arguments={
+            "FormPath": "src/Form.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(
+            FileFixture(
+                "bsp/forms/BusinessProcesses__Задание__ФормаСписка/Form.xml",
+                "src/Form.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-form-info-real-action-run-form",
+        tool="unica.form.info",
+        skill="form-info",
+        script="form-info.py",
+        arguments={
+            "FormPath": "src/Form.xml",
+            "Expand": "attributes,commands,events",
+            "Limit": 200,
+        },
+        fixtures=(
+            FileFixture(
+                "bsp/forms/BusinessProcesses__Задание__ДействиеВыполнить/Form.xml",
+                "src/Form.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-form-validate-real-action-check-form",
+        tool="unica.form.validate",
+        skill="form-validate",
+        script="form-validate.py",
+        arguments={
+            "FormPath": "src/Form.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(
+            FileFixture(
+                "bsp/forms/BusinessProcesses__Задание__ДействиеПроверить/Form.xml",
+                "src/Form.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-form-info-real-business-process-form",
+        tool="unica.form.info",
+        skill="form-info",
+        script="form-info.py",
+        arguments={
+            "FormPath": "src/Form.xml",
+            "Expand": "*",
+            "Limit": 200,
+        },
+        fixtures=(
+            FileFixture(
+                "bsp/forms/BusinessProcesses__Задание__ФормаБизнесПроцесса/Form.xml",
+                "src/Form.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-form-edit-add-attribute-command-element",
+        tool="unica.form.edit",
+        skill="form-edit",
+        script="form-edit.py",
+        arguments={
+            "FormPath": "src/Form.xml",
+            "JsonPath": "fixtures/form-edit-bsp-additions.json",
+        },
+        fixtures=(
+            FileFixture(
+                "bsp/forms/BusinessProcesses__Задание__ФормаСписка/Form.xml",
+                "src/Form.xml",
+            ),
+            FileFixture(
+                "form-edit/bsp-additions.json",
+                "fixtures/form-edit-bsp-additions.json",
+            ),
         ),
         expect_ok=True,
         compare_files=True,
@@ -571,6 +1083,32 @@ SUCCESS_SCENARIOS = [
         compare_files=True,
     ),
     ParityScenario(
+        name="bsp-subsystem-info-full",
+        tool="unica.subsystem.info",
+        skill="subsystem-info",
+        script="subsystem-info.py",
+        arguments={
+            "SubsystemPath": "src/Subsystems/Администрирование.xml",
+            "Mode": "full",
+            "Limit": 200,
+        },
+        fixtures=(FileFixture(BSP_SUBSYSTEM_FIXTURE, "src/Subsystems/Администрирование.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-subsystem-validate-detailed",
+        tool="unica.subsystem.validate",
+        skill="subsystem-validate",
+        script="subsystem-validate.py",
+        arguments={
+            "SubsystemPath": "src/Subsystems/Администрирование.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(FileFixture(BSP_SUBSYSTEM_FIXTURE, "src/Subsystems/Администрирование.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
         name="subsystem-edit-definition-file-all-ops",
         tool="unica.subsystem.edit",
         skill="subsystem-edit",
@@ -663,6 +1201,47 @@ SUCCESS_SCENARIOS = [
         compare_files=True,
     ),
     ParityScenario(
+        name="bsp-template-add-real-report-copy",
+        tool="unica.template.add",
+        skill="template-add",
+        script="add-template.py",
+        arguments={
+            "ObjectName": "АнализВерсийОбъектов",
+            "TemplateName": "ParityBspTemplate",
+            "TemplateType": "DataCompositionSchema",
+            "Synonym": "Parity BSP template",
+            "SrcDir": "src/Reports",
+        },
+        fixtures=(FileFixture(BSP_META_REPORT_FIXTURE, "src/Reports/АнализВерсийОбъектов.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-template-remove-real-template-from-report-copy",
+        tool="unica.template.remove",
+        skill="template-remove",
+        script="remove-template.py",
+        arguments={
+            "ObjectName": "АнализВерсийОбъектов",
+            "TemplateName": "ОсновнаяСхемаКомпоновкиДанных",
+            "SrcDir": "src/Reports",
+        },
+        fixtures=(
+            FileFixture(BSP_META_REPORT_FIXTURE, "src/Reports/АнализВерсийОбъектов.xml"),
+            FileFixture(
+                BSP_META_REPORT_TEMPLATE_FIXTURE,
+                "src/Reports/АнализВерсийОбъектов/Templates/ОсновнаяСхемаКомпоновкиДанных.xml",
+            ),
+            FileFixture(
+                BSP_META_REPORT_TEMPLATE_CONTENT_FIXTURE,
+                "src/Reports/АнализВерсийОбъектов/Templates/"
+                "ОсновнаяСхемаКомпоновкиДанных/Ext/Template.xml",
+            ),
+        ),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
         name="interface-validate-detailed",
         tool="unica.interface.validate",
         skill="interface-validate",
@@ -676,6 +1255,44 @@ SUCCESS_SCENARIOS = [
             FileFixture(
                 "interface-validate/Sales/Ext/CommandInterface.xml",
                 "src/Subsystems/Sales/Ext/CommandInterface.xml",
+            ),
+        ),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-interface-validate-real-command-interface",
+        tool="unica.interface.validate",
+        skill="interface-validate",
+        script="interface-validate.py",
+        arguments={
+            "CIPath": "src/Subsystems/Администрирование/Ext/CommandInterface.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(
+            FileFixture(
+                BSP_SUBSYSTEM_COMMAND_INTERFACE_FIXTURE,
+                "src/Subsystems/Администрирование/Ext/CommandInterface.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-interface-edit-show-real-command",
+        tool="unica.interface.edit",
+        skill="interface-edit",
+        script="interface-edit.py",
+        arguments={
+            "CIPath": "src/Subsystems/Администрирование/Ext/CommandInterface.xml",
+            "Operation": "show",
+            "Value": "Catalog.Пользователи.StandardCommand.OpenList",
+            "NoValidate": True,
+        },
+        fixtures=(
+            FileFixture(
+                BSP_SUBSYSTEM_COMMAND_INTERFACE_FIXTURE,
+                "src/Subsystems/Администрирование/Ext/CommandInterface.xml",
             ),
         ),
         expect_ok=True,
@@ -778,6 +1395,138 @@ SUCCESS_SCENARIOS = [
         compare_files=True,
     ),
     ParityScenario(
+        name="bsp-skd-info-overview",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={"TemplatePath": "src/Template.xml", "Mode": "overview", "Limit": 200},
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-info-query",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Mode": "query",
+            "Name": "ОсновнойНаборДанных",
+            "Limit": 200,
+        },
+        fixtures=(FileFixture(BSP_SKD_QUERY_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-info-query-named-nested-union",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Mode": "query",
+            "Name": "ОпределениеПолей",
+            "Limit": 200,
+        },
+        fixtures=(FileFixture(BSP_SKD_UNION_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-info-fields",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={"TemplatePath": "src/Template.xml", "Mode": "fields", "Limit": 200},
+        fixtures=(FileFixture(BSP_SKD_UNION_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-info-links",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={"TemplatePath": "src/Template.xml", "Mode": "links", "Limit": 200},
+        fixtures=(FileFixture(BSP_SKD_UNION_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-info-calculated",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={"TemplatePath": "src/Template.xml", "Mode": "calculated", "Limit": 200},
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-info-resources",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={"TemplatePath": "src/Template.xml", "Mode": "resources", "Limit": 200},
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-info-params",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={"TemplatePath": "src/Template.xml", "Mode": "params", "Limit": 200},
+        fixtures=(FileFixture(BSP_SKD_UNION_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-info-variant",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={"TemplatePath": "src/Template.xml", "Mode": "variant", "Limit": 200},
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-info-trace",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Mode": "trace",
+            "Name": "КоличествоДанных",
+            "Limit": 200,
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-info-templates",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={"TemplatePath": "src/Template.xml", "Mode": "templates", "Limit": 200},
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-info-full",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={"TemplatePath": "src/Template.xml", "Mode": "full", "Limit": 200},
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-validate-real-template-detailed",
+        tool="unica.skd.validate",
+        skill="skd-validate",
+        script="skd-validate.py",
+        arguments={"TemplatePath": "src/Template.xml", "Detailed": True, "MaxErrors": 80},
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+    ),
+    ParityScenario(
         name="skd-validate-detailed-outfile",
         tool="unica.skd.validate",
         skill="skd-validate",
@@ -869,6 +1618,1176 @@ SUCCESS_SCENARIOS = [
         compare_files=True,
     ),
     ParityScenario(
+        name="skd-edit-add-selection-folder",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "add-selection",
+            "Value": "Folder(Parity folder: Code, Quantity)",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="skd-edit-add-selection-to-named-structure-group",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "add-selection",
+            "Value": "Quantity @group=G1",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                arguments={
+                    "TemplatePath": "templates/SKD.xml",
+                    "Operation": "set-structure",
+                    "Value": "Code @name=G1 > details",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-query",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "patch-query",
+            "Value": "1 => 2 @once",
+            "DataSet": "ОсновнойНаборДанных",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "set-query",
+                    "Value": "ВЫБРАТЬ\n\t1 КАК Ссылка",
+                    "DataSet": "ОсновнойНаборДанных",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_QUERY_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-set-query-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "set-query",
+            "Value": "ВЫБРАТЬ\n\t2 КАК Ссылка",
+            "DataSet": "ОсновнойНаборДанных",
+        },
+        fixtures=(FileFixture(BSP_SKD_QUERY_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-add-variant-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "add-variant",
+            "Value": "ParityVariantFinal [Parity variant final]",
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-add-calculated-field-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "add-calculated-field",
+            "Value": "ParityCalcFinal: decimal(10,2) = КоличествоДанных + 1",
+            "NoSelection": True,
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-modify-field-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "modify-field",
+            "Value": "ПредставлениеДанных [Представление parity final]: string",
+            "DataSet": "МестаИспользования",
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-set-field-role-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "set-field-role",
+            "Value": "ПредставлениеДанных @dimension",
+            "DataSet": "МестаИспользования",
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-add-order-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "add-order",
+            "Value": "КоличествоДанных desc",
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-clear-order-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "clear-order",
+            "Value": "*",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-order",
+                    "Value": "КоличествоДанных desc",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-clear-selection-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "clear-selection",
+            "Value": "*",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-selection",
+                    "Value": "КоличествоДанных",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-clear-filter-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "clear-filter",
+            "Value": "*",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-filter",
+                    "Value": "КоличествоДанных = 1",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-remove-filter-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "remove-filter",
+            "Value": "КоличествоДанных",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-filter",
+                    "Value": "КоличествоДанных = 1",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-add-data-parameter-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "add-dataParameter",
+            "Value": "ДатаФормирования = LastMonth",
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-add-data-set-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "add-dataSet",
+            "Value": "ParityDataSetFinal: ВЫБРАТЬ 1 КАК КоличествоДанных",
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-add-data-set-link-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "add-dataSetLink",
+            "Value": "МестаИспользования > ParityDataSetFinal on КоличествоДанных = КоличествоДанных [param ParityLinkFinal]",
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-set-output-parameter-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "set-outputParameter",
+            "Value": "Заголовок = ParityTitleFinal",
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-set-structure-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "set-structure",
+            "Value": "Ссылка @name=ParityRootFinal > details",
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-rename-parameter-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "rename-parameter",
+            "Value": "ParityRenameParam => ParityRenameParamFinal",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-parameter",
+                    "Value": "ParityRenameParam",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-remove-field-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "remove-field",
+            "Value": "ParityRemoveField",
+            "DataSet": "МестаИспользования",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-field",
+                    "Value": "ParityRemoveField: decimal(10,0)",
+                    "DataSet": "МестаИспользования",
+                    "NoSelection": True,
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-remove-field-keeps_group_items",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "remove-field",
+            "Value": "ParityGroupedField",
+            "DataSet": "МестаИспользования",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-field",
+                    "Value": "ParityGroupedField: decimal(10,0)",
+                    "DataSet": "МестаИспользования",
+                    "NoSelection": True,
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "set-structure",
+                    "Value": "ParityGroupedField @name=ParityGroupedRoot > details",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-add-conditional-appearance-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "add-conditionalAppearance",
+            "Value": "ЦветТекста = web:Red when ВедущееИзмерение = false for КоличествоДанных",
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-clear-conditional-appearance-final",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "clear-conditionalAppearance",
+            "Value": "*",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-conditionalAppearance",
+                    "Value": "ЦветТекста = web:Red when ВедущееИзмерение = false for КоличествоДанных",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="skd-edit-add-field-preserves_schema_order_and_role_markers",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "add-field",
+            "Value": "Amount: decimal(10,2) @dimension #noFilter",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="skd-edit-add-total-aggregate-shorthand",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "add-total",
+            "Value": "Amount: Сумма",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="skd-edit-add-parameter-typed-available-values",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "add-parameter",
+            "Value": (
+                "Period: StandardPeriod = LastMonth "
+                "availableValue=LastMonth:Прошлый месяц, ThisMonth:Текущий месяц"
+            ),
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="skd-edit-add-parameter-quoted-value-list-and-available-values",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "add-parameter",
+            "Value": (
+                "Tags: string = \"one,two\", 'three:four' "
+                "availableValue=\"one,two\":\"One, two\", 'three:four':'Three: four'"
+            ),
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="skd-edit-modify-parameter-preserves_typed_value_and_sets_available_values",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "modify-parameter",
+            "Value": (
+                "Period [Период] value=ThisMonth denyIncompleteValues=true use=Always "
+                "availableValue=ThisMonth:Текущий месяц, LastMonth:Прошлый месяц"
+            ),
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "templates/SKD.xml",
+                    "Operation": "add-parameter",
+                    "Value": "Period: StandardPeriod = LastMonth",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="skd-edit-modify-parameter-quoted-value-list-and-available-values",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "modify-parameter",
+            "Value": (
+                "Tags value=\"one,two\", 'three:four' "
+                "availableValue=\"one,two\":\"One, two\", 'three:four':'Three: four'"
+            ),
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "templates/SKD.xml",
+                    "Operation": "add-parameter",
+                    "Value": "Tags: string = initial",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="skd-edit-modify-filter-preserves_existing_disabled_state",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "modify-filter",
+            "Value": "Code >= 2",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "templates/SKD.xml",
+                    "Operation": "add-filter",
+                    "Value": "Code = 1 @off",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="skd-edit-modify-data-parameter-preserves_existing_value",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "modify-dataParameter",
+            "Value": "Period @off",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "templates/SKD.xml",
+                    "Operation": "add-dataParameter",
+                    "Value": "Period = LastMonth @off",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-fields-and-resources",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "remove-total",
+            "Value": "ВременныйИтог",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "modify-field",
+                    "Value": "ПредставлениеДанных [Представление parity]: string",
+                    "DataSet": "МестаИспользования",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "set-field-role",
+                    "Value": "ПредставлениеДанных @dimension",
+                    "DataSet": "МестаИспользования",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-total",
+                    "Value": "ВременныйИтог: Сумма(КоличествоДанных)",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-params",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "reorder-parameters",
+            "Value": "ПараметрParityПереименованный, ДатаФормирования, ПредставлениеСписка",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-parameter",
+                    "Value": "ПараметрParity",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "modify-parameter",
+                    "Value": "ПараметрParity [Параметр parity] @hidden @always",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "rename-parameter",
+                    "Value": "ПараметрParity => ПараметрParityПереименованный",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_UNION_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-settings",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "add-drilldown",
+            "Value": "КоличествоДанных",
+            "Variant": "ParityVariant",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-variant",
+                    "Value": "ParityVariant [Parity variant]",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "set-structure",
+                    "Value": "Ссылка @name=ParityRoot > details",
+                    "Variant": "ParityVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "modify-structure",
+                    "Value": "Данные @name=ParityRoot",
+                    "Variant": "ParityVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-filter",
+                    "Value": "ВедущееИзмерение = false",
+                    "Variant": "ParityVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "remove-filter",
+                    "Value": "ВедущееИзмерение",
+                    "Variant": "ParityVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-conditionalAppearance",
+                    "Value": "ЦветТекста = web:Red when ВедущееИзмерение = false for КоличествоДанных",
+                    "Variant": "ParityVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "clear-conditionalAppearance",
+                    "Value": "*",
+                    "Variant": "ParityVariant",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-add-filter",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "add-filter",
+            "Value": "ВедущееИзмерение = false",
+        },
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-calculated-field-lifecycle",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "remove-calculated-field",
+            "Value": "ParityCalc",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-calculated-field",
+                    "Value": "ParityCalc: decimal(10,2) = КоличествоДанных + 1",
+                    "NoSelection": True,
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-datasets-and-variant-params",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "modify-filter",
+            "Value": "КоличествоДанных >= 2",
+            "Variant": "ParityDataVariant",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-variant",
+                    "Value": "ParityDataVariant [Parity data variant]",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-dataSet",
+                    "Value": "ParityDataSet: ВЫБРАТЬ 1 КАК КоличествоДанных",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-dataSetLink",
+                    "Value": "МестаИспользования > ParityDataSet on КоличествоДанных = КоличествоДанных [param ParityLink]",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "set-outputParameter",
+                    "Value": "Заголовок = ParityTitle",
+                    "Variant": "ParityDataVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-dataParameter",
+                    "Value": "ДатаФормирования = LastMonth",
+                    "Variant": "ParityDataVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "modify-dataParameter",
+                    "Value": "ДатаФормирования = ThisMonth",
+                    "Variant": "ParityDataVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-filter",
+                    "Value": "КоличествоДанных = 1",
+                    "Variant": "ParityDataVariant",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-basic-ops-lifecycle",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "remove-parameter",
+            "Value": "ParityCleanupParam",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-variant",
+                    "Value": "ParityOpsVariant [Parity ops variant]",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-field",
+                    "Value": "ParityCleanupField: decimal(10,0)",
+                    "DataSet": "МестаИспользования",
+                    "NoSelection": True,
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-parameter",
+                    "Value": "ParityCleanupParam",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-selection",
+                    "Value": "ParityCleanupField",
+                    "Variant": "ParityOpsVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-order",
+                    "Value": "ParityCleanupField desc",
+                    "Variant": "ParityOpsVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-filter",
+                    "Value": "ParityCleanupField = 1",
+                    "Variant": "ParityOpsVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "clear-selection",
+                    "Value": "*",
+                    "Variant": "ParityOpsVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "clear-order",
+                    "Value": "*",
+                    "Variant": "ParityOpsVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "clear-filter",
+                    "Value": "*",
+                    "Variant": "ParityOpsVariant",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                tool="unica.skd.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "remove-field",
+                    "Value": "ParityCleanupField",
+                    "DataSet": "МестаИспользования",
+                    "Variant": "ParityOpsVariant",
+                },
+            ),
+        ),
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
         name="mxl-compile-simple",
         tool="unica.mxl.compile",
         skill="mxl-compile",
@@ -949,6 +2868,89 @@ SUCCESS_SCENARIOS = [
         expect_ok=True,
     ),
     ParityScenario(
+        name="bsp-mxl-info-real-template",
+        tool="unica.mxl.info",
+        skill="mxl-info",
+        script="mxl-info.py",
+        arguments={
+            "TemplatePath": "src/Reports/ParityReport/Templates/Receipt/Ext/Template.xml",
+            "WithText": True,
+            "Limit": 200,
+        },
+        fixtures=(
+            FileFixture(
+                BSP_MXL_RECEIPT_FIXTURE,
+                "src/Reports/ParityReport/Templates/Receipt/Ext/Template.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-mxl-validate-real-template",
+        tool="unica.mxl.validate",
+        skill="mxl-validate",
+        script="mxl-validate.py",
+        arguments={
+            "TemplatePath": "src/Reports/ParityReport/Templates/Power/Ext/Template.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(
+            FileFixture(
+                BSP_MXL_POWER_OF_ATTORNEY_FIXTURE,
+                "src/Reports/ParityReport/Templates/Power/Ext/Template.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-mxl-decompile-real-template-outfile",
+        tool="unica.mxl.decompile",
+        skill="mxl-decompile",
+        script="mxl-decompile.py",
+        arguments={
+            "TemplatePath": "src/Reports/ParityReport/Templates/Receipt/Ext/Template.xml",
+            "OutputPath": "mxl-bsp.json",
+        },
+        fixtures=(
+            FileFixture(
+                BSP_MXL_RECEIPT_FIXTURE,
+                "src/Reports/ParityReport/Templates/Receipt/Ext/Template.xml",
+            ),
+        ),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-mxl-parity-roundtrip-real-template",
+        tool="unica.mxl.compile",
+        skill="mxl-compile",
+        script="mxl-compile.py",
+        arguments={
+            "JsonPath": "mxl-bsp.json",
+            "OutputPath": "roundtrip/Template.xml",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="mxl-decompile",
+                script="mxl-decompile.py",
+                tool="unica.mxl.decompile",
+                arguments={
+                    "TemplatePath": "src/Reports/ParityReport/Templates/Receipt/Ext/Template.xml",
+                    "OutputPath": "mxl-bsp.json",
+                },
+            ),
+        ),
+        fixtures=(
+            FileFixture(
+                BSP_MXL_RECEIPT_FIXTURE,
+                "src/Reports/ParityReport/Templates/Receipt/Ext/Template.xml",
+            ),
+        ),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
         name="role-compile-reader",
         tool="unica.role.compile",
         skill="role-compile",
@@ -1017,6 +3019,60 @@ SUCCESS_SCENARIOS = [
         ),
         expect_ok=True,
         compare_files=True,
+    ),
+    ParityScenario(
+        name="bsp-role-info-full",
+        tool="unica.role.info",
+        skill="role-info",
+        script="role-info.py",
+        arguments={
+            "RightsPath": "src/Roles/АдминистраторСистемы/Ext/Rights.xml",
+            "Limit": 0,
+        },
+        fixtures=(
+            FileFixture(
+                BSP_ROLE_ADMIN_RIGHTS_FIXTURE,
+                "src/Roles/АдминистраторСистемы/Ext/Rights.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-role-info-administration-show-denied",
+        tool="unica.role.info",
+        skill="role-info",
+        script="role-info.py",
+        arguments={
+            "RightsPath": "src/Roles/Администрирование/Ext/Rights.xml",
+            "ShowDenied": True,
+            "Limit": 0,
+        },
+        fixtures=(
+            FileFixture(
+                BSP_ROLE_ADMINISTRATION_RIGHTS_FIXTURE,
+                "src/Roles/Администрирование/Ext/Rights.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
+        name="bsp-role-validate-detailed",
+        tool="unica.role.validate",
+        skill="role-validate",
+        script="role-validate.py",
+        arguments={
+            "RightsPath": "src/Roles/АдминистраторСистемы/Ext/Rights.xml",
+            "Detailed": True,
+            "MaxErrors": 80,
+        },
+        fixtures=(
+            FileFixture(BSP_CF_CONFIGURATION_FIXTURE, "src/Configuration.xml"),
+            FileFixture(
+                BSP_ROLE_ADMIN_RIGHTS_FIXTURE,
+                "src/Roles/АдминистраторСистемы/Ext/Rights.xml",
+            ),
+        ),
+        expect_ok=True,
     ),
 ]
 
@@ -1113,6 +3169,33 @@ VALIDATION_FAILURE_SCENARIOS = [
                 "src/Reports/ParityReport/Forms/MainForm/Ext/Form.xml",
             ),
         ),
+    ),
+    ParityScenario(
+        name="bsp-skd-info-query-named-union-fails",
+        tool="unica.skd.info",
+        skill="skd-info",
+        script="skd-info.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Mode": "query",
+            "Name": "ОбщееКоличествоЭлементов",
+        },
+        expect_ok=False,
+        fixtures=(FileFixture(BSP_SKD_UNION_FIXTURE, "src/Template.xml"),),
+    ),
+    ParityScenario(
+        name="bsp-skd-edit-missing-variant-fails",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "src/Template.xml",
+            "Operation": "add-selection",
+            "Value": "КоличествоДанных",
+            "Variant": "DefinitelyMissingVariant",
+        },
+        expect_ok=False,
+        fixtures=(FileFixture(BSP_SKD_OBJECT_FIXTURE, "src/Template.xml"),),
     ),
 ]
 
@@ -1384,6 +3467,7 @@ MISSING_INPUT_SCENARIOS = [
 ]
 
 SCENARIOS = tuple(SUCCESS_SCENARIOS + VALIDATION_FAILURE_SCENARIOS + MISSING_INPUT_SCENARIOS)
+MIN_NATIVE_PARITY_COVERAGE = 1.0
 
 NATIVE_PARITY_TOOLS = {
     "unica.cf.edit",
@@ -1401,6 +3485,7 @@ NATIVE_PARITY_TOOLS = {
     "unica.meta.info",
     "unica.meta.remove",
     "unica.meta.validate",
+    "unica.help.add",
     "unica.form.add",
     "unica.form.compile",
     "unica.form.edit",
@@ -1452,6 +3537,7 @@ EXPECTED_TOOLS = {
     "unica.meta.info",
     "unica.meta.remove",
     "unica.meta.validate",
+    "unica.help.add",
     "unica.form.add",
     "unica.form.compile",
     "unica.form.edit",
@@ -1479,9 +3565,87 @@ EXPECTED_TOOLS = {
     "unica.role.validate",
 }
 
+BSP_PARITY_REQUIRED_TOOLS = {
+    "unica.cf.info",
+    "unica.cf.validate",
+    "unica.cfe.borrow",
+    "unica.meta.info",
+    "unica.meta.validate",
+    "unica.form.info",
+    "unica.form.validate",
+    "unica.form.edit",
+    "unica.skd.info",
+    "unica.skd.validate",
+    "unica.skd.edit",
+    "unica.mxl.info",
+    "unica.mxl.validate",
+    "unica.mxl.decompile",
+    "unica.mxl.compile",
+    "unica.role.info",
+    "unica.role.validate",
+    "unica.subsystem.info",
+    "unica.subsystem.validate",
+    "unica.interface.validate",
+    "unica.interface.edit",
+    "unica.template.add",
+    "unica.template.remove",
+}
+
+BSP_MUTATING_REQUIRED_TOOLS = {
+    "unica.cfe.borrow",
+    "unica.form.edit",
+    "unica.skd.edit",
+    "unica.mxl.compile",
+    "unica.interface.edit",
+    "unica.template.add",
+    "unica.template.remove",
+}
+
+SKD_EDIT_REQUIRED_OPS = {
+    "add-field",
+    "add-total",
+    "add-calculated-field",
+    "add-parameter",
+    "add-filter",
+    "add-dataParameter",
+    "add-order",
+    "add-selection",
+    "add-dataSetLink",
+    "add-dataSet",
+    "add-variant",
+    "add-conditionalAppearance",
+    "add-drilldown",
+    "set-outputParameter",
+    "set-query",
+    "patch-query",
+    "set-structure",
+    "modify-field",
+    "modify-filter",
+    "modify-dataParameter",
+    "modify-parameter",
+    "modify-structure",
+    "set-field-role",
+    "rename-parameter",
+    "reorder-parameters",
+    "clear-selection",
+    "clear-order",
+    "clear-filter",
+    "clear-conditionalAppearance",
+    "remove-field",
+    "remove-total",
+    "remove-calculated-field",
+    "remove-parameter",
+    "remove-filter",
+}
+
 UUID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
 )
+
+
+def skd_edit_operations_in_args(arguments: dict[str, Any]) -> set[str]:
+    operation = arguments.get("Operation") or arguments.get("operation")
+    return {operation} if isinstance(operation, str) and operation else set()
 
 
 class UnicaMcpScriptParityTests(unittest.TestCase):
@@ -1512,6 +3676,58 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
             covered_by_success_snapshot & MUTATING_FORM_SKD_PARITY_TOOLS,
             MUTATING_FORM_SKD_PARITY_TOOLS,
         )
+
+    def test_native_parity_coverage_stays_above_required_threshold(self) -> None:
+        covered = {scenario.tool for scenario in SCENARIOS if scenario.tool in NATIVE_PARITY_TOOLS}
+        coverage = len(covered) / len(NATIVE_PARITY_TOOLS)
+        self.assertGreaterEqual(coverage, MIN_NATIVE_PARITY_COVERAGE)
+        self.assertEqual(NATIVE_PARITY_TOOLS - covered, set())
+
+    def test_rust_registry_parity_list_matches_python_parity_harness(self) -> None:
+        app_mod = (REPO_ROOT / "crates" / "unica-coder" / "src" / "application" / "mod.rs").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(
+            r"const PARITY_COVERED_TOOLS: &\[&str\] = &\[(.*?)\];",
+            app_mod,
+            flags=re.S,
+        )
+        self.assertIsNotNone(match)
+        rust_tools = set(re.findall(r'"(unica\.[^"]+)"', match.group(1)))
+        self.assertEqual(rust_tools, NATIVE_PARITY_TOOLS)
+
+    def test_bsp_manifest_fixtures_are_exercised_by_parity_scenarios(self) -> None:
+        manifest = json.loads((FIXTURES_ROOT / "bsp" / "manifest.json").read_text(encoding="utf-8"))
+        manifest_sources = {f"bsp/{entry['target']}" for entry in manifest["files"]}
+        used_sources = {fixture.source for scenario in SCENARIOS for fixture in scenario.fixtures}
+        self.assertEqual(manifest_sources - used_sources, set())
+
+    def test_bsp_fixture_parity_covers_real_world_read_and_edit_tools(self) -> None:
+        for tool in sorted(BSP_PARITY_REQUIRED_TOOLS):
+            with self.subTest(tool=tool):
+                scenarios = [
+                    scenario
+                    for scenario in SCENARIOS
+                    if scenario.name.startswith("bsp-")
+                    and scenario.tool == tool
+                    and scenario.expect_ok
+                ]
+                self.assertGreater(len(scenarios), 0)
+                if tool in BSP_MUTATING_REQUIRED_TOOLS:
+                    self.assertTrue(any(scenario.compare_files for scenario in scenarios))
+
+    def test_bsp_skd_edit_parity_covers_documented_operations(self) -> None:
+        covered = set()
+        for scenario in SCENARIOS:
+            if not (
+                scenario.tool == "unica.skd.edit"
+                and scenario.expect_ok
+                and scenario.compare_files
+            ):
+                continue
+            covered.update(skd_edit_operations_in_args(scenario.arguments))
+
+        self.assertEqual(covered & SKD_EDIT_REQUIRED_OPS, SKD_EDIT_REQUIRED_OPS)
 
     def test_every_skill_tools_call_example_executes_as_mcp_dry_run(self) -> None:
         examples = list(iter_skill_mcp_examples())
@@ -1548,11 +3764,12 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
             mcp_ws = temp_root / "mcp"
             direct_ws.mkdir()
             mcp_ws.mkdir()
-            self.prepare_workspace(direct_ws, scenario)
-            self.prepare_workspace(mcp_ws, scenario)
+            mcp_cache = temp_root / "mcp-cache"
+            self.prepare_workspace(direct_ws, scenario, setup_mode="reference")
+            self.prepare_workspace(mcp_ws, scenario, setup_mode="mcp", cache_dir=mcp_cache)
 
             direct = run_python_script(scenario.skill, scenario.script, scenario.arguments, direct_ws)
-            mcp = self.call_mcp(scenario, mcp_ws, temp_root / "mcp-cache")
+            mcp = self.call_mcp(scenario, mcp_ws, mcp_cache)
 
             direct_ok = direct.returncode == 0
             self.assertEqual(direct_ok, scenario.expect_ok, direct.stderr)
@@ -1584,27 +3801,51 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
             if scenario.compare_files:
                 self.assertEqual(snapshot_workspace(direct_ws), snapshot_workspace(mcp_ws))
 
-    def prepare_workspace(self, workspace: Path, scenario: ParityScenario) -> None:
+    def prepare_workspace(
+        self,
+        workspace: Path,
+        scenario: ParityScenario,
+        *,
+        setup_mode: str,
+        cache_dir: Path | None = None,
+    ) -> None:
         for fixture in scenario.fixtures:
             target = workspace / fixture.target
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(FIXTURES_ROOT / fixture.source, target)
         for step in scenario.setup_steps:
-            result = run_python_script(step.skill, step.script, step.arguments, workspace)
-            if result.returncode != 0:
-                raise AssertionError(
-                    f"setup step {step.skill}/{step.script} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-                )
+            if setup_mode == "mcp" and step.tool is not None:
+                if cache_dir is None:
+                    raise AssertionError("cache_dir is required for MCP setup steps")
+                mcp = self.call_mcp_tool(step.tool, step.arguments, workspace, cache_dir)
+                self.assertTrue(mcp["ok"], json.dumps(mcp, ensure_ascii=False, indent=2))
+                if step.tool in NATIVE_PARITY_TOOLS:
+                    self.assertIsNone(mcp.get("command"), f"{step.tool} setup must not use script fallback")
+            else:
+                result = run_python_script(step.skill, step.script, step.arguments, workspace)
+                if result.returncode != 0:
+                    raise AssertionError(
+                        f"setup step {step.skill}/{step.script} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+                    )
 
     def call_mcp(self, scenario: ParityScenario, workspace: Path, cache_dir: Path) -> dict[str, Any]:
-        arguments = dict(scenario.arguments)
+        return self.call_mcp_tool(scenario.tool, scenario.arguments, workspace, cache_dir)
+
+    def call_mcp_tool(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        workspace: Path,
+        cache_dir: Path,
+    ) -> dict[str, Any]:
+        arguments = dict(arguments)
         arguments["cwd"] = str(workspace)
         arguments["dryRun"] = False
         message = {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": scenario.tool, "arguments": arguments},
+            "params": {"name": tool, "arguments": arguments},
         }
         env = os.environ.copy()
         env["UNICA_PLUGIN_ROOT"] = str(PLUGIN_ROOT)

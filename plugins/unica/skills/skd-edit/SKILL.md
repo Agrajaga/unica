@@ -41,8 +41,8 @@ allowed-tools:
     "arguments": {
       "cwd": "<workspace>",
       "TemplatePath": "src/Reports/ОтчетПродажи/Templates/ОсновнаяСхемаКомпоновкиДанных",
-      "Operation": "set-variant-title",
-      "Value": "Основной вариант",
+      "Operation": "set-outputParameter",
+      "Value": "Заголовок = Основной вариант",
       "dryRun": false
     }
   }

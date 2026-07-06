@@ -1159,6 +1159,9 @@ def build_param_value_xml(type_str, value, indent, tag_name="value", tag_ns=""):
     val_str = "" if value is None else str(value)
     open_tag = f"{tag_ns}:{tag_name}" if tag_ns else tag_name
     lines = []
+    type_str = re.sub(r'^xs:', '', str(type_str or ""))
+    type_str = re.sub(r'^v8:', '', type_str)
+    type_str = re.sub(r'^d\d+p\d+:', '', type_str)
 
     if type_str == "StandardPeriod":
         lines.append(f'{indent}<{open_tag} xsi:type="v8:StandardPeriod">')
