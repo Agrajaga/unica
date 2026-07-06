@@ -15,11 +15,9 @@ Use a pragmatic DDD split:
 2. Keep application logic transport-neutral.
 3. Emit domain events for mutating operations.
 4. Let cache invalidation happen inside `unica`.
-5. Treat current skill-local operation files as tracked migration debt; target
-   handlers live inside the Rust MCP.
+5. Keep operation backend command semantics inside native Rust MCP handlers.
 
 ## Migration Shape
 
-The first slice prioritizes public contract and orchestration. Native Rust
-replacement of skill-local operation files happens in waves after contract tests
-and fixtures exist.
+New operation backend behavior is ported into Rust first, with donor scripts
+retained only as parity fixtures when they are needed as a source model.

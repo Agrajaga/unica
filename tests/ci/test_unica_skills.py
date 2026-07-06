@@ -443,7 +443,7 @@ SCENARIO_PRESERVING_TOKENS = {
         '"SetDefault": true',
     ],
     "form-compile": [
-        '"FromObject": true',
+        '"OutputPath": "<.../TypePlural/ObjectName/Forms/FormName/Ext/Form.xml>"',
         '"name": "unica.form.validate"',
         '"name": "unica.form.info"',
     ],
@@ -854,15 +854,8 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             skill_dir / "scripts" / "engine" / "forms" / "fill.mjs"
         ).read_text(encoding="utf-8"))
 
-    def test_legacy_script_fixtures_track_upstream_runtime_portability_fixes(self) -> None:
+    def test_reference_fixtures_track_upstream_runtime_portability_fixes(self) -> None:
         skd_scripts = [
-            self.repo_root()
-            / "plugins"
-            / "unica"
-            / "scripts"
-            / "legacy"
-            / "skd-edit"
-            / "skd-edit.py",
             self.parity_reference_root()
             / "skd-edit"
             / "scripts"

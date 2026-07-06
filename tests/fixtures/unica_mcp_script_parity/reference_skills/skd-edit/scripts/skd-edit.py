@@ -1875,7 +1875,7 @@ def resolve_variant_settings():
                         if gc.text == variant_arg:
                             sv = child
                             break
-                if sv:
+                if sv is not None:
                     break
         if sv is None:
             print(f"Variant '{variant_arg}' not found", file=sys.stderr)

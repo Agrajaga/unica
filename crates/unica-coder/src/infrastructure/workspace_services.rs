@@ -1,7 +1,7 @@
 use crate::domain::events::DomainEvent;
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
-use crate::infrastructure::legacy_scripts::find_plugin_root;
+use crate::infrastructure::plugin_runtime::find_plugin_root;
 use crate::infrastructure::workspace_index::{IndexReadiness, WorkspaceIndexService};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};

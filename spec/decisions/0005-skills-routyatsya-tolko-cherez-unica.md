@@ -24,8 +24,8 @@ Skills must route through MCP `unica`.
 
 1. This ADR does not ban documenting internal tooling in maintainer docs.
 2. This ADR does not require every skill to have a dedicated MCP tool.
-3. This ADR does not remove not-yet-migrated operation files by itself; removal
-   is tracked by ADR-0004 and the active task list.
+3. This ADR does not ban maintainer-only parity fixtures; ADR-0004 bans runtime
+   operation-file backends.
 
 ## Последствия
 

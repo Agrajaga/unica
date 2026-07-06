@@ -84,8 +84,8 @@ scripts/dev/install-local-unica.sh --marketplace-name unica-dev
 
 | Area | Windows | macOS arm64 | Notes |
 | --- | --- | --- | --- |
-| Operation skills and PowerShell scripts | Primary path | Available when PowerShell is installed | The source skills are Windows-first because 1C Designer automation is Windows-first. |
-| Python script ports | Available with Python | Available with `python3` | Used for XML/metadata operations where ports exist. |
+| Operation skills | Primary path | Available where the underlying 1C workflow is available | Skills route through the single public `unica` MCP server. |
+| Native XML/DSL operations | Native Rust runtime | Native Rust runtime | `unica.form.*` and `unica.skd.*` do not call Python, Bash, or PowerShell operation scripts at runtime. Python reference models live only in parity fixtures. |
 | Bundled binaries | Built by GitHub Actions into `bin/win-x64/` | Built by GitHub Actions into `bin/darwin-arm64/` | Linux x64 is built into `bin/linux-x64/`; the package manifest maps tools to target-specific binaries. Binaries are ignored in source control. |
 | MCP local tools | Rust runtime resolver launches packaged binaries directly | Rust runtime resolver launches packaged binaries directly | Source checkouts use `cargo run --manifest-path ../../Cargo.toml --bin unica` from the plugin root; generated packages use `bin/<target>/` binaries. External standards data is reached through the internal standards adapter. |
 | 1C platform operations | Requires local 1C platform | Requires local 1C platform or compatible tooling | Skills resolve project/database context from `v8project.yaml` when present. |
@@ -147,9 +147,9 @@ Unica is licensed under `LGPL-3.0-or-later`. See `LICENSE`.
 - `unica`
 
 `unica` owns workspace discovery, cache coordination, and adapter orchestration.
-Build/runtime tooling, code analysis, standards lookup, and XML/JSON DSL
-fallback scripts are private implementation details behind this one MCP
-contract. Source checkout metadata uses
+Build/runtime tooling, code analysis, standards lookup, and native XML/JSON DSL
+handlers are private implementation details behind this one MCP contract.
+Source checkout metadata uses
 `cargo run --manifest-path ../../Cargo.toml --bin unica` because generated
 binaries are absent from git; packaged archives rewrite `.mcp.json` to launch
 `./bin/<target>/unica` directly with `cwd` set to the plugin root.

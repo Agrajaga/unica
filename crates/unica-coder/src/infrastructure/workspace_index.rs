@@ -1,6 +1,6 @@
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
-use crate::infrastructure::legacy_scripts::find_plugin_root;
+use crate::infrastructure::plugin_runtime::find_plugin_root;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

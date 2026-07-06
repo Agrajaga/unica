@@ -6,7 +6,6 @@ use crate::infrastructure::internal_adapters::{
     BslAnalyzerMcpAdapter, CliAdapter, CodeNavigationAdapter, CodeSearchAdapter, RuntimeAdapter,
     StandardsAdapter,
 };
-use crate::infrastructure::legacy_scripts::LegacyScriptAdapter;
 use crate::infrastructure::native_operations::common::{
     absolutize, path_arg, required_string, support_guard_violation, SupportGuardRequirement,
     SupportGuardViolation,
@@ -34,11 +33,6 @@ pub struct ToolSpec {
 
 #[derive(Debug, Clone, Copy)]
 pub enum ToolHandler {
-    LegacyScript {
-        skill: &'static str,
-        script: &'static str,
-        event: Option<DomainEventKind>,
-    },
     NativeOperation {
         operation: &'static str,
         event: Option<DomainEventKind>,
@@ -332,15 +326,6 @@ fn call_tool(spec: ToolSpec, args: &Map<String, Value>) -> Result<OperationResul
     };
 
     let mut outcome = match spec.handler {
-        ToolHandler::LegacyScript { skill, script, .. } => LegacyScriptAdapter::invoke(
-            skill,
-            script,
-            spec.name,
-            args,
-            &context,
-            dry_run,
-            spec.mutating,
-        )?,
         ToolHandler::NativeOperation { operation, .. } => NativeOperationAdapter::invoke(
             operation,
             spec.name,
@@ -517,7 +502,6 @@ fn support_guard_target(
 fn support_guard_operation(spec: ToolSpec) -> Option<&'static str> {
     match spec.handler {
         ToolHandler::NativeOperation { operation, .. } => Some(operation),
-        ToolHandler::LegacyScript { skill, .. } => Some(skill),
         _ => None,
     }
 }
@@ -702,9 +686,6 @@ fn support_guard_blocked_outcome(
 
 fn domain_events(spec: ToolSpec, args: &Map<String, Value>) -> Vec<DomainEvent> {
     match spec.handler {
-        ToolHandler::LegacyScript {
-            event: Some(event), ..
-        } => vec![DomainEvent::new(event, spec.name)],
         ToolHandler::NativeOperation {
             event: Some(event), ..
         } => vec![DomainEvent::new(event, spec.name)],
@@ -968,9 +949,8 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Add managed form metadata and files.",
             mutating: true,
             cache_access: cache_access_for("form-add", Some(DomainEventKind::FormChanged)),
-            handler: ToolHandler::LegacyScript {
-                skill: "form-add",
-                script: "form-add.py",
+            handler: ToolHandler::NativeOperation {
+                operation: "form-add",
                 event: Some(DomainEventKind::FormChanged),
             },
         },
@@ -979,9 +959,8 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Compile managed Form.xml from JSON DSL or metadata.",
             mutating: true,
             cache_access: cache_access_for("form-compile", Some(DomainEventKind::FormChanged)),
-            handler: ToolHandler::LegacyScript {
-                skill: "form-compile",
-                script: "form-compile.py",
+            handler: ToolHandler::NativeOperation {
+                operation: "form-compile",
                 event: Some(DomainEventKind::FormChanged),
             },
         },
@@ -990,9 +969,8 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Edit managed Form.xml elements, attributes, and commands.",
             mutating: true,
             cache_access: cache_access_for("form-edit", Some(DomainEventKind::FormChanged)),
-            handler: ToolHandler::LegacyScript {
-                skill: "form-edit",
-                script: "form-edit.py",
+            handler: ToolHandler::NativeOperation {
+                operation: "form-edit",
                 event: Some(DomainEventKind::FormChanged),
             },
         },
@@ -1011,9 +989,8 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Remove a managed form and registration.",
             mutating: true,
             cache_access: cache_access_for("form-remove", Some(DomainEventKind::FormChanged)),
-            handler: ToolHandler::LegacyScript {
-                skill: "form-remove",
-                script: "remove-form.py",
+            handler: ToolHandler::NativeOperation {
+                operation: "form-remove",
                 event: Some(DomainEventKind::FormChanged),
             },
         },
@@ -1022,9 +999,8 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Validate managed Form.xml.",
             mutating: false,
             cache_access: cache_access_for("form-validate", None),
-            handler: ToolHandler::LegacyScript {
-                skill: "form-validate",
-                script: "form-validate.py",
+            handler: ToolHandler::NativeOperation {
+                operation: "form-validate",
                 event: None,
             },
         },
@@ -1125,9 +1101,8 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Compile Data Composition Schema XML from JSON DSL.",
             mutating: true,
             cache_access: cache_access_for("skd-compile", Some(DomainEventKind::SkdChanged)),
-            handler: ToolHandler::LegacyScript {
-                skill: "skd-compile",
-                script: "skd-compile.py",
+            handler: ToolHandler::NativeOperation {
+                operation: "skd-compile",
                 event: Some(DomainEventKind::SkdChanged),
             },
         },
@@ -1136,9 +1111,8 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Edit Data Composition Schema Template.xml.",
             mutating: true,
             cache_access: cache_access_for("skd-edit", Some(DomainEventKind::SkdChanged)),
-            handler: ToolHandler::LegacyScript {
-                skill: "skd-edit",
-                script: "skd-edit.py",
+            handler: ToolHandler::NativeOperation {
+                operation: "skd-edit",
                 event: Some(DomainEventKind::SkdChanged),
             },
         },
@@ -1157,9 +1131,8 @@ fn configuration_tools() -> Vec<ToolSpec> {
             description: "Validate Data Composition Schema Template.xml.",
             mutating: false,
             cache_access: cache_access_for("skd-validate", None),
-            handler: ToolHandler::LegacyScript {
-                skill: "skd-validate",
-                script: "skd-validate.py",
+            handler: ToolHandler::NativeOperation {
+                operation: "skd-validate",
                 event: None,
             },
         },
@@ -1284,7 +1257,6 @@ fn cache_access_for(operation: &str, event: Option<DomainEventKind>) -> CacheAcc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::legacy_scripts::legacy_script_path;
     use serde_json::Map;
     use std::collections::HashSet;
 
@@ -1315,11 +1287,7 @@ mod tests {
             .unwrap();
         assert!(result.ok);
         assert!(result.summary.contains("dry run"));
-        let command = result
-            .command
-            .as_ref()
-            .expect("legacy dry run previews command");
-        assert!(command.join(" ").contains("form-edit.py"));
+        assert_eq!(result.command, None);
         assert_eq!(result.cache.mode, "dry-run");
         assert!(result.cache.events.contains(&"FormChanged".to_string()));
         assert!(result
@@ -1363,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn xml_dsl_tools_route_to_existing_script_or_parity_covered_native_handler() {
+    fn xml_dsl_tools_route_to_parity_covered_native_handlers() {
         const PARITY_COVERED_TOOLS: &[&str] = &[
             "unica.cf.edit",
             "unica.cf.info",
@@ -1427,19 +1395,6 @@ mod tests {
             }
 
             match tool.handler {
-                ToolHandler::LegacyScript { skill, script, .. } => {
-                    let plugin_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("../..")
-                        .join("plugins")
-                        .join("unica");
-                    let script_path = legacy_script_path(&plugin_root, skill, script);
-                    assert!(
-                        script_path.is_file(),
-                        "{} routes to missing transitional script {}",
-                        tool.name,
-                        script_path.display()
-                    );
-                }
                 ToolHandler::NativeOperation { operation, .. } => {
                     assert!(
                         PARITY_COVERED_TOOLS.contains(&tool.name),
@@ -1454,114 +1409,53 @@ mod tests {
     }
 
     #[test]
-    fn skd_transitional_tools_route_through_hidden_legacy_scripts_for_full_donor_contract() {
+    fn form_and_skd_tools_route_through_native_handlers() {
         let expected = [
-            ("unica.skd.compile", "skd-compile", "skd-compile.py"),
-            ("unica.skd.edit", "skd-edit", "skd-edit.py"),
-            ("unica.skd.validate", "skd-validate", "skd-validate.py"),
+            (
+                "unica.form.add",
+                "form-add",
+                Some(DomainEventKind::FormChanged),
+            ),
+            (
+                "unica.form.compile",
+                "form-compile",
+                Some(DomainEventKind::FormChanged),
+            ),
+            (
+                "unica.form.edit",
+                "form-edit",
+                Some(DomainEventKind::FormChanged),
+            ),
+            ("unica.form.info", "form-info", None),
+            (
+                "unica.form.remove",
+                "form-remove",
+                Some(DomainEventKind::FormChanged),
+            ),
+            ("unica.form.validate", "form-validate", None),
+            (
+                "unica.skd.compile",
+                "skd-compile",
+                Some(DomainEventKind::SkdChanged),
+            ),
+            (
+                "unica.skd.edit",
+                "skd-edit",
+                Some(DomainEventKind::SkdChanged),
+            ),
+            ("unica.skd.info", "skd-info", None),
+            ("unica.skd.validate", "skd-validate", None),
         ];
-        for (tool_name, expected_skill, expected_script) in expected {
+        for (tool_name, expected_operation, expected_event) in expected {
             let tool = tools()
                 .into_iter()
                 .find(|tool| tool.name == tool_name)
-                .expect("SKD tool exists");
-            match tool.handler {
-                ToolHandler::LegacyScript { skill, script, .. } => {
-                    assert_eq!(skill, expected_skill);
-                    assert_eq!(script, expected_script);
-                    let plugin_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("../..")
-                        .join("plugins")
-                        .join("unica");
-                    let hidden_script = legacy_script_path(&plugin_root, skill, script);
-                    assert!(
-                        hidden_script.is_file(),
-                        "{tool_name} routes to missing hidden script {}",
-                        hidden_script.display()
-                    );
-                    let prompt_visible_script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("../..")
-                        .join("plugins")
-                        .join("unica")
-                        .join("skills")
-                        .join(skill)
-                        .join("scripts")
-                        .join(script);
-                    assert!(
-                        !prompt_visible_script.exists(),
-                        "{tool_name} must not ship skill-local operation script {}",
-                        prompt_visible_script.display()
-                    );
-                }
-                other => {
-                    panic!("{tool_name} should route through hidden legacy script, got {other:?}")
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn form_transitional_tools_route_through_hidden_legacy_scripts_for_full_donor_contract() {
-        let expected = [
-            ("unica.form.add", "form-add", "form-add.py"),
-            ("unica.form.compile", "form-compile", "form-compile.py"),
-            ("unica.form.edit", "form-edit", "form-edit.py"),
-            ("unica.form.remove", "form-remove", "remove-form.py"),
-            ("unica.form.validate", "form-validate", "form-validate.py"),
-        ];
-        for (tool_name, expected_skill, expected_script) in expected {
-            let tool = tools()
-                .into_iter()
-                .find(|tool| tool.name == tool_name)
-                .expect("form tool exists");
-            match tool.handler {
-                ToolHandler::LegacyScript { skill, script, .. } => {
-                    assert_eq!(skill, expected_skill);
-                    assert_eq!(script, expected_script);
-                    let plugin_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("../..")
-                        .join("plugins")
-                        .join("unica");
-                    let hidden_script = legacy_script_path(&plugin_root, skill, script);
-                    assert!(
-                        hidden_script.is_file(),
-                        "{tool_name} routes to missing hidden script {}",
-                        hidden_script.display()
-                    );
-                    let prompt_visible_script = plugin_root
-                        .join("skills")
-                        .join(skill)
-                        .join("scripts")
-                        .join(script);
-                    assert!(
-                        !prompt_visible_script.exists(),
-                        "{tool_name} must not ship skill-local operation script {}",
-                        prompt_visible_script.display()
-                    );
-                }
-                other => {
-                    panic!("{tool_name} should route through hidden legacy script, got {other:?}")
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn read_only_form_and_skd_info_tools_route_through_native_handlers() {
-        let expected = [
-            ("unica.form.info", "form-info"),
-            ("unica.skd.info", "skd-info"),
-        ];
-        for (tool_name, expected_operation) in expected {
-            let tool = tools()
-                .into_iter()
-                .find(|tool| tool.name == tool_name)
-                .expect("read-only form/SKD tool exists");
+                .expect("form/SKD tool exists");
 
             match tool.handler {
                 ToolHandler::NativeOperation { operation, event } => {
                     assert_eq!(operation, expected_operation);
-                    assert_eq!(event, None);
+                    assert_eq!(event, expected_event);
                 }
                 other => panic!("{tool_name} should route through native operation, got {other:?}"),
             }

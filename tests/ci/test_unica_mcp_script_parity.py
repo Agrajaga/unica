@@ -430,6 +430,32 @@ SUCCESS_SCENARIOS = [
         compare_files=True,
     ),
     ParityScenario(
+        name="form-edit-additions",
+        tool="unica.form.edit",
+        skill="form-edit",
+        script="form-edit.py",
+        arguments={
+            "FormPath": "forms/Form.xml",
+            "JsonPath": "fixtures/form-edit-additions.json",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="form-compile",
+                script="form-compile.py",
+                arguments={
+                    "JsonPath": "fixtures/form-simple.json",
+                    "OutputPath": "forms/Form.xml",
+                },
+            ),
+        ),
+        fixtures=(
+            FileFixture("form-simple.json", "fixtures/form-simple.json"),
+            FileFixture("form-edit/additions.json", "fixtures/form-edit-additions.json"),
+        ),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
         name="form-info-main-form",
         tool="unica.form.info",
         skill="form-info",
@@ -759,6 +785,73 @@ SUCCESS_SCENARIOS = [
         compare_files=True,
     ),
     ParityScenario(
+        name="skd-edit-modify-structure",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "modify-structure",
+            "Value": "Price @name=G2",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                arguments={
+                    "TemplatePath": "templates/SKD.xml",
+                    "Operation": "set-structure",
+                    "Value": "Code @name=G1 > Quantity @name=G2 > details",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
+        name="skd-edit-add-selection-in-named-variant",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "add-selection",
+            "Value": "Code",
+            "Variant": "Alt",
+        },
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                arguments={
+                    "TemplatePath": "templates/SKD.xml",
+                    "Operation": "add-variant",
+                    "Value": "Alt [Alt presentation]",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
+        expect_ok=True,
+        compare_files=True,
+    ),
+    ParityScenario(
         name="mxl-compile-simple",
         tool="unica.mxl.compile",
         skill="mxl-compile",
@@ -928,6 +1021,47 @@ VALIDATION_FAILURE_SCENARIOS = [
                 "src/Reports/ParityReport/Forms/MainForm/Ext/Form.xml",
             ),
         ),
+    ),
+    ParityScenario(
+        name="skd-validate-bad-prefix-namespace",
+        tool="unica.skd.validate",
+        skill="skd-validate",
+        script="skd-validate.py",
+        arguments={"TemplatePath": "templates/BadPrefix.xml"},
+        expect_ok=False,
+        fixtures=(FileFixture("skd-validate/BadPrefix.xml", "templates/BadPrefix.xml"),),
+    ),
+    ParityScenario(
+        name="skd-edit-patch-query-once-ambiguous",
+        tool="unica.skd.edit",
+        skill="skd-edit",
+        script="skd-edit.py",
+        arguments={
+            "TemplatePath": "templates/SKD.xml",
+            "Operation": "patch-query",
+            "Value": "Code => ItemCode @once",
+        },
+        expect_ok=False,
+        setup_steps=(
+            SetupStep(
+                skill="skd-compile",
+                script="skd-compile.py",
+                arguments={
+                    "DefinitionFile": "fixtures/skd-simple.json",
+                    "OutputPath": "templates/SKD.xml",
+                },
+            ),
+            SetupStep(
+                skill="skd-edit",
+                script="skd-edit.py",
+                arguments={
+                    "TemplatePath": "templates/SKD.xml",
+                    "Operation": "set-query",
+                    "Value": "SELECT Code AS Code",
+                },
+            ),
+        ),
+        fixtures=(FileFixture("skd-simple.json", "fixtures/skd-simple.json"),),
     ),
 ]
 
@@ -1215,6 +1349,12 @@ NATIVE_PARITY_TOOLS = {
     "unica.meta.info",
     "unica.meta.remove",
     "unica.meta.validate",
+    "unica.form.add",
+    "unica.form.compile",
+    "unica.form.edit",
+    "unica.form.info",
+    "unica.form.remove",
+    "unica.form.validate",
     "unica.subsystem.compile",
     "unica.subsystem.edit",
     "unica.subsystem.info",
@@ -1223,6 +1363,10 @@ NATIVE_PARITY_TOOLS = {
     "unica.interface.validate",
     "unica.template.add",
     "unica.template.remove",
+    "unica.skd.compile",
+    "unica.skd.edit",
+    "unica.skd.info",
+    "unica.skd.validate",
     "unica.mxl.compile",
     "unica.mxl.decompile",
     "unica.mxl.info",
@@ -1230,6 +1374,15 @@ NATIVE_PARITY_TOOLS = {
     "unica.role.compile",
     "unica.role.info",
     "unica.role.validate",
+}
+
+MUTATING_FORM_SKD_PARITY_TOOLS = {
+    "unica.form.add",
+    "unica.form.compile",
+    "unica.form.edit",
+    "unica.form.remove",
+    "unica.skd.compile",
+    "unica.skd.edit",
 }
 
 EXPECTED_TOOLS = {
@@ -1298,6 +1451,15 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
     def test_every_in_scope_tool_has_a_parity_scenario(self) -> None:
         covered = {scenario.tool for scenario in SCENARIOS}
         self.assertEqual(covered, EXPECTED_TOOLS)
+        covered_by_success_snapshot = {
+            scenario.tool
+            for scenario in SCENARIOS
+            if scenario.expect_ok and scenario.compare_files
+        }
+        self.assertEqual(
+            covered_by_success_snapshot & MUTATING_FORM_SKD_PARITY_TOOLS,
+            MUTATING_FORM_SKD_PARITY_TOOLS,
+        )
 
     def test_every_skill_tools_call_example_executes_as_mcp_dry_run(self) -> None:
         examples = list(iter_skill_mcp_examples())
@@ -1539,11 +1701,6 @@ def normalize_text(text: str, workspace: Path) -> str:
     normalized = normalized.replace(str(REPO_ROOT), "<REPO>")
     normalized = re.sub(
         r"<REPO>/tests/fixtures/unica_mcp_script_parity/reference_skills/([^/\s\"']+)/scripts/([^/\s\"']+)",
-        r"<REPO>/<SKILL_SCRIPT>/\1/\2",
-        normalized,
-    )
-    normalized = re.sub(
-        r"<REPO>/plugins/unica/scripts/legacy/([^/\s\"']+)/([^/\s\"']+)",
         r"<REPO>/<SKILL_SCRIPT>/\1/\2",
         normalized,
     )

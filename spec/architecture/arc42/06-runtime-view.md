@@ -26,8 +26,7 @@
 ## Applied Mutation
 
 1. Caller explicitly passes `dryRun: false`.
-2. Native MCP handler executes the operation. A transitional adapter may execute
-   only for not-yet-migrated operations.
+2. Native MCP handler executes the operation.
 3. Successful mutation emits domain events.
 4. `WorkspaceStateRepository` marks affected caches stale and records eager
    refreshes.

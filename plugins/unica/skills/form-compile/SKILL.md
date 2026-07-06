@@ -1,7 +1,7 @@
 ---
 name: form-compile
-description: Компиляция управляемой формы 1С из JSON-определения или из метаданных объекта. Используй когда нужно создать форму с нуля по описанию элементов или сгенерировать типовую форму
-argument-hint: <JsonPath> <OutputPath> | -FromObject <OutputPath>
+description: Компиляция управляемой формы 1С из JSON-определения. Используй когда нужно создать форму с нуля по описанию элементов
+argument-hint: <JsonPath> <OutputPath>
 allowed-tools:
   - Bash
   - Read
@@ -19,9 +19,8 @@ allowed-tools:
 - For mutating operations, pass `dryRun: false` only when the user explicitly requested the change; otherwise keep the default dry run.
 - Vendor support guard runs inside `unica`; if it blocks a locked/read-only supported object, prefer CFE/release-support or an explicit support-state change plan instead of editing raw support metadata.
 
-Два режима:
+Режим:
 1. **JSON DSL** — из JSON-определения формы
-2. **From object** (`-FromObject`) — автоматически из метаданных объекта 1С по пресету ERP
 
 > **При проектировании формы с нуля (5+ элементов или нечёткие требования)** — используй справочник `form-patterns`. Для простых форм (1-3 поля) — не нужно.
 
@@ -29,9 +28,8 @@ allowed-tools:
 
 | Параметр   | Обязательный | Описание                        |
 |------------|:------------:|---------------------------------|
-| JsonPath   | режим 1      | Путь к JSON-определению формы   |
+| JsonPath   | да           | Путь к JSON-определению формы   |
 | OutputPath | да           | Путь к выходному Form.xml       |
-| FromObject | режим 2      | Флаг (без значения) — генерация по метаданным объекта |
 
 ## MCP вызов
 
@@ -53,7 +51,7 @@ allowed-tools:
 }
 ```
 
-### From object без промежуточного JSON
+### JSON DSL в форме объекта конфигурации
 
 ```json
 {
@@ -63,7 +61,7 @@ allowed-tools:
     "name": "unica.form.compile",
     "arguments": {
       "cwd": "<workspace>",
-      "FromObject": true,
+      "JsonPath": "<json>",
       "OutputPath": "<.../TypePlural/ObjectName/Forms/FormName/Ext/Form.xml>",
       "dryRun": false
     }

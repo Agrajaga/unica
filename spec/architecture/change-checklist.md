@@ -15,7 +15,7 @@ cache behavior, or packaging metadata.
 - [ ] Updated skills mention MCP `unica`.
 - [ ] Updated skills do not expose internal adapter server names as user-facing
   routing.
-- [ ] Updated migrated skills do not point users to skill-local Python/PowerShell
+- [ ] Updated skills do not point users to skill-local Python/PowerShell
   operation files.
 - [ ] Mutating skills preserve explicit `dryRun: false` guidance.
 
@@ -38,10 +38,10 @@ cache behavior, or packaging metadata.
   workspace service manager.
 - [ ] Cheap read-only adapters such as `unica.code.grep` do not start workspace
   services.
-- [ ] If a skill-local operation file is still used, it is recorded as migration
-  debt with a parity/removal task.
-- [ ] Native MCP implementation and fixture parity exist before deleting the
-  corresponding operation file.
+- [ ] Operation backends use native Rust handlers, not Python/PowerShell/Bash
+  runtime fallbacks.
+- [ ] Fixture parity exists when donor script behavior is retained as the
+  reference source model.
 
 ## Packaging
 

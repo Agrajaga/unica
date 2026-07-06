@@ -79,6 +79,31 @@ class PackageUnicaPluginTests(unittest.TestCase):
 
         self.assertEqual(wrappers, [])
 
+    def test_unica_coder_has_no_runtime_operation_script_fallback(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+
+        self.assertFalse((repo_root / "plugins" / "unica" / "scripts" / "legacy").exists())
+
+        rust_sources = sorted((repo_root / "crates" / "unica-coder" / "src").rglob("*.rs"))
+        forbidden = (
+            "ToolHandler::LegacyScript",
+            "LegacyScriptAdapter",
+            "legacy_scripts",
+            'Command::new("python3")',
+            'Command::new("python")',
+            'Command::new("bash")',
+            'Command::new("powershell")',
+            'Command::new("pwsh")',
+        )
+        matches = [
+            f"{path.relative_to(repo_root)}:{needle}"
+            for path in rust_sources
+            for needle in forbidden
+            if needle in path.read_text(encoding="utf-8")
+        ]
+
+        self.assertEqual(matches, [])
+
     def test_source_mcp_does_not_use_runtime_shell_wrappers(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         mcp = json.loads((repo_root / "plugins" / "unica" / ".mcp.json").read_text(encoding="utf-8"))

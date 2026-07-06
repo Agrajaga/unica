@@ -28,7 +28,7 @@ Unica. Если изменение нарушает инвариант, снач
 3. Skills must not use skill-local Python/PowerShell operation files as the
    target execution path.
 4. Former script command semantics must be implemented inside native `unica.*`
-   MCP tools before the corresponding files are removed.
+   MCP tools. Reference scripts are allowed only under `tests/fixtures`.
 5. For mutating operations, skills should keep dry-run unless the user explicitly
    requested mutation.
 
@@ -37,8 +37,8 @@ Unica. Если изменение нарушает инвариант, снач
 1. Application use cases own tool dispatch and domain event emission.
 2. MCP transport maps protocol requests to application calls.
 3. Infrastructure adapters must not bypass application cache/event handling.
-4. Skill-local operation files are migration debt and must not become accepted
-   architecture.
+4. `unica-coder` must not contain a runtime operation-file fallback for
+   Python/PowerShell/Bash scripts.
 
 ## Cache And Workspace State
 

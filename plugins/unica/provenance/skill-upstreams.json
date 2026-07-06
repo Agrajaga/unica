@@ -243,7 +243,7 @@
         {
           "skill": "form-add",
           "status": "ported-to-unica",
-          "notes": "Reviewed donor support-guard drift through 3d36c2026916d2ae8915f0aca0836d55e1ccaabe; Unica adapts it at the MCP application layer for this mutating tool using the shared ParentConfigurations.bin parser and .v8-project.json editingAllowedCheck deny|warn|off policy. Raw donor script wrapper path changes are not applicable because the prompt-visible skill routes through typed unica.*. 2026-06-26 cbde49 refresh: EOL-only, raw wrapper/guidance, shared docs, or donor-only capability drift reviewed and ignored for current Unica packaged MCP surface.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-add/**",
             "docs/form-guide.md",
@@ -254,7 +254,6 @@
           "localPaths": [
             "plugins/unica/skills/form-add",
             "tests/fixtures/unica_mcp_script_parity/reference_skills/form-add",
-            "plugins/unica/scripts/legacy/form-add",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -263,7 +262,7 @@
             "tests/ci/test_unica_mcp_script_parity.py",
             "crates/unica-coder/src/application/mod.rs",
             "crates/unica-coder/src/application/tool_contracts.rs",
-            "crates/unica-coder/src/infrastructure/legacy_scripts.rs"
+            "crates/unica-coder/src/infrastructure/native_operations/form.rs"
           ],
           "decision": "ignored-with-reason",
           "baselineCommit": "cbde49efdaeec190432fdf4a53201a87e83c69de",
@@ -272,7 +271,7 @@
         {
           "skill": "form-compile",
           "status": "ported-to-unica",
-          "notes": "Reviewed donor support-guard drift through 3d36c2026916d2ae8915f0aca0836d55e1ccaabe; Unica adapts it at the MCP application layer for this mutating tool using the shared ParentConfigurations.bin parser and .v8-project.json editingAllowedCheck deny|warn|off policy. Raw donor script wrapper path changes are not applicable because the prompt-visible skill routes through typed unica.*. 2026-06-26 cbde49 refresh: EOL-only, raw wrapper/guidance, shared docs, or donor-only capability drift reviewed and ignored for current Unica packaged MCP surface.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-compile/**",
             "docs/form-guide.md",
@@ -283,7 +282,6 @@
           "localPaths": [
             "plugins/unica/skills/form-compile",
             "tests/fixtures/unica_mcp_script_parity/reference_skills/form-compile",
-            "plugins/unica/scripts/legacy/form-compile",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -292,7 +290,7 @@
             "tests/ci/test_unica_mcp_script_parity.py",
             "crates/unica-coder/src/application/mod.rs",
             "crates/unica-coder/src/application/tool_contracts.rs",
-            "crates/unica-coder/src/infrastructure/legacy_scripts.rs"
+            "crates/unica-coder/src/infrastructure/native_operations/form.rs"
           ],
           "decision": "ignored-with-reason",
           "baselineCommit": "cbde49efdaeec190432fdf4a53201a87e83c69de",
@@ -301,7 +299,7 @@
         {
           "skill": "form-edit",
           "status": "ported-to-unica",
-          "notes": "Reviewed donor support-guard drift through 3d36c2026916d2ae8915f0aca0836d55e1ccaabe; Unica adapts it at the MCP application layer for this mutating tool using the shared ParentConfigurations.bin parser and .v8-project.json editingAllowedCheck deny|warn|off policy. Raw donor script wrapper path changes are not applicable because the prompt-visible skill routes through typed unica.*. 2026-06-26 cbde49 refresh: EOL-only, raw wrapper/guidance, shared docs, or donor-only capability drift reviewed and ignored for current Unica packaged MCP surface.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-edit/**",
             "docs/form-guide.md",
@@ -312,7 +310,6 @@
           "localPaths": [
             "plugins/unica/skills/form-edit",
             "tests/fixtures/unica_mcp_script_parity/reference_skills/form-edit",
-            "plugins/unica/scripts/legacy/form-edit",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -321,7 +318,7 @@
             "tests/ci/test_unica_mcp_script_parity.py",
             "crates/unica-coder/src/application/mod.rs",
             "crates/unica-coder/src/application/tool_contracts.rs",
-            "crates/unica-coder/src/infrastructure/legacy_scripts.rs"
+            "crates/unica-coder/src/infrastructure/native_operations/form.rs"
           ],
           "decision": "ignored-with-reason",
           "baselineCommit": "cbde49efdaeec190432fdf4a53201a87e83c69de",
@@ -330,7 +327,7 @@
         {
           "skill": "form-info",
           "status": "ported-to-unica",
-          "notes": "Support-state reporting from Ext/ParentConfigurations.bin was reviewed at current donor head and ported through unica.form.info for the owner metadata object; mutating support-guard stays open. 2026-06-26 cbde49 refresh: EOL-only, raw wrapper/guidance, shared docs, or donor-only capability drift reviewed and ignored for current Unica packaged MCP surface.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-info/**",
             "docs/form-guide.md",
@@ -341,7 +338,6 @@
           "localPaths": [
             "plugins/unica/skills/form-info",
             "tests/fixtures/unica_mcp_script_parity/reference_skills/form-info",
-            "plugins/unica/scripts/legacy/form-info",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -350,7 +346,6 @@
             "tests/ci/test_unica_mcp_script_parity.py",
             "crates/unica-coder/src/application/mod.rs",
             "crates/unica-coder/src/application/tool_contracts.rs",
-            "crates/unica-coder/src/infrastructure/legacy_scripts.rs",
             "crates/unica-coder/src/infrastructure/native_operations/common.rs",
             "crates/unica-coder/src/infrastructure/native_operations/form.rs"
           ],
@@ -384,7 +379,7 @@
         {
           "skill": "form-remove",
           "status": "ported-to-unica",
-          "notes": "2026-07-04 78b5b73 refresh: ported donor v1.3 form cleanup semantics into native Unica form.remove. The native implementation now removes matching <Form> child references by suffix and clears all default/auxiliary *Form slots that point at the removed form, not only DefaultForm.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-remove/**",
             "docs/form-guide.md",
@@ -395,7 +390,6 @@
           "localPaths": [
             "plugins/unica/skills/form-remove",
             "tests/fixtures/unica_mcp_script_parity/reference_skills/form-remove",
-            "plugins/unica/scripts/legacy/form-remove",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -404,7 +398,7 @@
             "tests/ci/test_unica_mcp_script_parity.py",
             "crates/unica-coder/src/application/mod.rs",
             "crates/unica-coder/src/application/tool_contracts.rs",
-            "crates/unica-coder/src/infrastructure/legacy_scripts.rs"
+            "crates/unica-coder/src/infrastructure/native_operations/form.rs"
           ],
           "decision": "ported",
           "baselineCommit": "78b5b73fa7f835462dc4073ae7a9fc841e7c62fb",
@@ -413,7 +407,7 @@
         {
           "skill": "form-validate",
           "status": "ported-to-unica",
-          "notes": "Reviewed and ported donor form-validate v1.8 behavior through cbde49efdaeec190432fdf4a53201a87e83c69de: all binding tags are validated, skip rules are preserved, type_error_count is fixed, and parity fixture is refreshed. Unica intentionally adapts bare Type values from donor warning to validation error because such forms fail platform XDTO import.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-validate/**",
             "docs/form-guide.md",
@@ -424,7 +418,6 @@
           "localPaths": [
             "plugins/unica/skills/form-validate",
             "tests/fixtures/unica_mcp_script_parity/reference_skills/form-validate",
-            "plugins/unica/scripts/legacy/form-validate",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -433,7 +426,7 @@
             "tests/ci/test_unica_mcp_script_parity.py",
             "crates/unica-coder/src/application/mod.rs",
             "crates/unica-coder/src/application/tool_contracts.rs",
-            "crates/unica-coder/src/infrastructure/legacy_scripts.rs"
+            "crates/unica-coder/src/infrastructure/native_operations/form.rs"
           ],
           "decision": "ported",
           "baselineCommit": "cbde49efdaeec190432fdf4a53201a87e83c69de"
@@ -803,7 +796,7 @@
         {
           "skill": "skd-compile",
           "status": "ported-to-unica",
-          "notes": "Reviewed donor support-guard drift through 3d36c2026916d2ae8915f0aca0836d55e1ccaabe; Unica adapts it at the MCP application layer for this mutating tool using the shared ParentConfigurations.bin parser and .v8-project.json editingAllowedCheck deny|warn|off policy. Raw donor script wrapper path changes are not applicable because the prompt-visible skill routes through typed unica.*. 2026-06-26 cbde49 refresh: EOL-only, raw wrapper/guidance, shared docs, or donor-only capability drift reviewed and ignored for current Unica packaged MCP surface.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/skd.rs) behind unica.skd.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/skd-compile/**",
             "docs/skd-guide.md",
@@ -813,7 +806,6 @@
           "localPaths": [
             "plugins/unica/skills/skd-compile",
             "tests/fixtures/unica_mcp_script_parity/reference_skills/skd-compile",
-            "plugins/unica/scripts/legacy/skd-compile",
             "plugins/unica/references/specs/skd-dsl-spec.md",
             "plugins/unica/references/specs/1c-dcs-spec.md"
           ],
@@ -822,7 +814,7 @@
             "tests/ci/test_unica_mcp_script_parity.py",
             "crates/unica-coder/src/application/mod.rs",
             "crates/unica-coder/src/application/tool_contracts.rs",
-            "crates/unica-coder/src/infrastructure/legacy_scripts.rs"
+            "crates/unica-coder/src/infrastructure/native_operations/skd.rs"
           ],
           "decision": "ignored-with-reason",
           "baselineCommit": "cbde49efdaeec190432fdf4a53201a87e83c69de",
@@ -831,7 +823,7 @@
         {
           "skill": "skd-edit",
           "status": "ported-to-unica",
-          "notes": "2026-07-04 78b5b73 refresh: refreshed the shipped legacy/parity skd-edit Python port to v1.28, including Python 3.9-safe autoDates expression construction outside f-string braces.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/skd.rs) behind unica.skd.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/skd-edit/**",
             "docs/skd-guide.md",
@@ -841,7 +833,6 @@
           "localPaths": [
             "plugins/unica/skills/skd-edit",
             "tests/fixtures/unica_mcp_script_parity/reference_skills/skd-edit",
-            "plugins/unica/scripts/legacy/skd-edit",
             "plugins/unica/references/specs/skd-dsl-spec.md",
             "plugins/unica/references/specs/1c-dcs-spec.md"
           ],
@@ -850,16 +841,16 @@
             "tests/ci/test_unica_mcp_script_parity.py",
             "crates/unica-coder/src/application/mod.rs",
             "crates/unica-coder/src/application/tool_contracts.rs",
-            "crates/unica-coder/src/infrastructure/legacy_scripts.rs"
+            "crates/unica-coder/src/infrastructure/native_operations/skd.rs"
           ],
           "decision": "ported",
           "baselineCommit": "78b5b73fa7f835462dc4073ae7a9fc841e7c62fb",
-          "decisionReason": "Ported 78b5b73 skd-edit runtime portability fix into legacy and parity scripts; expression strings are precomputed before the f-string to avoid Python <3.12 SyntaxError."
+          "decisionReason": "Ported documented donor skd-edit command semantics into native Rust runtime; Python remains only the parity reference fixture."
         },
         {
           "skill": "skd-info",
           "status": "ported-to-unica",
-          "notes": "Support-state reporting from Ext/ParentConfigurations.bin was reviewed at current donor head and ported through unica.skd.info overview/full without changing raw query round-trip modes; mutating support-guard stays open. 2026-06-26 cbde49 refresh: EOL-only, raw wrapper/guidance, shared docs, or donor-only capability drift reviewed and ignored for current Unica packaged MCP surface.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/skd.rs) behind unica.skd.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/skd-info/**",
             "docs/skd-guide.md",
@@ -869,7 +860,6 @@
           "localPaths": [
             "plugins/unica/skills/skd-info",
             "tests/fixtures/unica_mcp_script_parity/reference_skills/skd-info",
-            "plugins/unica/scripts/legacy/skd-info",
             "plugins/unica/references/specs/skd-dsl-spec.md",
             "plugins/unica/references/specs/1c-dcs-spec.md"
           ],
@@ -878,7 +868,6 @@
             "tests/ci/test_unica_mcp_script_parity.py",
             "crates/unica-coder/src/application/mod.rs",
             "crates/unica-coder/src/application/tool_contracts.rs",
-            "crates/unica-coder/src/infrastructure/legacy_scripts.rs",
             "crates/unica-coder/src/infrastructure/native_operations/common.rs",
             "crates/unica-coder/src/infrastructure/native_operations/skd.rs"
           ],
@@ -889,7 +878,7 @@
         {
           "skill": "skd-validate",
           "status": "ported-to-unica",
-          "notes": "Reviewed and ported donor SKD validation updates through typed unica.skd.validate with updated parity fixture and hidden script adapter routing. 2026-06-26 cbde49 refresh: EOL-only, raw wrapper/guidance, shared docs, or donor-only capability drift reviewed and ignored for current Unica packaged MCP surface.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/skd.rs) behind unica.skd.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/skd-validate/**",
             "docs/skd-guide.md",
@@ -899,7 +888,6 @@
           "localPaths": [
             "plugins/unica/skills/skd-validate",
             "tests/fixtures/unica_mcp_script_parity/reference_skills/skd-validate",
-            "plugins/unica/scripts/legacy/skd-validate",
             "plugins/unica/references/specs/skd-dsl-spec.md",
             "plugins/unica/references/specs/1c-dcs-spec.md"
           ],
@@ -908,7 +896,7 @@
             "tests/ci/test_unica_mcp_script_parity.py",
             "crates/unica-coder/src/application/mod.rs",
             "crates/unica-coder/src/application/tool_contracts.rs",
-            "crates/unica-coder/src/infrastructure/legacy_scripts.rs"
+            "crates/unica-coder/src/infrastructure/native_operations/skd.rs"
           ],
           "decision": "ignored-with-reason",
           "baselineCommit": "cbde49efdaeec190432fdf4a53201a87e83c69de",
