@@ -1433,7 +1433,6 @@ pub(crate) fn cfe_borrow_form_shell(
     let borrowed_form_xml = cfe_borrow_form_xml(
         &source_form_content,
         cfg_dir,
-        ext_dir,
         type_name,
         object_name,
         borrow_main_attr,
@@ -1494,7 +1493,6 @@ pub(crate) struct CfeBorrowFormBlock {
 pub(crate) fn cfe_borrow_form_xml(
     source_form_content: &str,
     cfg_dir: &Path,
-    _ext_dir: &Path,
     type_name: &str,
     object_name: &str,
     borrow_main_attr: bool,
@@ -1647,11 +1645,7 @@ pub(crate) fn cfe_borrow_form_xml(
         None
     };
 
-    let mut parts = Vec::<String>::new();
-    parts.push(xml_decl);
-    parts.push("\r\n".to_string());
-    parts.push(form_tag);
-    parts.push("\r\n".to_string());
+    let mut parts = vec![xml_decl, "\r\n".to_string(), form_tag, "\r\n".to_string()];
     for prop_xml in &form_props {
         parts.push(format!("\t{prop_xml}\r\n"));
     }

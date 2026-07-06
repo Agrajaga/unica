@@ -4228,7 +4228,7 @@ pub(crate) fn form_compile_xml(
             .and_then(|props| json_string_field(props, "title"))
     });
     if let Some(title) = form_title.as_deref() {
-        emit_form_mltext(&mut lines, "\t", "Title", &title);
+        emit_form_mltext(&mut lines, "\t", "Title", title);
     }
 
     let props_src = defn.get("properties").and_then(Value::as_object);
