@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.17">
+	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+	<ChildItems>
+		<UsualGroup name="Повтор" id="1000001">
+			<ExtendedTooltip name="ПовторПодсказка1" id="-1"/>
+		</UsualGroup>
+		<UsualGroup name="Повтор" id="1000002">
+			<ExtendedTooltip name="ПовторПодсказка2" id="-1"/>
+		</UsualGroup>
+	</ChildItems>
+	<Attributes>
+		<Attribute name="ПовторРеквизит" id="1">
+			<Columns>
+				<Column name="Колонка" id="11"/>
+				<Column name="Колонка" id="12"/>
+			</Columns>
+		</Attribute>
+		<Attribute name="ПовторРеквизит" id="2"/>
+	</Attributes>
+	<Commands>
+		<Command name="Команда" id="1">
+			<Action>Команда</Action>
+		</Command>
+		<Command name="Команда" id="2">
+			<Action>Команда</Action>
+		</Command>
+	</Commands>
+	<Parameters>
+		<Parameter name="Параметр"/>
+		<Parameter name="Параметр"/>
+	</Parameters>
+</Form>
