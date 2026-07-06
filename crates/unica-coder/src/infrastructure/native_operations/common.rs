@@ -160,7 +160,7 @@ pub(crate) fn register_form_in_object_text(text: &str, form_name: &str) -> Strin
 pub(crate) fn read_utf8_sig(path: &Path) -> Result<String, String> {
     let mut text = fs::read_to_string(path)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    if text.starts_with('\u{feff}') {
+    while text.starts_with('\u{feff}') {
         text.remove(0);
     }
     Ok(text)
@@ -1212,6 +1212,7 @@ pub(crate) fn output_dir_arg(
 pub(crate) fn write_utf8_bom(path: &Path, content: &str) -> Result<(), String> {
     let mut file = fs::File::create(path)
         .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    let content = content.trim_start_matches('\u{feff}');
     file.write_all(b"\xef\xbb\xbf")
         .and_then(|_| file.write_all(content.as_bytes()))
         .map_err(|err| format!("failed to write {}: {err}", path.display()))
@@ -1624,6 +1625,14 @@ impl SupportState {
         self.object_rules
             .get(&object_uuid.to_ascii_lowercase())
             .copied()
+    }
+
+    pub(crate) fn global_editing_enabled(&self) -> bool {
+        self.global_editing_enabled
+    }
+
+    pub(crate) fn removed(&self) -> bool {
+        self.removed
     }
 }
 
