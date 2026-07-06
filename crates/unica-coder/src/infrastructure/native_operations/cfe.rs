@@ -1668,7 +1668,7 @@ pub(crate) fn cfe_borrow_form_xml(
     parts.push("\r\n".to_string());
     parts.push(format!(
         "\t<BaseForm version=\"{}\">\r\n",
-        escape_xml(&version)
+        escape_xml(format_version)
     ));
     for prop_xml in &form_props {
         parts.push(format!("\t\t{prop_xml}\r\n"));

@@ -2371,22 +2371,86 @@ pub(crate) fn form_compile_normalize_from_object_output_label(
     ))
 }
 
+pub(crate) fn form_compile_infer_from_object_target(
+    output_path: &Path,
+    context: &WorkspaceContext,
+) -> (Option<PathBuf>, Option<&'static str>) {
+    let components = output_path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    let Some(forms_index) = components
+        .iter()
+        .rposition(|component| component == "Forms")
+    else {
+        return (None, None);
+    };
+    if forms_index < 2 || forms_index + 1 >= components.len() {
+        return (None, None);
+    }
+
+    let form_name = components[forms_index + 1].as_str();
+    let purpose = match form_name {
+        "ФормаЭлемента" | "ФормаДокумента" | "ФормаСчета" => {
+            Some("Item")
+        }
+        "ФормаГруппы" => Some("Folder"),
+        "ФормаСписка" => Some("List"),
+        "ФормаВыбора" => Some("Choice"),
+        "ФормаЗаписи" => Some("Record"),
+        _ => None,
+    };
+
+    let object_name = components[forms_index - 1].as_str();
+    let mut object_path = PathBuf::new();
+    for component in &components[..forms_index - 1] {
+        object_path.push(component);
+    }
+    object_path.push(format!("{object_name}.xml"));
+    let object_path = absolutize(object_path, &context.cwd);
+    if object_path.exists() {
+        (Some(object_path), purpose)
+    } else {
+        (None, purpose)
+    }
+}
+
 pub(crate) fn form_compile_definition_from_object(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
-    _output_path: &Path,
+    output_path: &Path,
 ) -> Result<(Value, String), String> {
-    let object_path_raw = required_path(args, &["objectPath", "ObjectPath"], "ObjectPath")?;
-    let mut object_path = absolutize(object_path_raw.clone(), &context.cwd);
-    if object_path.extension().is_none() {
-        object_path.set_extension("xml");
-    }
+    let (inferred_object_path, inferred_purpose) =
+        form_compile_infer_from_object_target(output_path, context);
+    let (object_path, mut stdout) = if let Some(object_path_raw) =
+        path_arg(args, &["objectPath", "ObjectPath"])
+    {
+        let mut object_path = absolutize(object_path_raw, &context.cwd);
+        if object_path.extension().is_none() {
+            object_path.set_extension("xml");
+        }
+        (object_path, String::new())
+    } else if let Some(object_path) = inferred_object_path {
+        (
+            object_path.clone(),
+            format!("[resolved] ObjectPath -> {}\n", object_path.display()),
+        )
+    } else {
+        return Err(
+            "Cannot derive object path from OutputPath. Use -ObjectPath explicitly.".to_string(),
+        );
+    };
     if !object_path.exists() {
         return Err(format!("Object file not found: {}", object_path.display()));
     }
     let object_text = read_utf8_sig(&object_path)?;
     let meta = form_compile_parse_object_meta(&object_text)?;
-    let purpose = string_arg(args, &["purpose", "Purpose"]).unwrap_or("Item");
+    let purpose = string_arg(args, &["purpose", "Purpose"])
+        .or(inferred_purpose)
+        .unwrap_or("Item");
+    if string_arg(args, &["purpose", "Purpose"]).is_none() && inferred_purpose.is_some() {
+        stdout.push_str(&format!("[resolved] Purpose -> {purpose}\n"));
+    }
 
     let defn = match (meta.object_type.as_str(), purpose) {
         ("Catalog", "List") => form_compile_catalog_list_definition(&meta),
@@ -2409,13 +2473,13 @@ pub(crate) fn form_compile_definition_from_object(
             ));
         }
     };
-    let stdout = format!(
+    stdout.push_str(&format!(
         "[from-object] Type={}, Name={}, Attrs={}, TS={}\n",
         meta.object_type,
         meta.name,
         meta.attributes.len(),
         meta.tabular_sections.len()
-    );
+    ));
     Ok((defn, stdout))
 }
 

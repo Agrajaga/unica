@@ -5722,156 +5722,9 @@ pub(crate) fn compile_meta(
 
         let json_text = fs::read_to_string(&json_path)
             .map_err(|err| format!("failed to read {}: {err}", json_path.display()))?;
-        let mut defn: Value = serde_json::from_str(json_text.trim_start_matches('\u{feff}'))
+        let defn: Value = serde_json::from_str(json_text.trim_start_matches('\u{feff}'))
             .map_err(|err| format!("failed to parse metadata JSON: {err}"))?;
-        if defn.is_array() {
-            return Err(
-                "native meta compiler currently supports one metadata object per call".to_string(),
-            );
-        }
-        if defn.get("type").is_none() {
-            if let Some(object_type) = defn.get("objectType").cloned() {
-                defn.as_object_mut()
-                    .ok_or_else(|| "metadata JSON must be an object".to_string())?
-                    .insert("type".to_string(), object_type);
-            }
-        }
-        let object = defn
-            .as_object()
-            .ok_or_else(|| "metadata JSON must be an object".to_string())?;
-        let raw_type = object
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "JSON must have 'type' field".to_string())?;
-        let obj_type = normalize_meta_object_type(raw_type);
-        let type_plural = meta_compile_type_plural(&obj_type).ok_or_else(|| {
-            format!(
-                "Unsupported type: {obj_type}. Supported: {}. Documented pending: {}",
-                META_COMPILE_SUPPORTED_TYPES.join(", "),
-                META_COMPILE_PENDING_TYPES.join(", ")
-            )
-        })?;
-        let obj_name = object
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "JSON must have 'name' field".to_string())?;
-        let type_dir = output_dir.join(type_plural);
-        let main_xml_path = type_dir.join(format!("{obj_name}.xml"));
-        let obj_sub_dir = type_dir.join(obj_name);
-        let ext_dir = obj_sub_dir.join("Ext");
-
-        fs::create_dir_all(&type_dir)
-            .map_err(|err| format!("failed to create {}: {err}", type_dir.display()))?;
-        if meta_compile_uses_object_subdir(&obj_type) {
-            fs::create_dir_all(&obj_sub_dir)
-                .map_err(|err| format!("failed to create {}: {err}", obj_sub_dir.display()))?;
-        }
-        let format_version = detect_format_version(&output_dir);
-        let (metadata_xml, uid) =
-            meta_compile_object_xml(object, &obj_type, obj_name, &format_version)?;
-        write_utf8_bom(&main_xml_path, &metadata_xml)?;
-
-        let mut artifacts = vec![main_xml_path.clone()];
-        let mut modules_created = Vec::<PathBuf>::new();
-        for module_name in meta_compile_module_files(&obj_type) {
-            let module_path = ext_dir.join(module_name);
-            if !module_path.is_file() {
-                fs::create_dir_all(&ext_dir)
-                    .map_err(|err| format!("failed to create {}: {err}", ext_dir.display()))?;
-                write_utf8_bom(&module_path, "")?;
-                modules_created.push(module_path.clone());
-                artifacts.push(module_path.clone());
-            }
-        }
-        for (file_name, content) in meta_compile_extra_ext_files(&obj_type, &format_version) {
-            let file_path = ext_dir.join(file_name);
-            if !file_path.is_file() {
-                fs::create_dir_all(&ext_dir)
-                    .map_err(|err| format!("failed to create {}: {err}", ext_dir.display()))?;
-                write_utf8_bom(&file_path, &content)?;
-                modules_created.push(file_path.clone());
-                artifacts.push(file_path.clone());
-            }
-        }
-
-        let reg_result = register_compiled_meta_in_configuration(&output_dir, &obj_type, obj_name)?;
-
-        let attr_count = object
-            .get("attributes")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        let ts_count = object
-            .get("tabularSections")
-            .map(meta_compile_collection_count)
-            .unwrap_or(0);
-        let enum_value_count = object
-            .get("values")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        let dim_count = object
-            .get("dimensions")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        let res_count = object
-            .get("resources")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        let column_count = object
-            .get("columns")
-            .and_then(Value::as_array)
-            .map_or(0, Vec::len);
-        let mut stdout = format!(
-            "[OK] {obj_type} '{obj_name}' compiled\n     UUID: {uid}\n     File: {}/{type_plural}/{obj_name}.xml\n",
-            output_dir_label.trim_end_matches(['/', '\\'])
-        );
-        let mut details = Vec::new();
-        if attr_count > 0 {
-            details.push(format!("Attributes: {attr_count}"));
-        }
-        if ts_count > 0 {
-            details.push(format!("TabularSections: {ts_count}"));
-        }
-        if enum_value_count > 0 {
-            details.push(format!("EnumValues: {enum_value_count}"));
-        }
-        if dim_count > 0 {
-            details.push(format!("Dimensions: {dim_count}"));
-        }
-        if res_count > 0 {
-            details.push(format!("Resources: {res_count}"));
-        }
-        if column_count > 0 {
-            details.push(format!("Columns: {column_count}"));
-        }
-        if !details.is_empty() {
-            stdout.push_str(&format!("     {}\n", details.join(", ")));
-        }
-        for module in modules_created {
-            stdout.push_str(&format!(
-                "     Module: {}/{type_plural}/{obj_name}/Ext/{}\n",
-                output_dir_label.trim_end_matches(['/', '\\']),
-                module
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("ObjectModule.bsl")
-            ));
-        }
-        match reg_result.as_deref() {
-            Some("added") => stdout.push_str(&format!(
-                "     Configuration.xml: <{obj_type}>{obj_name}</{obj_type}> added to ChildObjects\n"
-            )),
-            Some("already") => stdout.push_str(&format!(
-                "     Configuration.xml: <{obj_type}>{obj_name}</{obj_type}> already registered\n"
-            )),
-            Some("no-childobj") => {}
-            _ => stdout.push_str(&format!(
-                "     Configuration.xml: not found at {}/Configuration.xml (register manually)\n",
-                output_dir_label.trim_end_matches(['/', '\\'])
-            )),
-        }
-
-        Ok((stdout, artifacts))
+        compile_meta_value(defn, &output_dir_label, &output_dir)
     })();
 
     match write_result {
@@ -5904,6 +5757,203 @@ pub(crate) fn compile_meta(
             command: None,
         },
     }
+}
+
+fn compile_meta_value(
+    defn: Value,
+    output_dir_label: &str,
+    output_dir: &Path,
+) -> Result<(String, Vec<PathBuf>), String> {
+    match defn {
+        Value::Array(items) => compile_meta_batch(items, output_dir_label, output_dir),
+        single => compile_meta_object(single, output_dir_label, output_dir),
+    }
+}
+
+fn compile_meta_batch(
+    items: Vec<Value>,
+    output_dir_label: &str,
+    output_dir: &Path,
+) -> Result<(String, Vec<PathBuf>), String> {
+    let total = items.len();
+    let mut stdout = String::new();
+    let mut artifacts = Vec::<PathBuf>::new();
+    let mut failed = Vec::<String>::new();
+
+    for (index, item) in items.into_iter().enumerate() {
+        match compile_meta_object(item, output_dir_label, output_dir) {
+            Ok((item_stdout, mut item_artifacts)) => {
+                stdout.push_str(&item_stdout);
+                artifacts.append(&mut item_artifacts);
+            }
+            Err(error) => {
+                failed.push(format!("#{}: {error}", index + 1));
+                stdout.push_str(&format!("[FAIL] #{}: {error}\n", index + 1));
+            }
+        }
+    }
+
+    let compiled = total.saturating_sub(failed.len());
+    stdout.push_str(&format!(
+        "\n=== Batch: {total} objects, {compiled} compiled, {} failed ===\n",
+        failed.len()
+    ));
+
+    if failed.is_empty() {
+        Ok((stdout, artifacts))
+    } else {
+        Err(failed.join("\n"))
+    }
+}
+
+fn compile_meta_object(
+    mut defn: Value,
+    output_dir_label: &str,
+    output_dir: &Path,
+) -> Result<(String, Vec<PathBuf>), String> {
+    if defn.get("type").is_none() {
+        if let Some(object_type) = defn.get("objectType").cloned() {
+            defn.as_object_mut()
+                .ok_or_else(|| "metadata JSON must be an object".to_string())?
+                .insert("type".to_string(), object_type);
+        }
+    }
+    let object = defn
+        .as_object()
+        .ok_or_else(|| "metadata JSON must be an object".to_string())?;
+    let raw_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "JSON must have 'type' field".to_string())?;
+    let obj_type = normalize_meta_object_type(raw_type);
+    let type_plural = meta_compile_type_plural(&obj_type).ok_or_else(|| {
+        format!(
+            "Unsupported type: {obj_type}. Supported: {}. Documented pending: {}",
+            META_COMPILE_SUPPORTED_TYPES.join(", "),
+            META_COMPILE_PENDING_TYPES.join(", ")
+        )
+    })?;
+    let obj_name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "JSON must have 'name' field".to_string())?;
+    let type_dir = output_dir.join(type_plural);
+    let main_xml_path = type_dir.join(format!("{obj_name}.xml"));
+    let obj_sub_dir = type_dir.join(obj_name);
+    let ext_dir = obj_sub_dir.join("Ext");
+
+    fs::create_dir_all(&type_dir)
+        .map_err(|err| format!("failed to create {}: {err}", type_dir.display()))?;
+    if meta_compile_uses_object_subdir(&obj_type) {
+        fs::create_dir_all(&obj_sub_dir)
+            .map_err(|err| format!("failed to create {}: {err}", obj_sub_dir.display()))?;
+    }
+    let format_version = detect_format_version(output_dir);
+    let (metadata_xml, uid) =
+        meta_compile_object_xml(object, &obj_type, obj_name, &format_version)?;
+    write_utf8_bom(&main_xml_path, &metadata_xml)?;
+
+    let mut artifacts = vec![main_xml_path.clone()];
+    let mut modules_created = Vec::<PathBuf>::new();
+    for module_name in meta_compile_module_files(&obj_type) {
+        let module_path = ext_dir.join(module_name);
+        if !module_path.is_file() {
+            fs::create_dir_all(&ext_dir)
+                .map_err(|err| format!("failed to create {}: {err}", ext_dir.display()))?;
+            write_utf8_bom(&module_path, "")?;
+            modules_created.push(module_path.clone());
+            artifacts.push(module_path.clone());
+        }
+    }
+    for (file_name, content) in meta_compile_extra_ext_files(&obj_type, &format_version) {
+        let file_path = ext_dir.join(file_name);
+        if !file_path.is_file() {
+            fs::create_dir_all(&ext_dir)
+                .map_err(|err| format!("failed to create {}: {err}", ext_dir.display()))?;
+            write_utf8_bom(&file_path, &content)?;
+            modules_created.push(file_path.clone());
+            artifacts.push(file_path.clone());
+        }
+    }
+
+    let reg_result = register_compiled_meta_in_configuration(output_dir, &obj_type, obj_name)?;
+
+    let attr_count = object
+        .get("attributes")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let ts_count = object
+        .get("tabularSections")
+        .map(meta_compile_collection_count)
+        .unwrap_or(0);
+    let enum_value_count = object
+        .get("values")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let dim_count = object
+        .get("dimensions")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let res_count = object
+        .get("resources")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let column_count = object
+        .get("columns")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let mut stdout = format!(
+        "[OK] {obj_type} '{obj_name}' compiled\n     UUID: {uid}\n     File: {}/{type_plural}/{obj_name}.xml\n",
+        output_dir_label.trim_end_matches(['/', '\\'])
+    );
+    let mut details = Vec::new();
+    if attr_count > 0 {
+        details.push(format!("Attributes: {attr_count}"));
+    }
+    if ts_count > 0 {
+        details.push(format!("TabularSections: {ts_count}"));
+    }
+    if enum_value_count > 0 {
+        details.push(format!("Values: {enum_value_count}"));
+    }
+    if dim_count > 0 {
+        details.push(format!("Dimensions: {dim_count}"));
+    }
+    if res_count > 0 {
+        details.push(format!("Resources: {res_count}"));
+    }
+    if column_count > 0 {
+        details.push(format!("Columns: {column_count}"));
+    }
+    if !details.is_empty() {
+        stdout.push_str(&format!("     {}\n", details.join(", ")));
+    }
+    for module in modules_created {
+        stdout.push_str(&format!(
+            "     Module: {}/{type_plural}/{obj_name}/Ext/{}\n",
+            output_dir_label.trim_end_matches(['/', '\\']),
+            module
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("ObjectModule.bsl")
+        ));
+    }
+    match reg_result.as_deref() {
+        Some("added") => stdout.push_str(&format!(
+            "     Configuration.xml: <{obj_type}>{obj_name}</{obj_type}> added to ChildObjects\n"
+        )),
+        Some("already") => stdout.push_str(&format!(
+            "     Configuration.xml: <{obj_type}>{obj_name}</{obj_type}> already registered\n"
+        )),
+        Some("no-childobj") => {}
+        _ => stdout.push_str(&format!(
+            "     Configuration.xml: not found at {}/Configuration.xml (register manually)\n",
+            output_dir_label.trim_end_matches(['/', '\\'])
+        )),
+    }
+
+    Ok((stdout, artifacts))
 }
 
 pub(crate) fn meta_compile_collection_count(value: &Value) -> usize {
@@ -6339,7 +6389,7 @@ pub(crate) fn emit_meta_catalog_properties(
         "{indent}<PredefinedDataUpdate>Auto</PredefinedDataUpdate>"
     ));
     lines.push(format!("{indent}<EditType>InDialog</EditType>"));
-    let quick_choice = defn.get("quickChoice").and_then(Value::as_bool) != Some(false);
+    let quick_choice = defn.get("quickChoice").and_then(Value::as_bool) == Some(true);
     lines.push(format!("{indent}<QuickChoice>{quick_choice}</QuickChoice>"));
     lines.push(format!(
         "{indent}<ChoiceMode>{}</ChoiceMode>",
@@ -6439,7 +6489,7 @@ pub(crate) fn emit_meta_enum_properties(
     ));
     emit_meta_standard_attributes(lines, indent, "Enum");
     lines.push(format!("{indent}<Characteristics/>"));
-    lines.push(format!("{indent}<QuickChoice>true</QuickChoice>"));
+    lines.push(format!("{indent}<QuickChoice>false</QuickChoice>"));
     lines.push(format!("{indent}<ChoiceMode>BothWays</ChoiceMode>"));
     for tag in [
         "DefaultListForm",
@@ -7619,7 +7669,7 @@ pub(crate) fn emit_meta_choice_object_tail(
         ));
     }
     lines.push(format!("{indent}<EditType>InDialog</EditType>"));
-    lines.push(format!("{indent}<QuickChoice>true</QuickChoice>"));
+    lines.push(format!("{indent}<QuickChoice>false</QuickChoice>"));
     lines.push(format!("{indent}<ChoiceMode>BothWays</ChoiceMode>"));
     lines.push(format!("{indent}<InputByString>"));
     lines.push(format!(
