@@ -463,6 +463,23 @@ SUCCESS_SCENARIOS = [
         expect_ok=True,
     ),
     ParityScenario(
+        name="form-validate-valid-binding-paths",
+        tool="unica.form.validate",
+        skill="form-validate",
+        script="form-validate.py",
+        arguments={
+            "FormPath": "src/Reports/ParityReport/Forms/MainForm/Ext/Form.xml",
+            "Detailed": True,
+        },
+        fixtures=(
+            FileFixture(
+                "form-validate/ValidBindings.xml",
+                "src/Reports/ParityReport/Forms/MainForm/Ext/Form.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
         name="subsystem-compile-basic",
         tool="unica.subsystem.compile",
         skill="subsystem-compile",
@@ -929,6 +946,40 @@ VALIDATION_FAILURE_SCENARIOS = [
             ),
         ),
     ),
+    ParityScenario(
+        name="form-validate-duplicate-names-are-errors",
+        tool="unica.form.validate",
+        skill="form-validate",
+        script="form-validate.py",
+        arguments={
+            "FormPath": "src/Reports/ParityReport/Forms/MainForm/Ext/Form.xml",
+            "Detailed": True,
+        },
+        expect_ok=False,
+        fixtures=(
+            FileFixture(
+                "form-validate/DuplicateNames.xml",
+                "src/Reports/ParityReport/Forms/MainForm/Ext/Form.xml",
+            ),
+        ),
+    ),
+    ParityScenario(
+        name="form-validate-logform-namespace-is-required-for-structure",
+        tool="unica.form.validate",
+        skill="form-validate",
+        script="form-validate.py",
+        arguments={
+            "FormPath": "src/Reports/ParityReport/Forms/MainForm/Ext/Form.xml",
+            "Detailed": True,
+        },
+        expect_ok=False,
+        fixtures=(
+            FileFixture(
+                "form-validate/NoNamespace.xml",
+                "src/Reports/ParityReport/Forms/MainForm/Ext/Form.xml",
+            ),
+        ),
+    ),
 ]
 
 
@@ -1210,6 +1261,7 @@ NATIVE_PARITY_TOOLS = {
     "unica.cfe.diff",
     "unica.cfe.patch_method",
     "unica.cfe.validate",
+    "unica.form.validate",
     "unica.meta.compile",
     "unica.meta.edit",
     "unica.meta.info",

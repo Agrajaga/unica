@@ -14,6 +14,10 @@ use super::common::*;
 use super::{
     cf::*, cfe::*, interface::*, meta::*, mxl::*, role::*, skd::*, subsystem::*, template::*,
 };
+
+const FORM_LOGFORM_NS: &str = "http://v8.1c.ru/8.3/xcf/logform";
+const FORM_V8_NS: &str = "http://v8.1c.ru/8.1/data/core";
+
 pub(crate) struct FormValidationReporter {
     pub(crate) errors: usize,
     pub(crate) warnings: usize,
@@ -128,7 +132,7 @@ pub(crate) fn validate_form(
         let root = doc.root_element();
         let mut report = FormValidationReporter::new(&form_name, max_errors, detailed);
 
-        let has_base_form = form_child(root, "BaseForm").is_some();
+        let has_base_form = form_validation_child(root, "BaseForm").is_some();
         if root.tag_name().name() != "Form" {
             report.error(format!(
                 "Root element is '{}', expected 'Form'",
@@ -146,7 +150,7 @@ pub(crate) fn validate_form(
         }
 
         if !report.stopped {
-            if let Some(acb) = form_child(root, "AutoCommandBar") {
+            if let Some(acb) = form_validation_child(root, "AutoCommandBar") {
                 let acb_name = acb.attribute("name").unwrap_or("");
                 let acb_id = acb.attribute("id").unwrap_or("");
                 if acb_id == "-1" {
@@ -161,13 +165,26 @@ pub(crate) fn validate_form(
 
         let mut elements = Vec::new();
         let mut element_ids = HashMap::<String, String>::new();
-        if let Some(child_items) = form_child(root, "ChildItems") {
-            form_collect_elements(child_items, &mut elements, &mut element_ids, &mut report);
+        let mut element_names = HashMap::<String, String>::new();
+        if let Some(child_items) = form_validation_child(root, "ChildItems") {
+            form_collect_elements(
+                child_items,
+                &mut elements,
+                &mut element_ids,
+                &mut element_names,
+                &mut report,
+            );
         }
-        if let Some(acb_children) =
-            form_child(root, "AutoCommandBar").and_then(|acb| form_child(acb, "ChildItems"))
+        if let Some(acb_children) = form_validation_child(root, "AutoCommandBar")
+            .and_then(|acb| form_validation_child(acb, "ChildItems"))
         {
-            form_collect_elements(acb_children, &mut elements, &mut element_ids, &mut report);
+            form_collect_elements(
+                acb_children,
+                &mut elements,
+                &mut element_ids,
+                &mut element_names,
+                &mut report,
+            );
         }
 
         if !report.stopped {
@@ -186,8 +203,8 @@ pub(crate) fn validate_form(
             }
         }
 
-        let attr_nodes = form_child(root, "Attributes")
-            .map(|attrs| form_children(attrs, "Attribute"))
+        let attr_nodes = form_validation_child(root, "Attributes")
+            .map(|attrs| form_validation_children(attrs, "Attribute"))
             .unwrap_or_default();
         let mut attr_map = HashMap::<String, roxmltree::Node<'_, '_>>::new();
         let mut attr_ids = HashMap::<String, String>::new();
@@ -195,30 +212,47 @@ pub(crate) fn validate_form(
             let attr_name = attr.attribute("name").unwrap_or("");
             let attr_id = attr.attribute("id").unwrap_or("");
             if !attr_name.is_empty() {
+                if let Some(existing) = attr_map.get(attr_name) {
+                    report.error(format!(
+                        "Duplicate attribute name '{attr_name}': id={attr_id} and id={}",
+                        existing.attribute("id").unwrap_or("")
+                    ));
+                }
                 attr_map.insert(attr_name.to_string(), *attr);
             }
             if !attr_id.is_empty() {
-                if let Some(existing) = attr_ids.insert(attr_id.to_string(), attr_name.to_string())
-                {
+                if let Some(existing) = attr_ids.get(attr_id) {
                     report.error(format!(
                         "Duplicate attribute id={attr_id}: '{attr_name}' and '{existing}'"
                     ));
+                } else {
+                    attr_ids.insert(attr_id.to_string(), attr_name.to_string());
                 }
             }
 
-            if let Some(columns) = form_child(*attr, "Columns") {
+            if let Some(columns) = form_validation_child(*attr, "Columns") {
                 let mut col_ids = HashMap::<String, String>::new();
-                for column in form_children(columns, "Column") {
+                let mut col_names = HashMap::<String, String>::new();
+                for column in form_validation_children(columns, "Column") {
                     let col_id = column.attribute("id").unwrap_or("");
                     let col_name = column.attribute("name").unwrap_or("");
-                    if col_id.is_empty() {
-                        continue;
+                    if !col_id.is_empty() {
+                        if let Some(existing) = col_ids.get(col_id) {
+                            report.error(format!(
+                                "Duplicate column id={col_id} in '{attr_name}': '{col_name}' and '{existing}'"
+                            ));
+                        } else {
+                            col_ids.insert(col_id.to_string(), col_name.to_string());
+                        }
                     }
-                    if let Some(existing) = col_ids.insert(col_id.to_string(), col_name.to_string())
-                    {
-                        report.error(format!(
-                            "Duplicate column id={col_id} in '{attr_name}': '{col_name}' and '{existing}'"
-                        ));
+                    if !col_name.is_empty() {
+                        if let Some(existing) = col_names.get(col_name) {
+                            report.error(format!(
+                                "Duplicate column name '{col_name}' in '{attr_name}': id={col_id} and id={existing}"
+                            ));
+                        } else {
+                            col_names.insert(col_name.to_string(), col_id.to_string());
+                        }
                     }
                 }
             }
@@ -227,8 +261,8 @@ pub(crate) fn validate_form(
             report.ok(format!("Unique attribute IDs: {} entries", attr_ids.len()));
         }
 
-        let cmd_nodes = form_child(root, "Commands")
-            .map(|commands| form_children(commands, "Command"))
+        let cmd_nodes = form_validation_child(root, "Commands")
+            .map(|commands| form_validation_children(commands, "Command"))
             .unwrap_or_default();
         let mut cmd_map = HashMap::<String, roxmltree::Node<'_, '_>>::new();
         let mut cmd_ids = HashMap::<String, String>::new();
@@ -236,18 +270,38 @@ pub(crate) fn validate_form(
             let cmd_name = cmd.attribute("name").unwrap_or("");
             let cmd_id = cmd.attribute("id").unwrap_or("");
             if !cmd_name.is_empty() {
+                if let Some(existing) = cmd_map.get(cmd_name) {
+                    report.error(format!(
+                        "Duplicate command name '{cmd_name}': id={cmd_id} and id={}",
+                        existing.attribute("id").unwrap_or("")
+                    ));
+                }
                 cmd_map.insert(cmd_name.to_string(), *cmd);
             }
             if !cmd_id.is_empty() {
-                if let Some(existing) = cmd_ids.insert(cmd_id.to_string(), cmd_name.to_string()) {
+                if let Some(existing) = cmd_ids.get(cmd_id) {
                     report.error(format!(
                         "Duplicate command id={cmd_id}: '{cmd_name}' and '{existing}'"
                     ));
+                } else {
+                    cmd_ids.insert(cmd_id.to_string(), cmd_name.to_string());
                 }
             }
         }
         if !report.stopped && !cmd_ids.is_empty() {
             report.ok(format!("Unique command IDs: {} entries", cmd_ids.len()));
+        }
+
+        if !report.stopped {
+            let mut param_names = HashSet::<String>::new();
+            if let Some(params) = form_validation_child(root, "Parameters") {
+                for param in form_validation_children(params, "Parameter") {
+                    let param_name = param.attribute("name").unwrap_or("");
+                    if !param_name.is_empty() && !param_names.insert(param_name.to_string()) {
+                        report.error(format!("Duplicate parameter name '{param_name}'"));
+                    }
+                }
+            }
         }
 
         if !report.stopped {
@@ -268,7 +322,9 @@ pub(crate) fn validate_form(
         if !report.stopped {
             let main_count = attr_nodes
                 .iter()
-                .filter(|attr| form_child_text(**attr, "MainAttribute").as_deref() == Some("true"))
+                .filter(|attr| {
+                    form_validation_child_text(**attr, "MainAttribute").as_deref() == Some("true")
+                })
                 .count();
             if main_count <= 1 {
                 let main_info = if main_count == 1 {
@@ -284,8 +340,8 @@ pub(crate) fn validate_form(
             }
         }
         if !report.stopped {
-            if let Some(title) = form_child(root, "Title") {
-                let v8_items = form_children(title, "item");
+            if let Some(title) = form_validation_child(root, "Title") {
+                let v8_items = form_children_in_ns(title, "item", FORM_V8_NS);
                 if v8_items.is_empty() && !title.text().unwrap_or("").trim().is_empty() {
                     report.error(format!(
                         "Form Title is plain text ('{}') — must be multilingual XML (<v8:item>). Use top-level 'title' key in form-compile DSL.",
@@ -366,6 +422,7 @@ pub(crate) fn form_collect_elements<'a>(
     node: roxmltree::Node<'a, 'a>,
     elements: &mut Vec<FormElementInfo<'a>>,
     element_ids: &mut HashMap<String, String>,
+    element_names: &mut HashMap<String, String>,
     report: &mut FormValidationReporter,
 ) {
     for child in node.children().filter(|child| child.is_element()) {
@@ -380,15 +437,24 @@ pub(crate) fn form_collect_elements<'a>(
                 node: child,
             });
             if id != "-1" {
-                if let Some(existing) = element_ids.insert(id.to_string(), name.to_string()) {
+                if let Some(existing) = element_ids.get(id) {
                     report.error(format!(
                         "Duplicate element id={id}: '{name}' and '{existing}'"
                     ));
+                } else {
+                    element_ids.insert(id.to_string(), name.to_string());
+                }
+                if let Some(existing) = element_names.get(name) {
+                    report.error(format!(
+                        "Duplicate element name '{name}': id={id} and id={existing}"
+                    ));
+                } else {
+                    element_names.insert(name.to_string(), id.to_string());
                 }
             }
         }
-        if let Some(child_items) = form_child(child, "ChildItems") {
-            form_collect_elements(child_items, elements, element_ids, report);
+        if let Some(child_items) = form_validation_child(child, "ChildItems") {
+            form_collect_elements(child_items, elements, element_ids, element_names, report);
         }
     }
 }
@@ -417,7 +483,7 @@ pub(crate) fn form_validate_companions(
         };
         companion_checked += 1;
         for tag in required {
-            if form_child(element.node, tag).is_none() {
+            if form_validation_child(element.node, tag).is_none() {
                 report.error(format!(
                     "[{}] '{}': missing companion <{}>",
                     element.tag, element.name, tag
@@ -450,6 +516,16 @@ pub(crate) fn form_validate_data_paths(
         "ViewStatusAddition",
         "SearchControlAddition",
     ];
+    let binding_tags = [
+        "DataPath",
+        "TitleDataPath",
+        "FooterDataPath",
+        "HeaderDataPath",
+        "MultipleValueDataPath",
+        "MultipleValuePresentDataPath",
+        "RowPictureDataPath",
+        "MultipleValuePictureDataPath",
+    ];
     let mut path_errors = 0usize;
     let mut path_checked = 0usize;
     let mut path_base_skipped = 0usize;
@@ -468,25 +544,66 @@ pub(crate) fn form_validate_data_paths(
             path_base_skipped += 1;
             continue;
         }
-        let Some(data_path) = form_child_text(element.node, "DataPath") else {
-            continue;
-        };
-        let data_path = data_path.trim();
-        if data_path.is_empty() {
-            continue;
-        }
-        path_checked += 1;
-        let clean_path = strip_numeric_indexes(data_path);
-        let root_attr = clean_path.split('.').next().unwrap_or("");
-        if !attr_map.contains_key(root_attr) {
-            report.error(format!(
-                "[{}] '{}': DataPath='{}' — attribute '{}' not found",
-                element.tag, element.name, data_path, root_attr
-            ));
-            path_errors += 1;
-        }
-        if report.stopped {
-            return;
+        for binding_tag in binding_tags {
+            let Some(data_path) = form_validation_child_text(element.node, binding_tag) else {
+                continue;
+            };
+            let data_path = data_path.trim();
+            if data_path.is_empty() || is_opaque_form_binding(data_path) {
+                continue;
+            }
+            path_checked += 1;
+
+            let mut clean_path = strip_form_binding_prefixes(data_path);
+            let mut segments = clean_path.split('.');
+            let mut root_attr = segments.next().unwrap_or("").to_string();
+
+            if root_attr == "Items" {
+                let table_name = segments.next().unwrap_or("");
+                let current_data = segments.next().unwrap_or("");
+                if table_name.is_empty() || current_data != "CurrentData" {
+                    report.warn(format!(
+                        "[{}] '{}': {}='{}' — unknown Items.* shape, expected Items.<Table>.CurrentData.*",
+                        element.tag, element.name, binding_tag, data_path
+                    ));
+                    continue;
+                }
+                let Some(table_element) = elements
+                    .iter()
+                    .find(|candidate| candidate.tag == "Table" && candidate.name == table_name)
+                else {
+                    report.error(format!(
+                        "[{}] '{}': {}='{}' — table element '{}' not found",
+                        element.tag, element.name, binding_tag, data_path, table_name
+                    ));
+                    path_errors += 1;
+                    if report.stopped {
+                        return;
+                    }
+                    continue;
+                };
+                let Some(table_path) = form_validation_child_text(table_element.node, "DataPath")
+                else {
+                    continue;
+                };
+                let table_path = table_path.trim();
+                if table_path.is_empty() {
+                    continue;
+                }
+                clean_path = strip_form_binding_prefixes(table_path);
+                root_attr = clean_path.split('.').next().unwrap_or("").to_string();
+            }
+
+            if !attr_map.contains_key(root_attr.as_str()) {
+                report.error(format!(
+                    "[{}] '{}': {}='{}' — attribute '{}' not found",
+                    element.tag, element.name, binding_tag, data_path, root_attr
+                ));
+                path_errors += 1;
+            }
+            if report.stopped {
+                return;
+            }
         }
     }
     let mut path_msg = String::new();
@@ -502,8 +619,32 @@ pub(crate) fn form_validate_data_paths(
         };
     }
     if path_errors == 0 && !path_msg.is_empty() {
-        report.ok(format!("DataPath references: {path_msg}"));
+        report.ok(format!("Binding path references: {path_msg}"));
     }
+}
+
+pub(crate) fn strip_form_binding_prefixes(value: &str) -> String {
+    strip_numeric_indexes(value)
+        .trim_start_matches('~')
+        .to_string()
+}
+
+pub(crate) fn is_opaque_form_binding(value: &str) -> bool {
+    if value.chars().all(|ch| ch.is_ascii_digit()) {
+        return true;
+    }
+    let Some((prefix, uuid)) = value.split_once(':') else {
+        return false;
+    };
+    let Some((left, right)) = prefix.split_once('/') else {
+        return false;
+    };
+    !left.is_empty()
+        && !right.is_empty()
+        && left.chars().all(|ch| ch.is_ascii_digit())
+        && right.chars().all(|ch| ch.is_ascii_digit())
+        && !uuid.is_empty()
+        && uuid.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
 }
 
 pub(crate) fn strip_numeric_indexes(value: &str) -> String {
@@ -540,7 +681,7 @@ pub(crate) fn form_validate_button_commands(
     let mut cmd_errors = 0usize;
     let mut cmd_checked = 0usize;
     for element in elements.iter().filter(|element| element.tag == "Button") {
-        let Some(cmd_ref) = form_child_text(element.node, "CommandName") else {
+        let Some(cmd_ref) = form_validation_child_text(element.node, "CommandName") else {
             continue;
         };
         let Some(cmd_name) = cmd_ref.strip_prefix("Form.Command.") else {
@@ -570,8 +711,8 @@ pub(crate) fn form_validate_events(
 ) {
     let mut event_errors = 0usize;
     let mut event_checked = 0usize;
-    if let Some(form_events) = form_child(root, "Events") {
-        for event in form_children(form_events, "Event") {
+    if let Some(form_events) = form_validation_child(root, "Events") {
+        for event in form_validation_children(form_events, "Event") {
             let name = event.attribute("name").unwrap_or("");
             event_checked += 1;
             if event.text().unwrap_or("").trim().is_empty() {
@@ -581,8 +722,8 @@ pub(crate) fn form_validate_events(
         }
     }
     for element in elements {
-        if let Some(events) = form_child(element.node, "Events") {
-            for event in form_children(events, "Event") {
+        if let Some(events) = form_validation_child(element.node, "Events") {
+            for event in form_validation_children(events, "Event") {
                 let event_name = event.attribute("name").unwrap_or("");
                 event_checked += 1;
                 if event.text().unwrap_or("").trim().is_empty() {
@@ -611,8 +752,10 @@ pub(crate) fn form_validate_command_actions(
     let mut action_checked = 0usize;
     for command in cmd_nodes {
         let cmd_name = command.attribute("name").unwrap_or("");
+        let actions = form_validation_children(*command, "Action");
         action_checked += 1;
-        if form_child(*command, "Action")
+        if actions
+            .first()
             .and_then(|action| action.text())
             .map(str::trim)
             .filter(|text| !text.is_empty())
@@ -639,7 +782,7 @@ pub(crate) fn form_validate_extension(
     cmd_nodes: &[roxmltree::Node<'_, '_>],
     report: &mut FormValidationReporter,
 ) {
-    let Some(base_form) = form_child(root, "BaseForm") else {
+    let Some(base_form) = form_validation_child(root, "BaseForm") else {
         return;
     };
     if let Some(version) = base_form
@@ -653,8 +796,8 @@ pub(crate) fn form_validate_extension(
 
     let mut ct_errors = 0usize;
     let mut ct_checked = 0usize;
-    for event in form_child(root, "Events")
-        .map(|events| form_children(events, "Event"))
+    for event in form_validation_child(root, "Events")
+        .map(|events| form_validation_children(events, "Event"))
         .unwrap_or_default()
     {
         if let Some(call_type) = event
@@ -673,8 +816,8 @@ pub(crate) fn form_validate_extension(
         }
     }
     for element in elements {
-        if let Some(events) = form_child(element.node, "Events") {
-            for event in form_children(events, "Event") {
+        if let Some(events) = form_validation_child(element.node, "Events") {
+            for event in form_validation_children(events, "Event") {
                 if let Some(call_type) = event
                     .attribute("callType")
                     .filter(|value| !value.is_empty())
@@ -696,7 +839,7 @@ pub(crate) fn form_validate_extension(
     }
     for command in cmd_nodes {
         let cmd_name = command.attribute("name").unwrap_or("");
-        for action in form_children(*command, "Action") {
+        for action in form_validation_children(*command, "Action") {
             if let Some(call_type) = action
                 .attribute("callType")
                 .filter(|value| !value.is_empty())
@@ -715,17 +858,17 @@ pub(crate) fn form_validate_extension(
         report.ok(format!("callType values: {ct_checked} checked"));
     }
 
-    let base_attr_names = form_child(base_form, "Attributes")
+    let base_attr_names = form_validation_child(base_form, "Attributes")
         .map(|attrs| {
-            form_children(attrs, "Attribute")
+            form_validation_children(attrs, "Attribute")
                 .into_iter()
                 .filter_map(|attr| attr.attribute("name").map(ToOwned::to_owned))
                 .collect::<HashSet<_>>()
         })
         .unwrap_or_default();
-    let base_cmd_names = form_child(base_form, "Commands")
+    let base_cmd_names = form_validation_child(base_form, "Commands")
         .map(|commands| {
-            form_children(commands, "Command")
+            form_validation_children(commands, "Command")
                 .into_iter()
                 .filter_map(|cmd| cmd.attribute("name").map(ToOwned::to_owned))
                 .collect::<HashSet<_>>()
@@ -789,21 +932,25 @@ pub(crate) fn form_has_call_type(
     root: roxmltree::Node<'_, '_>,
     cmd_nodes: &[roxmltree::Node<'_, '_>],
 ) -> bool {
-    form_child(root, "Events")
+    form_validation_child(root, "Events")
         .map(|events| {
-            form_children(events, "Event").iter().any(|event| {
-                event
-                    .attribute("callType")
-                    .is_some_and(|value| !value.is_empty())
-            })
+            form_validation_children(events, "Event")
+                .iter()
+                .any(|event| {
+                    event
+                        .attribute("callType")
+                        .is_some_and(|value| !value.is_empty())
+                })
         })
         .unwrap_or(false)
         || cmd_nodes.iter().any(|cmd| {
-            form_children(*cmd, "Action").iter().any(|action| {
-                action
-                    .attribute("callType")
-                    .is_some_and(|value| !value.is_empty())
-            })
+            form_validation_children(*cmd, "Action")
+                .iter()
+                .any(|action| {
+                    action
+                        .attribute("callType")
+                        .is_some_and(|value| !value.is_empty())
+                })
         })
 }
 
@@ -1249,6 +1396,25 @@ pub(crate) fn form_child<'a>(
         .find(|child| child.is_element() && child.tag_name().name() == local_name)
 }
 
+pub(crate) fn form_child_in_ns<'a>(
+    node: roxmltree::Node<'a, 'a>,
+    local_name: &str,
+    namespace: &str,
+) -> Option<roxmltree::Node<'a, 'a>> {
+    node.children().find(|child| {
+        child.is_element()
+            && child.tag_name().name() == local_name
+            && child.tag_name().namespace() == Some(namespace)
+    })
+}
+
+pub(crate) fn form_validation_child<'a>(
+    node: roxmltree::Node<'a, 'a>,
+    local_name: &str,
+) -> Option<roxmltree::Node<'a, 'a>> {
+    form_child_in_ns(node, local_name, FORM_LOGFORM_NS)
+}
+
 pub(crate) fn form_children<'a>(
     node: roxmltree::Node<'a, 'a>,
     local_name: &str,
@@ -1258,8 +1424,38 @@ pub(crate) fn form_children<'a>(
         .collect()
 }
 
+pub(crate) fn form_children_in_ns<'a>(
+    node: roxmltree::Node<'a, 'a>,
+    local_name: &str,
+    namespace: &str,
+) -> Vec<roxmltree::Node<'a, 'a>> {
+    node.children()
+        .filter(|child| {
+            child.is_element()
+                && child.tag_name().name() == local_name
+                && child.tag_name().namespace() == Some(namespace)
+        })
+        .collect()
+}
+
+pub(crate) fn form_validation_children<'a>(
+    node: roxmltree::Node<'a, 'a>,
+    local_name: &str,
+) -> Vec<roxmltree::Node<'a, 'a>> {
+    form_children_in_ns(node, local_name, FORM_LOGFORM_NS)
+}
+
 pub(crate) fn form_child_text(node: roxmltree::Node<'_, '_>, local_name: &str) -> Option<String> {
     form_child(node, local_name)
+        .map(form_ml_text)
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn form_validation_child_text(
+    node: roxmltree::Node<'_, '_>,
+    local_name: &str,
+) -> Option<String> {
+    form_validation_child(node, local_name)
         .map(form_ml_text)
         .filter(|value| !value.is_empty())
 }
