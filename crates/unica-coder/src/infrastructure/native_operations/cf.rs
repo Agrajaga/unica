@@ -1913,7 +1913,8 @@ pub(crate) fn edit_cf(args: &Map<String, Value>, context: &WorkspaceContext) -> 
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| context.cwd.clone());
-        let mut text = lxml_parser_normalized_text(&read_utf8_sig(&config_path)?);
+        let source_text = read_utf8_sig(&config_path)?;
+        let mut text = lxml_parser_normalized_text(&source_text);
         if !text.contains("<Configuration") {
             return Err("No <Configuration> element found".to_string());
         }
@@ -2092,7 +2093,10 @@ pub(crate) fn edit_cf(args: &Map<String, Value>, context: &WorkspaceContext) -> 
             }
         }
 
-        write_utf8_bom(&config_path, &lxml_tree_serialized_text(&text))?;
+        write_utf8_bom(
+            &config_path,
+            &lxml_tree_serialized_text_like_source(&text, &source_text),
+        )?;
         stdout.push_str(&format!("[INFO] Saved: {}\n", config_path.display()));
 
         if !bool_arg(args, &["noValidate", "NoValidate"]) {

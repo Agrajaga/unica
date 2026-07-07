@@ -1948,10 +1948,11 @@ pub(crate) fn add_form(args: &Map<String, Value>, context: &WorkspaceContext) ->
 
         let object_xml_full =
             resolve_form_add_object_path(absolutize(object_path_raw, &context.cwd))?;
-        let mut object_text = fs::read_to_string(&object_xml_full)
+        let object_source_text = fs::read_to_string(&object_xml_full)
             .map_err(|err| format!("failed to read {}: {err}", object_xml_full.display()))?
             .trim_start_matches('\u{feff}')
             .to_string();
+        let mut object_text = object_source_text.clone();
         let (object_type, object_name) = detect_form_add_object(&object_text)?;
         let format_version =
             detect_format_version(object_xml_full.parent().unwrap_or(context.cwd.as_path()));
@@ -2025,7 +2026,10 @@ pub(crate) fn add_form(args: &Map<String, Value>, context: &WorkspaceContext) ->
             } else {
                 false
             };
-        write_utf8_bom(&object_xml_full, &lxml_tree_serialized_text(&object_text))?;
+        write_utf8_bom(
+            &object_xml_full,
+            &lxml_tree_serialized_text_like_source(&object_text, &object_source_text),
+        )?;
 
         let obj_dir_name = object_xml_full
             .parent()

@@ -70,11 +70,12 @@ pub(crate) fn edit_interface(
         }
         ci_path = ci_path.canonicalize().unwrap_or_else(|_| ci_path.clone());
 
-        let mut text = if ci_path.is_file() {
+        let source_text = if ci_path.is_file() {
             read_utf8_sig(&ci_path)?
         } else {
             String::new()
         };
+        let mut text = source_text.clone();
         text = lxml_parser_normalized_text(&text);
         if text.is_empty() {
             text = emit_empty_command_interface_document(&format_version);
@@ -108,7 +109,10 @@ pub(crate) fn edit_interface(
             }
         }
 
-        write_utf8_bom(&ci_path, &lxml_tree_serialized_text(&text))?;
+        write_utf8_bom(
+            &ci_path,
+            &lxml_tree_serialized_text_like_source(&text, &source_text),
+        )?;
         stdout.push_str(&format!("[INFO] Saved: {}\n", ci_path.display()));
 
         if !bool_arg(args, &["noValidate", "NoValidate"]) {

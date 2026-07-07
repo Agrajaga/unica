@@ -1185,6 +1185,15 @@ pub(crate) fn lxml_tree_serialized_text(text: &str) -> String {
     output
 }
 
+pub(crate) fn lxml_tree_serialized_text_like_source(text: &str, source_text: &str) -> String {
+    let output = lxml_tree_serialized_text(text);
+    if source_text.contains("\r\n") {
+        output.replace('\n', "\r\n")
+    } else {
+        output
+    }
+}
+
 pub(crate) fn lxml_parser_normalized_text(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }

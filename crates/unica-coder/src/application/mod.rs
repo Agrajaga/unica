@@ -1896,11 +1896,20 @@ mod tests {
             .unwrap();
 
         assert!(result.ok, "{result:?}");
-        let after = std::fs::read_to_string(&config_path).unwrap();
+        let after_bytes = std::fs::read(&config_path).unwrap();
+        let after = String::from_utf8(after_bytes.clone()).unwrap();
         assert!(after.starts_with('\u{feff}'));
         assert!(after.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
         assert!(after.contains("<Catalog>Extra</Catalog>"));
         assert!(!after.contains("&#13;"), "{after}");
+        assert!(
+            after_bytes
+                .iter()
+                .enumerate()
+                .filter(|(_, byte)| **byte == b'\n')
+                .all(|(index, _)| index > 0 && after_bytes[index - 1] == b'\r'),
+            "{after}"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

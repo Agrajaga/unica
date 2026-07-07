@@ -116,7 +116,8 @@ pub(crate) fn add_template(
             )?;
         }
 
-        let xml_text = lxml_parser_normalized_text(&read_utf8_sig(&root_xml_path)?);
+        let source_xml_text = read_utf8_sig(&root_xml_path)?;
+        let xml_text = lxml_parser_normalized_text(&source_xml_text);
         let mut xml_text = append_metadata_child_text(&xml_text, "Template", template_name)
             .ok_or_else(|| {
                 format!(
@@ -137,7 +138,10 @@ pub(crate) fn add_template(
         if !xml_text.ends_with('\n') {
             xml_text.push('\n');
         }
-        write_utf8_bom(&root_xml_path, &lxml_tree_serialized_text(&xml_text))?;
+        write_utf8_bom(
+            &root_xml_path,
+            &lxml_tree_serialized_text_like_source(&xml_text, &source_xml_text),
+        )?;
 
         stdout.push_str(&format!(
             "[OK] Создан макет: {template_name} ({template_type})\n"
@@ -259,7 +263,8 @@ pub(crate) fn remove_template(
         ));
         changes.push(format!("removed file {}", template_meta_path.display()));
 
-        let xml_text = lxml_parser_normalized_text(&read_utf8_sig(&root_xml_path)?);
+        let source_xml_text = read_utf8_sig(&root_xml_path)?;
+        let xml_text = lxml_parser_normalized_text(&source_xml_text);
         let xml_text = remove_template_child_text_lxml(&xml_text, template_name);
         let (mut xml_text, main_dcs_cleared) =
             clear_main_data_composition_schema_text(&xml_text, template_name);
@@ -270,7 +275,10 @@ pub(crate) fn remove_template(
             stdout.push_str("[OK] Очищён MainDataCompositionSchema\n");
             changes.push("cleared MainDataCompositionSchema".to_string());
         }
-        write_utf8_bom(&root_xml_path, &lxml_tree_serialized_text(&xml_text))?;
+        write_utf8_bom(
+            &root_xml_path,
+            &lxml_tree_serialized_text_like_source(&xml_text, &source_xml_text),
+        )?;
         changes.push(format!("updated {}", root_xml_path.display()));
 
         stdout.push_str(&format!(
