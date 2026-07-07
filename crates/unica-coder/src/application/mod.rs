@@ -1853,6 +1853,59 @@ mod tests {
     }
 
     #[test]
+    fn cf_edit_add_child_object_does_not_escape_structural_crlf() {
+        let root = std::env::temp_dir().join(format!("unica-cf-child-crlf-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        let src = workspace.join("src");
+        let catalogs = src.join("Catalogs");
+        std::fs::create_dir_all(&catalogs).unwrap();
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        )
+        .unwrap();
+        let config_path = src.join("Configuration.xml");
+        let crlf_config = support_test_configuration_xml("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+            .replace('\n', "\r\n");
+        std::fs::write(&config_path, crlf_config).unwrap();
+        std::fs::write(
+            catalogs.join("Extra.xml"),
+            support_test_catalog_xml("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+        )
+        .unwrap();
+
+        let mut args = Map::new();
+        args.insert(
+            "cwd".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        args.insert("dryRun".to_string(), Value::Bool(false));
+        args.insert("ConfigPath".to_string(), Value::String("src".to_string()));
+        args.insert(
+            "Operation".to_string(),
+            Value::String("add-childObject".to_string()),
+        );
+        args.insert(
+            "Value".to_string(),
+            Value::String("Catalog.Extra".to_string()),
+        );
+        args.insert("NoValidate".to_string(), Value::Bool(true));
+
+        let result = UnicaApplication::new()
+            .call_tool("unica.cf.edit", &args)
+            .unwrap();
+
+        assert!(result.ok, "{result:?}");
+        let after = std::fs::read_to_string(&config_path).unwrap();
+        assert!(after.starts_with('\u{feff}'));
+        assert!(after.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+        assert!(after.contains("<Catalog>Extra</Catalog>"));
+        assert!(!after.contains("&#13;"), "{after}");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn meta_info_reports_locked_vendor_support_state_through_unica_boundary() {
         let root = std::env::temp_dir().join(format!("unica-meta-support-{}", std::process::id()));
         let workspace = root.join("workspace");

@@ -1176,14 +1176,8 @@ pub(crate) fn ensure_trailing_lf(text: &str) -> String {
 
 pub(crate) fn lxml_tree_serialized_text(text: &str) -> String {
     let mut output = text.to_string();
-    if output.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>") {
-        output = output.replacen(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
-            "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
-            1,
-        );
-    }
     output = output.replace(" />", "/>");
+    output = output.replace("\r\n", "\n");
     output = output.replace('\r', "&#13;");
     if !output.ends_with('\n') {
         output.push('\n');

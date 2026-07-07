@@ -4733,6 +4733,17 @@ def normalize_text(text: str, workspace: Path) -> str:
     return normalized
 
 
+def normalize_snapshot_text(text: str, workspace: Path) -> str:
+    normalized = normalize_text(text, workspace)
+    normalized = normalized.replace("&#13;\n", "\n")
+    return re.sub(
+        r'(<\?xml\s+version="1\.0"\s+encoding=")utf-8(")',
+        r"\1UTF-8\2",
+        normalized,
+        count=1,
+    )
+
+
 def snapshot_workspace(workspace: Path) -> dict[str, str]:
     snapshot: dict[str, str] = {}
     for path in sorted(workspace.rglob("*")):
@@ -4747,7 +4758,7 @@ def snapshot_workspace(workspace: Path) -> dict[str, str]:
         except UnicodeDecodeError:
             snapshot[rel] = "sha256:" + hashlib.sha256(data).hexdigest()
             continue
-        snapshot[rel] = normalize_text(text, workspace)
+        snapshot[rel] = normalize_snapshot_text(text, workspace)
     return snapshot
 
 
