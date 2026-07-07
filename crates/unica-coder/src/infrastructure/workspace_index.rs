@@ -1664,13 +1664,13 @@ mod tests {
                 script.push_str(&line.replace('\'', "''"));
                 script.push_str("'); ");
             }
-            return IndexCommand {
+            IndexCommand {
                 program: PathBuf::from("powershell"),
                 args: vec!["-NoProfile".to_string(), "-Command".to_string(), script],
                 cwd: cwd.to_path_buf(),
                 env: Vec::new(),
                 timeout: Duration::from_secs(5),
-            };
+            }
         }
 
         #[cfg(not(windows))]
@@ -1697,16 +1697,43 @@ mod tests {
 
     fn make_lock_file_old(context: &WorkspaceContext) {
         #[cfg(windows)]
-        let status = {
-            let path = lock_path(context).display().to_string().replace('\'', "''");
-            let script = format!(
-                "(Get-Item -LiteralPath '{path}').LastWriteTimeUtc = [datetime]'2000-01-01T00:00:00Z'"
+        {
+            use std::ffi::c_void;
+            use std::os::windows::io::AsRawHandle;
+            use std::ptr;
+
+            #[repr(C)]
+            struct FileTime {
+                low_date_time: u32,
+                high_date_time: u32,
+            }
+
+            unsafe extern "system" {
+                fn SetFileTime(
+                    file: *mut c_void,
+                    creation_time: *const FileTime,
+                    last_access_time: *const FileTime,
+                    last_write_time: *const FileTime,
+                ) -> i32;
+            }
+
+            const FILETIME_2000_01_01_UTC: u64 = 125_911_584_000_000_000;
+            let file_time = FileTime {
+                low_date_time: FILETIME_2000_01_01_UTC as u32,
+                high_date_time: (FILETIME_2000_01_01_UTC >> 32) as u32,
+            };
+            let file = OpenOptions::new()
+                .write(true)
+                .open(lock_path(context))
+                .unwrap();
+            let ok =
+                unsafe { SetFileTime(file.as_raw_handle(), ptr::null(), ptr::null(), &file_time) };
+            assert_ne!(
+                ok,
+                0,
+                "SetFileTime failed: {}",
+                std::io::Error::last_os_error()
             );
-            std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command"])
-                .arg(script)
-                .status()
-                .unwrap()
         };
         #[cfg(not(windows))]
         let status = std::process::Command::new("touch")
@@ -1714,6 +1741,7 @@ mod tests {
             .arg(lock_path(context))
             .status()
             .unwrap();
+        #[cfg(not(windows))]
         assert!(status.success());
     }
 
