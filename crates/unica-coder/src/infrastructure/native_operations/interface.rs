@@ -1358,6 +1358,30 @@ pub(crate) fn interface_word(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|ch| ch == '_' || ch.is_alphanumeric())
 }
 
+pub(crate) fn invoke_read(
+    operation: &str,
+    _tool_name: &str,
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+) -> Option<Result<AdapterOutcome, String>> {
+    match operation {
+        "interface-validate" => Some(Ok(validate_interface(args, context))),
+        _ => None,
+    }
+}
+
+pub(crate) fn invoke_mutation(
+    operation: &str,
+    _tool_name: &str,
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+) -> Option<AdapterOutcome> {
+    match operation {
+        "interface-edit" => Some(edit_interface(args, context)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1427,29 +1451,5 @@ mod tests {
             ci_path.display()
         );
         let _ = fs::remove_dir_all(&context.workspace_root);
-    }
-}
-
-pub(crate) fn invoke_read(
-    operation: &str,
-    _tool_name: &str,
-    args: &Map<String, Value>,
-    context: &WorkspaceContext,
-) -> Option<Result<AdapterOutcome, String>> {
-    match operation {
-        "interface-validate" => Some(Ok(validate_interface(args, context))),
-        _ => None,
-    }
-}
-
-pub(crate) fn invoke_mutation(
-    operation: &str,
-    _tool_name: &str,
-    args: &Map<String, Value>,
-    context: &WorkspaceContext,
-) -> Option<AdapterOutcome> {
-    match operation {
-        "interface-edit" => Some(edit_interface(args, context)),
-        _ => None,
     }
 }
