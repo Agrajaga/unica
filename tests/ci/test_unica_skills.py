@@ -1077,6 +1077,7 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             r"1c-code-metadata-mcp",
             r"1c-metadata-manage",
             r"deploy_and_test",
+            r'"mode"\s*:\s*"update"',
         ]
         scanned_roots = [self.reference_root(), self.skill_root()]
         for root in scanned_roots:
@@ -1085,6 +1086,36 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 for pattern in forbidden_patterns:
                     with self.subTest(path=path.relative_to(self.repo_root()), pattern=pattern):
                         self.assertIsNone(re.search(pattern, text))
+
+    def test_v8_runner_docs_track_current_v8project_contract(self) -> None:
+        v8project = (self.reference_root() / "tooling" / "v8project.md").read_text(
+            encoding="utf-8"
+        )
+        v8_runner_docs = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in [
+                self.skill_root() / "v8-runner" / "SKILL.md",
+                self.skill_root()
+                / "v8-runner"
+                / "references"
+                / "config-and-backends.md",
+                self.skill_root()
+                / "v8-runner"
+                / "references"
+                / "command-selection.md",
+                self.skill_root() / "v8-runner" / "references" / "testing.md",
+                self.reference_root() / "tooling" / "v8project.md",
+            ]
+        )
+
+        self.assertIn("execution_timeout", v8project)
+        self.assertIn("infobase:", v8project)
+        self.assertIn("infobase.connection", v8_runner_docs)
+        self.assertIn("tools-download", v8_runner_docs)
+        self.assertIn("fullOutput", v8_runner_docs)
+        self.assertIn("features", v8_runner_docs)
+        self.assertNotRegex(v8project, r"(?m)^connection:")
+        self.assertNotIn("mode=load|merge|update", v8project)
 
     def test_skills_and_references_do_not_expose_restricted_research_sources(self) -> None:
         forbidden_patterns = [

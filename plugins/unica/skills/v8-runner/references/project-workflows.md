@@ -1,6 +1,6 @@
 # Project Workflows
 
-`v8project.yaml` is the project contract. `v8project.local.yaml` is for local secrets and paths and must not redefine shared source topology.
+`v8project.yaml` is the project contract. `v8project.local.yaml` is for local secrets and paths and must not redefine shared source topology or `execution_timeout`.
 
 Typical empty workspace order:
 
@@ -13,5 +13,7 @@ Typical empty workspace order:
 `build` also prepares configured client MCP tool extensions when the project has `tools.client_mcp.extension`. Use `fullRebuild=true` if that generated state may be stale.
 
 Use `extensions` when only extension properties need synchronization.
+
+Use `tools-download` when the project needs v8-runner-managed YaXUnit, Vanessa, or client MCP tool payloads refreshed.
 
 Use `launch` with `clientMode=mcp` or `clientMode=mcp-va` for client-side MCP workflows; do not hand-assemble platform launch strings.

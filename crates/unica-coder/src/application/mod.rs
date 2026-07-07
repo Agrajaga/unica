@@ -11,7 +11,7 @@ use crate::infrastructure::AdapterOutcome;
 use operation_descriptors::SupportGuardPolicy;
 use ports::{ApplicationPorts, DefaultApplicationPorts};
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -65,6 +65,8 @@ pub struct OperationResult {
     pub stderr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Value>,
 }
 
 pub struct UnicaApplication {
@@ -328,6 +330,7 @@ fn call_tool(
                     stdout: outcome.stdout,
                     stderr: outcome.stderr,
                     command: outcome.command,
+                    diagnostics: None,
                 });
             }
         }
@@ -350,6 +353,7 @@ fn call_tool(
     if spec.mutating && !dry_run && outcome.ok && !events.is_empty() {
         ports.notify_invalidation(&context, &events);
     }
+    let diagnostics = runtime_result_diagnostics(spec, args, &context, &outcome);
 
     Ok(OperationResult {
         ok: outcome.ok,
@@ -362,11 +366,102 @@ fn call_tool(
         stdout: outcome.stdout,
         stderr: outcome.stderr,
         command: outcome.command,
+        diagnostics,
     })
 }
 
 fn should_emit_events(spec: ToolSpec, dry_run: bool, outcome: &AdapterOutcome) -> bool {
     spec.mutating && (dry_run || outcome.ok)
+}
+
+fn runtime_result_diagnostics(
+    spec: ToolSpec,
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+    outcome: &AdapterOutcome,
+) -> Option<Value> {
+    if !matches!(spec.handler, ToolHandler::RuntimeAdapter) || outcome.ok {
+        return None;
+    }
+    let operation = args
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let failure_kind = runtime_failure_kind(outcome);
+    let status = runtime_failure_status(outcome, failure_kind);
+    let argv = outcome.command.clone().unwrap_or_default();
+    let executable = argv.first().cloned();
+    Some(json!({
+        "type": "process",
+        "tool": "v8-runner",
+        "operation": operation,
+        "failure_kind": failure_kind,
+        "executable": executable,
+        "argv": argv,
+        "cwd": context.cwd.display().to_string(),
+        "status": status,
+        "exit_code": status.as_deref().and_then(process_exit_code),
+        "timed_out": failure_kind == "timeout",
+        "timeout_seconds": Option::<u64>::None,
+        "timeout_source": "delegated-to-v8-runner",
+        "stdout_tail": result_tail(outcome.stdout.as_deref().unwrap_or_default()),
+        "stderr_tail": result_tail(outcome.stderr.as_deref().unwrap_or_default()),
+        "error": outcome.errors.first(),
+    }))
+}
+
+fn runtime_failure_kind(outcome: &AdapterOutcome) -> &'static str {
+    if outcome
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("failed to spawn"))
+    {
+        "spawn"
+    } else if outcome
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("timed out"))
+    {
+        "timeout"
+    } else {
+        "exit"
+    }
+}
+
+fn runtime_failure_status(outcome: &AdapterOutcome, failure_kind: &str) -> Option<String> {
+    if failure_kind == "spawn" {
+        return None;
+    }
+    if failure_kind == "timeout" {
+        return Some("timeout".to_string());
+    }
+    outcome.warnings.iter().find_map(|warning| {
+        warning
+            .strip_prefix("internal v8-runner runtime adapter exited with status ")
+            .map(str::to_string)
+    })
+}
+
+fn process_exit_code(status: &str) -> Option<i32> {
+    let status = status.trim();
+    if status == "timeout" {
+        return None;
+    }
+    if let Ok(code) = status.parse::<i32>() {
+        return Some(code);
+    }
+    status
+        .rsplit_once(':')
+        .and_then(|(_, tail)| tail.trim().parse::<i32>().ok())
+}
+
+fn result_tail(text: &str) -> String {
+    const TAIL_CHARS: usize = 4096;
+    let char_count = text.chars().count();
+    if char_count <= TAIL_CHARS {
+        return text.to_string();
+    }
+    text.chars().skip(char_count - TAIL_CHARS).collect()
 }
 
 enum SupportGuardCheck {
@@ -1269,6 +1364,132 @@ mod tests {
         assert!(result.ok);
         assert!(result.cache.events.is_empty());
         assert_eq!(result.cache.mode, "read");
+    }
+
+    #[test]
+    fn runtime_failure_result_includes_structured_exit_diagnostics() {
+        let root = test_workspace_root("runtime-exit-diagnostics");
+        let result = call_runtime_with_outcome(
+            &root,
+            AdapterOutcome {
+                ok: false,
+                summary: "unica.runtime.execute failed through internal v8-runner runtime adapter"
+                    .to_string(),
+                changes: Vec::new(),
+                warnings: vec![
+                    "internal v8-runner runtime adapter exited with status exit status: 1"
+                        .to_string(),
+                ],
+                errors: vec!["failed to load configuration: Pwd=<redacted>".to_string()],
+                artifacts: Vec::new(),
+                stdout: Some("started build\nPwd=<redacted>\n".to_string()),
+                stderr: Some("failed to load configuration: Pwd=<redacted>\n".to_string()),
+                command: Some(vec![
+                    "/tmp/unica/plugins/unica/bin/darwin-arm64/v8-runner".to_string(),
+                    "build".to_string(),
+                    "--source-set".to_string(),
+                    "main".to_string(),
+                ]),
+            },
+            "build",
+        );
+
+        let diagnostics = result.diagnostics.unwrap();
+        assert_eq!(diagnostics["tool"], "v8-runner");
+        assert_eq!(diagnostics["operation"], "build");
+        assert_eq!(diagnostics["failure_kind"], "exit");
+        assert_eq!(diagnostics["exit_code"], 1);
+        assert_eq!(diagnostics["timed_out"], false);
+        assert_eq!(diagnostics["argv"][1], "build");
+        assert_eq!(diagnostics["argv"][2], "--source-set");
+        assert_eq!(diagnostics["argv"][3], "main");
+        assert_eq!(diagnostics["cwd"], root.display().to_string());
+        assert!(diagnostics["stdout_tail"]
+            .as_str()
+            .unwrap()
+            .contains("started build"));
+        assert!(!serde_json::to_string(&diagnostics)
+            .unwrap()
+            .contains("super-secret"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_failure_result_distinguishes_timeout_diagnostics() {
+        let root = test_workspace_root("runtime-timeout-diagnostics");
+        let result = call_runtime_with_outcome(
+            &root,
+            AdapterOutcome {
+                ok: false,
+                summary: "unica.runtime.execute failed through internal v8-runner runtime adapter"
+                    .to_string(),
+                changes: Vec::new(),
+                warnings: vec!["internal v8-runner runtime adapter timed out".to_string()],
+                errors: vec!["internal v8-runner runtime adapter timed out".to_string()],
+                artifacts: Vec::new(),
+                stdout: Some("started loading configuration...\n".to_string()),
+                stderr: Some(String::new()),
+                command: Some(vec![
+                    "/tmp/unica/plugins/unica/bin/darwin-arm64/v8-runner".to_string(),
+                    "load".to_string(),
+                    "--path".to_string(),
+                    "build/config.cf".to_string(),
+                ]),
+            },
+            "load",
+        );
+
+        let diagnostics = result.diagnostics.unwrap();
+        assert_eq!(diagnostics["failure_kind"], "timeout");
+        assert_eq!(diagnostics["timed_out"], true);
+        assert!(diagnostics["timeout_seconds"].is_null());
+        assert_eq!(diagnostics["timeout_source"], "delegated-to-v8-runner");
+        assert!(diagnostics["stdout_tail"]
+            .as_str()
+            .unwrap()
+            .contains("started loading configuration"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_failure_result_distinguishes_spawn_diagnostics() {
+        let root = test_workspace_root("runtime-spawn-diagnostics");
+        let result = call_runtime_with_outcome(
+            &root,
+            AdapterOutcome {
+                ok: false,
+                summary: "unica.runtime.execute failed through internal v8-runner runtime adapter"
+                    .to_string(),
+                changes: Vec::new(),
+                warnings: vec![
+                    "internal v8-runner runtime adapter failed to spawn process".to_string()
+                ],
+                errors: vec!["failed to execute process: apiToken=<redacted>".to_string()],
+                artifacts: Vec::new(),
+                stdout: None,
+                stderr: Some("failed to execute process: apiToken=<redacted>\n".to_string()),
+                command: Some(vec![
+                    "/tmp/unica/plugins/unica/bin/darwin-arm64/v8-runner".to_string(),
+                    "build".to_string(),
+                ]),
+            },
+            "build",
+        );
+
+        let diagnostics = result.diagnostics.unwrap();
+        assert_eq!(diagnostics["failure_kind"], "spawn");
+        assert_eq!(diagnostics["operation"], "build");
+        assert!(diagnostics["exit_code"].is_null());
+        assert_eq!(diagnostics["timed_out"], false);
+        assert!(diagnostics["status"].is_null());
+        assert!(diagnostics["error"]
+            .as_str()
+            .unwrap()
+            .contains("failed to execute process"));
+        assert!(!serde_json::to_string(&diagnostics)
+            .unwrap()
+            .contains("token-secret"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3411,6 +3632,98 @@ mod tests {
   ]
 }}"#
         )
+    }
+
+    struct FixedOutcomePorts {
+        outcome: AdapterOutcome,
+    }
+
+    impl ports::ApplicationPorts for FixedOutcomePorts {
+        fn discover_workspace(&self, cwd: PathBuf) -> Result<WorkspaceContext, String> {
+            Ok(WorkspaceContext {
+                cwd: cwd.clone(),
+                workspace_root: cwd.clone(),
+                cache_root: cwd.join(".build").join("unica"),
+                workspace_epoch: 1,
+            })
+        }
+
+        fn invoke_handler(
+            &self,
+            _spec: ToolSpec,
+            _args: &Map<String, Value>,
+            _context: &WorkspaceContext,
+            _dry_run: bool,
+        ) -> Result<AdapterOutcome, String> {
+            Ok(self.outcome.clone())
+        }
+
+        fn cache_report(
+            &self,
+            context: &WorkspaceContext,
+            events: &[DomainEvent],
+            dry_run: bool,
+            _cache_access: CacheAccess,
+        ) -> Result<CacheReport, String> {
+            Ok(CacheReport {
+                mode: if events.is_empty() {
+                    "read".to_string()
+                } else if dry_run {
+                    "dry-run".to_string()
+                } else {
+                    "applied".to_string()
+                },
+                root: context.cache_root.display().to_string(),
+                workspace_epoch: context.workspace_epoch,
+                events: events
+                    .iter()
+                    .map(|event| event.name().to_string())
+                    .collect(),
+                invalidated: Vec::new(),
+                refreshed: Vec::new(),
+                lazy_rebuilt: Vec::new(),
+                stale: Vec::new(),
+                fresh: Vec::new(),
+            })
+        }
+
+        fn notify_invalidation(&self, _context: &WorkspaceContext, _events: &[DomainEvent]) {}
+    }
+
+    fn call_runtime_with_outcome(
+        workspace: &std::path::Path,
+        outcome: AdapterOutcome,
+        operation: &str,
+    ) -> OperationResult {
+        let mut args = Map::new();
+        args.insert(
+            "cwd".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        args.insert("dryRun".to_string(), Value::Bool(false));
+        args.insert(
+            "operation".to_string(),
+            Value::String(operation.to_string()),
+        );
+        if operation == "load" {
+            args.insert(
+                "path".to_string(),
+                Value::String("build/config.cf".to_string()),
+            );
+        }
+        UnicaApplication::with_ports(Box::new(FixedOutcomePorts { outcome }))
+            .call_tool("unica.runtime.execute", &args)
+            .unwrap()
+    }
+
+    fn test_workspace_root(prefix: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
     }
 
     fn temp_meta_compile_workspace(prefix: &str) -> std::path::PathBuf {

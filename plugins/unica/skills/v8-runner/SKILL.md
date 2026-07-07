@@ -1,7 +1,7 @@
 ---
 name: v8-runner
-description: "Используй когда задача про runtime 1С, информационная база или workspace: v8project.yaml, первый workspace, build/dump/convert source-set, load/make CF/CFE, build/dump/make EPF/ERF external source-set, syntax/tests/launch, extensions. Не используй для точечного чтения или редактирования XML метаданных, форм, СКД, MXL, ролей, подсистем."
-argument-hint: "[config-init|init|build|dump|make|load|syntax|test|launch|extensions] [connection|sourceSet|path|output]"
+description: "Используй когда задача про runtime 1С, информационная база или workspace: v8project.yaml, первый workspace, build/dump/convert source-set, load/make CF/CFE, build/dump/make EPF/ERF external source-set, syntax/tests/launch, extensions, tools-download. Не используй для точечного чтения или редактирования XML метаданных, форм, СКД, MXL, ролей, подсистем."
+argument-hint: "[config-init|init|build|dump|make|load|syntax|test|launch|extensions|tools-download] [connection|sourceSet|path|output]"
 allowed-tools:
   - Bash
   - Read
@@ -33,6 +33,7 @@ allowed-tools:
 | Запустить тесты | `test` | `BuildCompleted` |
 | Запустить клиент/Designer/MCP-клиент | `launch` | без invalidation |
 | Синхронизировать extension properties | `extensions` | `BuildCompleted` |
+| Скачать/обновить runner tools | `tools-download` | без invalidation |
 
 ## Auth/license stop rules
 
@@ -143,9 +144,11 @@ allowed-tools:
 
 ### Локальный overlay
 
-Используй `v8project.local.yaml` для локальных `infobase.connection`, credentials и tool paths. Не добавляй туда `source-set`, `format` или `builder`: эти поля должны жить в основном проектном конфиге.
+Используй `v8project.local.yaml` для локальных `workPath`, `infobase.connection`, credentials, `tools`, `tests` и `mcp`. Не передавай local overlay как `config`. Не добавляй туда `source-set`, `format`, `builder` или `execution_timeout`: эти поля должны жить в основном проектном конфиге.
 
-## Build/load/update
+Для долгих операций меняй `execution_timeout` в `v8project.yaml` (миллисекунды, default `300000`, диапазон `1..=86400000`). Не прокидывай отдельный `timeoutMs` в `unica.runtime.execute`: Unica не владеет таймаутом runner-а.
+
+## Build/load/artifacts
 
 ### Обычный build
 
@@ -212,7 +215,7 @@ allowed-tools:
       "cwd": "<workspace>",
       "operation": "load",
       "path": "build/config.cf",
-      "mode": "update",
+      "mode": "load",
       "dryRun": false
     }
   }
@@ -252,12 +255,14 @@ allowed-tools:
       "operation": "load",
       "path": "build/MyExtension.cfe",
       "extension": "MyExtension",
-      "mode": "update",
+      "mode": "load",
       "dryRun": false
     }
   }
 }
 ```
+
+`operation=load` поддерживает только `mode=load` и `mode=merge`. Для `mode=merge` обязательно передавай `settings`; `mode=update` v8-runner отвергает.
 
 ## Dump/convert/artifacts
 
@@ -294,6 +299,25 @@ allowed-tools:
       "operation": "dump",
       "mode": "partial",
       "object": "Catalog:Номенклатура",
+      "dryRun": false
+    }
+  }
+}
+```
+
+### Partial dump нескольких объектов
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "unica.runtime.execute",
+    "arguments": {
+      "cwd": "<workspace>",
+      "operation": "dump",
+      "mode": "partial",
+      "objects": ["Catalog:Номенклатура", "Document:ЗаказПокупателя"],
       "dryRun": false
     }
   }
@@ -461,6 +485,25 @@ allowed-tools:
 }
 ```
 
+### EDT syntax by projects
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "unica.runtime.execute",
+    "arguments": {
+      "cwd": "<workspace>",
+      "operation": "syntax",
+      "mode": "edt",
+      "projects": ["Configuration", "Tests"],
+      "dryRun": false
+    }
+  }
+}
+```
+
 ### YaXUnit all
 
 ```json
@@ -474,6 +517,7 @@ allowed-tools:
       "operation": "test",
       "testRunner": "yaxunit",
       "testScope": "all",
+      "fullOutput": true,
       "dryRun": false
     }
   }
@@ -512,6 +556,10 @@ allowed-tools:
       "cwd": "<workspace>",
       "operation": "test",
       "testRunner": "va",
+      "features": ["features/smoke.feature"],
+      "filterTags": ["@smoke"],
+      "ignoreTags": ["@wip"],
+      "scenarioFilters": ["Open form"],
       "dryRun": false
     }
   }
@@ -530,6 +578,46 @@ allowed-tools:
       "cwd": "<workspace>",
       "operation": "extensions",
       "sourceSet": "MyExtension",
+      "dryRun": false
+    }
+  }
+}
+```
+
+### Несколько extension source-set
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "unica.runtime.execute",
+    "arguments": {
+      "cwd": "<workspace>",
+      "operation": "extensions",
+      "sourceSets": ["Sales", "Warehouse"],
+      "dryRun": false
+    }
+  }
+}
+```
+
+## Tools
+
+### Download client MCP sources
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "unica.runtime.execute",
+    "arguments": {
+      "cwd": "<workspace>",
+      "operation": "tools-download",
+      "tool": "client-mcp",
+      "sources": true,
+      "force": true,
       "dryRun": false
     }
   }
