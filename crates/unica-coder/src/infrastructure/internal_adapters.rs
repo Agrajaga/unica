@@ -2391,6 +2391,126 @@ fn normalize_mcp_http_body(text: &str) -> Result<String, String> {
     Ok(joined)
 }
 
+const RUNTIME_MAPPER_CONFIG_INIT_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "connection",
+    "format",
+    "builder",
+    "force",
+];
+const RUNTIME_MAPPER_INIT_ARGS: &[&str] = &["operation", "config", "workdir"];
+const RUNTIME_MAPPER_BUILD_ARGS: &[&str] =
+    &["operation", "config", "workdir", "sourceSet", "fullRebuild"];
+const RUNTIME_MAPPER_DUMP_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "mode",
+    "object",
+    "objects",
+    "sourceSet",
+    "extension",
+];
+const RUNTIME_MAPPER_CONVERT_ARGS: &[&str] =
+    &["operation", "config", "workdir", "sourceSet", "output"];
+const RUNTIME_MAPPER_MAKE_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "output",
+    "sourceSet",
+    "extension",
+];
+const RUNTIME_MAPPER_LOAD_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "path",
+    "mode",
+    "settings",
+    "extension",
+];
+const RUNTIME_MAPPER_SYNTAX_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "mode",
+    "server",
+    "thinClient",
+    "webClient",
+    "mobileClient",
+    "externalConnection",
+    "externalConnectionServer",
+    "thickClientManagedApplication",
+    "thickClientServerManagedApplication",
+    "thickClientOrdinaryApplication",
+    "thickClientServerOrdinaryApplication",
+    "mobileAppClient",
+    "mobileAppServer",
+    "mobileClientDigiSign",
+    "distributiveModules",
+    "unreferenceProcedures",
+    "handlersExistence",
+    "emptyHandlers",
+    "extendedModulesCheck",
+    "checkUseSynchronousCalls",
+    "checkUseModality",
+    "unsupportedFunctional",
+    "configLogIntegrity",
+    "incorrectReferences",
+    "extension",
+    "allExtensions",
+    "projects",
+];
+const RUNTIME_MAPPER_TEST_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "testRunner",
+    "testScope",
+    "module",
+    "fullOutput",
+    "features",
+    "filterTags",
+    "ignoreTags",
+    "scenarioFilters",
+];
+const RUNTIME_MAPPER_LAUNCH_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "clientMode",
+    "mode",
+    "mcpConfig",
+    "mcpPort",
+    "c",
+    "execute",
+    "usePrivilegedMode",
+    "output",
+    "rawKeys",
+];
+const RUNTIME_MAPPER_EXTENSIONS_ARGS: &[&str] =
+    &["operation", "config", "workdir", "sourceSet", "sourceSets"];
+const RUNTIME_MAPPER_TOOLS_DOWNLOAD_ARGS: &[&str] =
+    &["operation", "config", "workdir", "tool", "sources", "force"];
+const RUNTIME_MAPPER_ARRAY_ARGS: &[&str] = &[
+    "features",
+    "filterTags",
+    "ignoreTags",
+    "objects",
+    "projects",
+    "rawKeys",
+    "scenarioFilters",
+    "sourceSets",
+];
+const RUNTIME_MAPPER_LOAD_MODES: &[&str] = &["load", "merge"];
+const RUNTIME_MAPPER_DUMP_MODES: &[&str] = &["full", "incremental", "partial"];
+const RUNTIME_MAPPER_TEST_RUNNERS: &[&str] = &["yaxunit", "va"];
+const RUNTIME_MAPPER_TEST_SCOPES: &[&str] = &["all", "module"];
+const RUNTIME_MAPPER_TOOLS: &[&str] = &["yaxunit", "vanessa", "client-mcp"];
+
 fn runtime_args(args: &Map<String, Value>, redact: bool) -> Result<Vec<String>, String> {
     if args.contains_key("args") {
         return Err(
@@ -2402,6 +2522,7 @@ fn runtime_args(args: &Map<String, Value>, redact: bool) -> Result<Vec<String>, 
         .get("operation")
         .and_then(Value::as_str)
         .ok_or_else(|| "unica.runtime.execute requires string `operation` argument".to_string())?;
+    validate_runtime_mapper_payload(operation, args)?;
     let mut result = Vec::new();
 
     append_runtime_global_args(&mut result, operation, args, redact);
@@ -2413,18 +2534,19 @@ fn runtime_args(args: &Map<String, Value>, redact: bool) -> Result<Vec<String>, 
             append_arg(&mut result, "--connection", args, "connection", redact);
             append_arg(&mut result, "--format", args, "format", redact);
             append_arg(&mut result, "--builder", args, "builder", redact);
+            append_bool_flag(&mut result, "--force", args, "force");
         }
         "init" => result.push("init".to_string()),
         "build" => {
             result.push("build".to_string());
             append_bool_flag(&mut result, "--full-rebuild", args, "fullRebuild");
             append_arg(&mut result, "--source-set", args, "sourceSet", redact);
-            append_arg(&mut result, "--extension", args, "extension", redact);
         }
         "dump" => {
             result.push("dump".to_string());
             append_arg(&mut result, "--mode", args, "mode", redact);
             append_arg(&mut result, "--object", args, "object", redact);
+            append_array_args(&mut result, "--object", args, "objects", redact);
             append_arg(&mut result, "--source-set", args, "sourceSet", redact);
             append_arg(&mut result, "--extension", args, "extension", redact);
         }
@@ -2432,9 +2554,6 @@ fn runtime_args(args: &Map<String, Value>, redact: bool) -> Result<Vec<String>, 
             result.push("convert".to_string());
             append_arg(&mut result, "--source-set", args, "sourceSet", redact);
             append_arg(&mut result, "--output", args, "output", redact);
-            append_arg(&mut result, "--path", args, "path", redact);
-            append_arg(&mut result, "--format", args, "format", redact);
-            append_arg(&mut result, "--extension", args, "extension", redact);
         }
         "make" => {
             result.push("make".to_string());
@@ -2454,23 +2573,30 @@ fn runtime_args(args: &Map<String, Value>, redact: bool) -> Result<Vec<String>, 
             if let Some(mode) = string_arg(args, "mode", redact) {
                 result.push(mode);
             }
-            append_bool_flag(&mut result, "--server", args, "server");
-            append_bool_flag(&mut result, "--thin-client", args, "thinClient");
+            append_syntax_args(&mut result, args, redact);
         }
         "test" => {
             result.push("test".to_string());
             if let Some(test_runner) = string_arg(args, "testRunner", redact) {
                 result.push(test_runner);
             }
-            append_bool_flag(&mut result, "--full", args, "fullRebuild");
+            append_bool_flag(&mut result, "--full", args, "fullOutput");
             if let Some(test_scope) = string_arg(args, "testScope", redact) {
                 result.push(test_scope);
             }
             if let Some(module) = string_arg(args, "module", redact) {
                 result.push(module);
             }
-            append_arg(&mut result, "--source-set", args, "sourceSet", redact);
-            append_arg(&mut result, "--extension", args, "extension", redact);
+            append_array_args(&mut result, "--feature", args, "features", redact);
+            append_array_args(&mut result, "--filter-tag", args, "filterTags", redact);
+            append_array_args(&mut result, "--ignore-tag", args, "ignoreTags", redact);
+            append_array_args(
+                &mut result,
+                "--scenario-filter",
+                args,
+                "scenarioFilters",
+                redact,
+            );
         }
         "launch" => {
             result.push("launch".to_string());
@@ -2487,14 +2613,25 @@ fn runtime_args(args: &Map<String, Value>, redact: bool) -> Result<Vec<String>, 
                     append_arg(&mut result, "--mcp-port", args, "mcpPort", redact);
                     append_arg(&mut result, "--mcp-config", args, "mcpConfig", redact);
                 }
-                Some(client_mode) => result.push(client_mode.to_string()),
+                Some(client_mode) => {
+                    result.push(client_mode.to_string());
+                    append_launch_direct_args(&mut result, args, redact);
+                }
                 None => {}
             }
         }
         "extensions" => {
             result.push("extensions".to_string());
             append_arg(&mut result, "--name", args, "sourceSet", redact);
-            append_arg(&mut result, "--extension", args, "extension", redact);
+            append_array_args(&mut result, "--name", args, "sourceSets", redact);
+        }
+        "tools-download" => {
+            result.extend(["tools".to_string(), "download".to_string()]);
+            if let Some(tool) = string_arg(args, "tool", redact) {
+                result.push(tool);
+            }
+            append_bool_flag(&mut result, "--sources", args, "sources");
+            append_bool_flag(&mut result, "--force", args, "force");
         }
         other => return Err(format!("unknown runtime operation: {other}")),
     }
@@ -2512,6 +2649,153 @@ fn append_runtime_global_args(
         append_arg(result, "--config", args, "config", redact);
     }
     append_arg(result, "--workdir", args, "workdir", redact);
+}
+
+fn validate_runtime_mapper_payload(
+    operation: &str,
+    args: &Map<String, Value>,
+) -> Result<(), String> {
+    let allowed = runtime_mapper_operation_args(operation)
+        .ok_or_else(|| format!("unknown runtime operation: {operation}"))?;
+    for key in args.keys() {
+        if matches!(key.as_str(), "cwd" | "dryRun" | "confirm") {
+            continue;
+        }
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!("operation `{operation}` does not accept `{key}`"));
+        }
+    }
+    for key in RUNTIME_MAPPER_ARRAY_ARGS {
+        validate_mapper_string_array(args, key)?;
+    }
+
+    match operation {
+        "dump" => {
+            validate_mapper_enum(args, "mode", RUNTIME_MAPPER_DUMP_MODES)?;
+            if args
+                .get("mode")
+                .and_then(Value::as_str)
+                .is_some_and(|mode| mode == "partial")
+                && !args.contains_key("object")
+                && !mapper_has_non_empty_array_arg(args, "objects")
+            {
+                return Err(
+                    "operation `dump` with mode `partial` requires `object` or `objects`"
+                        .to_string(),
+                );
+            }
+        }
+        "load" => {
+            if args
+                .get("mode")
+                .and_then(Value::as_str)
+                .is_some_and(|mode| mode == "update")
+            {
+                return Err(
+                    "load --mode update is not supported; use `load` or `merge`".to_string()
+                );
+            }
+            validate_mapper_enum(args, "mode", RUNTIME_MAPPER_LOAD_MODES)?;
+            if args
+                .get("mode")
+                .and_then(Value::as_str)
+                .is_some_and(|mode| mode == "merge")
+                && !args.contains_key("settings")
+            {
+                return Err("operation `load` with mode `merge` requires `settings`".to_string());
+            }
+            if args.contains_key("settings")
+                && args.get("mode").and_then(Value::as_str) != Some("merge")
+            {
+                return Err(
+                    "operation `load` accepts `settings` only with mode `merge`".to_string()
+                );
+            }
+        }
+        "test" => {
+            validate_mapper_enum(args, "testRunner", RUNTIME_MAPPER_TEST_RUNNERS)?;
+            validate_mapper_enum(args, "testScope", RUNTIME_MAPPER_TEST_SCOPES)?;
+        }
+        "tools-download" => {
+            validate_mapper_enum(args, "tool", RUNTIME_MAPPER_TOOLS)?;
+            if args
+                .get("sources")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && args
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .is_some_and(|tool| tool == "vanessa")
+            {
+                return Err(
+                    "operation `tools-download` accepts `sources` only for `yaxunit` or `client-mcp`"
+                        .to_string(),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn runtime_mapper_operation_args(operation: &str) -> Option<&'static [&'static str]> {
+    match operation {
+        "config-init" => Some(RUNTIME_MAPPER_CONFIG_INIT_ARGS),
+        "init" => Some(RUNTIME_MAPPER_INIT_ARGS),
+        "build" => Some(RUNTIME_MAPPER_BUILD_ARGS),
+        "dump" => Some(RUNTIME_MAPPER_DUMP_ARGS),
+        "convert" => Some(RUNTIME_MAPPER_CONVERT_ARGS),
+        "make" => Some(RUNTIME_MAPPER_MAKE_ARGS),
+        "load" => Some(RUNTIME_MAPPER_LOAD_ARGS),
+        "syntax" => Some(RUNTIME_MAPPER_SYNTAX_ARGS),
+        "test" => Some(RUNTIME_MAPPER_TEST_ARGS),
+        "launch" => Some(RUNTIME_MAPPER_LAUNCH_ARGS),
+        "extensions" => Some(RUNTIME_MAPPER_EXTENSIONS_ARGS),
+        "tools-download" => Some(RUNTIME_MAPPER_TOOLS_DOWNLOAD_ARGS),
+        _ => None,
+    }
+}
+
+fn validate_mapper_string_array(args: &Map<String, Value>, key: &str) -> Result<(), String> {
+    let Some(value) = args.get(key) else {
+        return Ok(());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(format!("argument `{key}` must be array"));
+    };
+    for item in items {
+        if !item.is_string() {
+            return Err(format!("argument `{key}` must contain strings"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_mapper_enum(
+    args: &Map<String, Value>,
+    key: &str,
+    allowed: &[&str],
+) -> Result<(), String> {
+    let Some(value) = args.get(key) else {
+        return Ok(());
+    };
+    let Some(value) = value.as_str() else {
+        return Err(format!("argument `{key}` must be string"));
+    };
+    if !allowed.contains(&value) {
+        return Err(format!(
+            "argument `{key}` must be one of: {}",
+            allowed.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn mapper_has_non_empty_array_arg(args: &Map<String, Value>, key: &str) -> bool {
+    args.get(key)
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
 }
 
 fn cli_args(args: &Map<String, Value>, redact: bool) -> Result<Vec<String>, String> {
@@ -2560,6 +2844,79 @@ fn append_arg(
         result.push(flag.to_string());
         result.push(value);
     }
+}
+
+fn append_array_args(
+    result: &mut Vec<String>,
+    flag: &str,
+    args: &Map<String, Value>,
+    key: &str,
+    redact: bool,
+) {
+    let Some(items) = args.get(key).and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        result.push(flag.to_string());
+        result.push(if redact && is_secret_key(key) {
+            "<redacted>".to_string()
+        } else {
+            value_to_cli_string(item)
+        });
+    }
+}
+
+fn append_syntax_args(result: &mut Vec<String>, args: &Map<String, Value>, redact: bool) {
+    for (key, flag) in [
+        ("server", "--server"),
+        ("thinClient", "--thin-client"),
+        ("webClient", "--web-client"),
+        ("mobileClient", "--mobile-client"),
+        ("externalConnection", "--external-connection"),
+        ("externalConnectionServer", "--external-connection-server"),
+        (
+            "thickClientManagedApplication",
+            "--thick-client-managed-application",
+        ),
+        (
+            "thickClientServerManagedApplication",
+            "--thick-client-server-managed-application",
+        ),
+        (
+            "thickClientOrdinaryApplication",
+            "--thick-client-ordinary-application",
+        ),
+        (
+            "thickClientServerOrdinaryApplication",
+            "--thick-client-server-ordinary-application",
+        ),
+        ("mobileAppClient", "--mobile-app-client"),
+        ("mobileAppServer", "--mobile-app-server"),
+        ("mobileClientDigiSign", "--mobile-client-digi-sign"),
+        ("distributiveModules", "--distributive-modules"),
+        ("unreferenceProcedures", "--unreference-procedures"),
+        ("handlersExistence", "--handlers-existence"),
+        ("emptyHandlers", "--empty-handlers"),
+        ("extendedModulesCheck", "--extended-modules-check"),
+        ("checkUseSynchronousCalls", "--check-use-synchronous-calls"),
+        ("checkUseModality", "--check-use-modality"),
+        ("unsupportedFunctional", "--unsupported-functional"),
+        ("configLogIntegrity", "--config-log-integrity"),
+        ("incorrectReferences", "--incorrect-references"),
+        ("allExtensions", "--all-extensions"),
+    ] {
+        append_bool_flag(result, flag, args, key);
+    }
+    append_arg(result, "--extension", args, "extension", redact);
+    append_array_args(result, "--project", args, "projects", redact);
+}
+
+fn append_launch_direct_args(result: &mut Vec<String>, args: &Map<String, Value>, redact: bool) {
+    append_arg(result, "--c", args, "c", redact);
+    append_arg(result, "--execute", args, "execute", redact);
+    append_bool_flag(result, "--use-privileged-mode", args, "usePrivilegedMode");
+    append_arg(result, "--output", args, "output", redact);
+    append_array_args(result, "--raw-key", args, "rawKeys", redact);
 }
 
 fn append_bool_flag(result: &mut Vec<String>, flag: &str, args: &Map<String, Value>, key: &str) {
@@ -2771,7 +3128,7 @@ mod tests {
         let mut test_args = Map::new();
         test_args.insert("operation".to_string(), json!("test"));
         test_args.insert("testRunner".to_string(), json!("yaxunit"));
-        test_args.insert("fullRebuild".to_string(), json!(true));
+        test_args.insert("fullOutput".to_string(), json!(true));
         test_args.insert("testScope".to_string(), json!("module"));
         test_args.insert("module".to_string(), json!("CommonModule.Тесты"));
 
@@ -2885,11 +3242,121 @@ mod tests {
                 }),
                 vec!["extensions", "--name", "MyExtension"],
             ),
+            (
+                json!({
+                    "operation": "dump",
+                    "mode": "partial",
+                    "objects": ["Catalog:Номенклатура", "Document:ЗаказПокупателя"],
+                }),
+                vec![
+                    "dump",
+                    "--mode",
+                    "partial",
+                    "--object",
+                    "Catalog:Номенклатура",
+                    "--object",
+                    "Document:ЗаказПокупателя",
+                ],
+            ),
+            (
+                json!({
+                    "operation": "syntax",
+                    "mode": "edt",
+                    "projects": ["Configuration", "Tests"],
+                }),
+                vec![
+                    "syntax",
+                    "edt",
+                    "--project",
+                    "Configuration",
+                    "--project",
+                    "Tests",
+                ],
+            ),
+            (
+                json!({
+                    "operation": "test",
+                    "testRunner": "va",
+                    "fullOutput": true,
+                    "features": ["features/smoke.feature"],
+                    "filterTags": ["@smoke"],
+                    "ignoreTags": ["@wip"],
+                    "scenarioFilters": ["Open form"],
+                }),
+                vec![
+                    "test",
+                    "va",
+                    "--full",
+                    "--feature",
+                    "features/smoke.feature",
+                    "--filter-tag",
+                    "@smoke",
+                    "--ignore-tag",
+                    "@wip",
+                    "--scenario-filter",
+                    "Open form",
+                ],
+            ),
+            (
+                json!({
+                    "operation": "extensions",
+                    "sourceSets": ["Sales", "Warehouse"],
+                }),
+                vec!["extensions", "--name", "Sales", "--name", "Warehouse"],
+            ),
+            (
+                json!({
+                    "operation": "tools-download",
+                    "tool": "client-mcp",
+                    "sources": true,
+                    "force": true,
+                }),
+                vec!["tools", "download", "client-mcp", "--sources", "--force"],
+            ),
         ];
 
         for (input, expected) in cases {
             let args = input.as_object().unwrap().clone();
             assert_eq!(runtime_args(&args, false).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn runtime_adapter_rejects_operation_specific_unsupported_args() {
+        let cases = vec![
+            (
+                json!({"operation": "build", "extension": "MyExtension"}),
+                "operation `build` does not accept `extension`",
+            ),
+            (
+                json!({"operation": "convert", "path": "src"}),
+                "operation `convert` does not accept `path`",
+            ),
+            (
+                json!({"operation": "test", "testRunner": "yaxunit", "fullRebuild": true}),
+                "operation `test` does not accept `fullRebuild`",
+            ),
+            (
+                json!({"operation": "load", "path": "build/config.cf", "mode": "update"}),
+                "load --mode update is not supported",
+            ),
+            (
+                json!({"operation": "load", "path": "build/config.cf", "settings": "merge-settings.xml"}),
+                "operation `load` accepts `settings` only with mode `merge`",
+            ),
+            (
+                json!({"operation": "dump", "mode": "partial"}),
+                "operation `dump` with mode `partial` requires `object` or `objects`",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let args = input.as_object().unwrap().clone();
+            let error = runtime_args(&args, false).unwrap_err();
+            assert!(
+                error.contains(expected),
+                "expected error containing {expected:?}, got {error:?}"
+            );
         }
     }
 

@@ -69,7 +69,6 @@ description: "Проектирование и запуск тестов 1С: tes
       "cwd": "<workspace>",
       "operation": "test",
       "testRunner": "va",
-      "testScope": "all",
       "dryRun": false
     }
   }

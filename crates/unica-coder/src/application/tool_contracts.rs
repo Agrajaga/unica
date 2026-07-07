@@ -236,27 +236,63 @@ const BUILD_ARGS: &[&str] = &[
 ];
 
 const RUNTIME_ARGS: &[&str] = &[
+    "allExtensions",
     "builder",
+    "c",
+    "checkUseModality",
+    "checkUseSynchronousCalls",
     "clientMode",
     "config",
+    "configLogIntegrity",
     "connection",
+    "distributiveModules",
+    "emptyHandlers",
+    "execute",
     "extension",
+    "externalConnection",
+    "externalConnectionServer",
+    "features",
+    "filterTags",
     "format",
+    "force",
+    "fullOutput",
     "fullRebuild",
+    "handlersExistence",
+    "ignoreTags",
+    "incorrectReferences",
     "mcpConfig",
     "mcpPort",
+    "mobileAppClient",
+    "mobileAppServer",
+    "mobileClient",
+    "mobileClientDigiSign",
     "mode",
     "module",
     "object",
+    "objects",
     "operation",
     "output",
     "path",
+    "projects",
+    "rawKeys",
+    "scenarioFilters",
     "server",
     "settings",
     "sourceSet",
+    "sourceSets",
+    "sources",
     "testRunner",
     "testScope",
+    "thickClientManagedApplication",
+    "thickClientOrdinaryApplication",
+    "thickClientServerManagedApplication",
+    "thickClientServerOrdinaryApplication",
     "thinClient",
+    "tool",
+    "unsupportedFunctional",
+    "unreferenceProcedures",
+    "usePrivilegedMode",
+    "webClient",
     "workdir",
 ];
 
@@ -272,13 +308,16 @@ const RUNTIME_OPERATIONS: &[&str] = &[
     "test",
     "launch",
     "extensions",
+    "tools-download",
 ];
 
 const RUNTIME_STRING_ARGS: &[&str] = &[
     "builder",
+    "c",
     "clientMode",
     "config",
     "connection",
+    "execute",
     "extension",
     "format",
     "mcpConfig",
@@ -292,8 +331,133 @@ const RUNTIME_STRING_ARGS: &[&str] = &[
     "sourceSet",
     "testRunner",
     "testScope",
+    "tool",
     "workdir",
 ];
+
+const RUNTIME_ARRAY_ARGS: &[&str] = &[
+    "features",
+    "filterTags",
+    "ignoreTags",
+    "objects",
+    "projects",
+    "rawKeys",
+    "scenarioFilters",
+    "sourceSets",
+];
+
+const RUNTIME_CLIENT_MODES: &[&str] = &["designer", "thin", "thick", "ordinary", "mcp", "mcp-va"];
+const RUNTIME_TEST_RUNNERS: &[&str] = &["yaxunit", "va"];
+const RUNTIME_TEST_SCOPES: &[&str] = &["all", "module"];
+const RUNTIME_TOOLS: &[&str] = &["yaxunit", "vanessa", "client-mcp"];
+const RUNTIME_DUMP_MODES: &[&str] = &["full", "incremental", "partial"];
+const RUNTIME_LOAD_MODES: &[&str] = &["load", "merge"];
+const RUNTIME_SYNTAX_MODES: &[&str] = &["designer-config", "designer-modules", "edt"];
+
+const RUNTIME_CONFIG_INIT_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "connection",
+    "format",
+    "builder",
+    "force",
+];
+const RUNTIME_INIT_ARGS: &[&str] = &["operation", "config", "workdir"];
+const RUNTIME_BUILD_OPERATION_ARGS: &[&str] =
+    &["operation", "config", "workdir", "sourceSet", "fullRebuild"];
+const RUNTIME_DUMP_OPERATION_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "mode",
+    "object",
+    "objects",
+    "sourceSet",
+    "extension",
+];
+const RUNTIME_CONVERT_OPERATION_ARGS: &[&str] =
+    &["operation", "config", "workdir", "sourceSet", "output"];
+const RUNTIME_MAKE_OPERATION_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "output",
+    "sourceSet",
+    "extension",
+];
+const RUNTIME_LOAD_OPERATION_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "path",
+    "mode",
+    "settings",
+    "extension",
+];
+const RUNTIME_SYNTAX_OPERATION_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "mode",
+    "server",
+    "thinClient",
+    "webClient",
+    "mobileClient",
+    "externalConnection",
+    "externalConnectionServer",
+    "thickClientManagedApplication",
+    "thickClientServerManagedApplication",
+    "thickClientOrdinaryApplication",
+    "thickClientServerOrdinaryApplication",
+    "mobileAppClient",
+    "mobileAppServer",
+    "mobileClientDigiSign",
+    "distributiveModules",
+    "unreferenceProcedures",
+    "handlersExistence",
+    "emptyHandlers",
+    "extendedModulesCheck",
+    "checkUseSynchronousCalls",
+    "checkUseModality",
+    "unsupportedFunctional",
+    "configLogIntegrity",
+    "incorrectReferences",
+    "extension",
+    "allExtensions",
+    "projects",
+];
+const RUNTIME_TEST_OPERATION_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "testRunner",
+    "testScope",
+    "module",
+    "fullOutput",
+    "features",
+    "filterTags",
+    "ignoreTags",
+    "scenarioFilters",
+];
+const RUNTIME_LAUNCH_OPERATION_ARGS: &[&str] = &[
+    "operation",
+    "config",
+    "workdir",
+    "clientMode",
+    "mode",
+    "mcpConfig",
+    "mcpPort",
+    "c",
+    "execute",
+    "usePrivilegedMode",
+    "output",
+    "rawKeys",
+];
+const RUNTIME_EXTENSIONS_OPERATION_ARGS: &[&str] =
+    &["operation", "config", "workdir", "sourceSet", "sourceSets"];
+const RUNTIME_TOOLS_DOWNLOAD_OPERATION_ARGS: &[&str] =
+    &["operation", "config", "workdir", "tool", "sources", "force"];
 
 const CODE_ARGS: &[&str] = &[
     "config",
@@ -663,12 +827,16 @@ fn validate_runtime_arguments(
             }
         }
     }
+    for key in RUNTIME_ARRAY_ARGS {
+        validate_string_array_argument(tool_name, args, key)?;
+    }
     if !RUNTIME_OPERATIONS.contains(&operation) {
         return Err(format!(
             "{tool_name} argument `operation` must be one of: {}",
             RUNTIME_OPERATIONS.join(", ")
         ));
     }
+    validate_runtime_operation_payload(tool_name, operation, args)?;
 
     if dry_run {
         return Ok(());
@@ -680,6 +848,7 @@ fn validate_runtime_arguments(
         "syntax" => &["mode"][..],
         "test" => &["testRunner"][..],
         "launch" => &["clientMode"][..],
+        "tools-download" => &["tool"][..],
         _ => &[][..],
     };
     for key in required {
@@ -691,6 +860,197 @@ fn validate_runtime_arguments(
     }
 
     Ok(())
+}
+
+fn validate_string_array_argument(
+    tool_name: &str,
+    args: &Map<String, Value>,
+    key: &str,
+) -> Result<(), String> {
+    let Some(value) = args.get(key) else {
+        return Ok(());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(format!("{tool_name} argument `{key}` must be array"));
+    };
+    for item in items {
+        if !item.is_string() {
+            return Err(format!("{tool_name} argument `{key}` must contain strings"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_operation_payload(
+    tool_name: &str,
+    operation: &str,
+    args: &Map<String, Value>,
+) -> Result<(), String> {
+    let allowed = runtime_operation_args(operation);
+    for key in args.keys() {
+        if COMMON_ARGS.contains(&key.as_str()) {
+            continue;
+        }
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!(
+                "{tool_name} operation `{operation}` does not accept `{key}`"
+            ));
+        }
+    }
+
+    match operation {
+        "dump" => {
+            validate_enum_argument(tool_name, args, "mode", RUNTIME_DUMP_MODES)?;
+            if args
+                .get("mode")
+                .and_then(Value::as_str)
+                .is_some_and(|mode| mode == "partial")
+                && !args.contains_key("object")
+                && !has_non_empty_array_arg(args, "objects")
+            {
+                return Err(format!(
+                    "{tool_name} operation `dump` with mode `partial` requires `object` or `objects`"
+                ));
+            }
+        }
+        "load" => {
+            if args
+                .get("mode")
+                .and_then(Value::as_str)
+                .is_some_and(|mode| mode == "update")
+            {
+                return Err(format!(
+                    "{tool_name} load --mode update is not supported; use `load` or `merge`"
+                ));
+            }
+            validate_enum_argument(tool_name, args, "mode", RUNTIME_LOAD_MODES)?;
+            if args
+                .get("mode")
+                .and_then(Value::as_str)
+                .is_some_and(|mode| mode == "merge")
+                && !args.contains_key("settings")
+            {
+                return Err(format!(
+                    "{tool_name} operation `load` with mode `merge` requires `settings`"
+                ));
+            }
+            if args.contains_key("settings")
+                && args.get("mode").and_then(Value::as_str) != Some("merge")
+            {
+                return Err(format!(
+                    "{tool_name} operation `load` accepts `settings` only with mode `merge`"
+                ));
+            }
+        }
+        "syntax" => {
+            validate_enum_argument(tool_name, args, "mode", RUNTIME_SYNTAX_MODES)?;
+            let mode = args.get("mode").and_then(Value::as_str);
+            if mode == Some("edt") && contains_any(args, &["extension", "allExtensions"]) {
+                return Err(format!(
+                    "{tool_name} operation `syntax` mode `edt` does not accept extension flags"
+                ));
+            }
+            if matches!(mode, Some("designer-config" | "designer-modules"))
+                && args.contains_key("projects")
+            {
+                return Err(format!(
+                    "{tool_name} operation `syntax` accepts `projects` only with mode `edt`"
+                ));
+            }
+        }
+        "test" => {
+            validate_enum_argument(tool_name, args, "testRunner", RUNTIME_TEST_RUNNERS)?;
+            validate_enum_argument(tool_name, args, "testScope", RUNTIME_TEST_SCOPES)?;
+            match args.get("testRunner").and_then(Value::as_str) {
+                Some("yaxunit") => {
+                    if !args.contains_key("testScope") {
+                        return Err(format!(
+                            "{tool_name} operation `test` with runner `yaxunit` requires `testScope`"
+                        ));
+                    }
+                    if args
+                        .get("testScope")
+                        .and_then(Value::as_str)
+                        .is_some_and(|scope| scope == "module")
+                        && !args.contains_key("module")
+                    {
+                        return Err(format!(
+                            "{tool_name} operation `test` with scope `module` requires `module`"
+                        ));
+                    }
+                }
+                Some("va") if contains_any(args, &["testScope", "module"]) => {
+                    return Err(format!(
+                        "{tool_name} operation `test` runner `va` does not accept `testScope` or `module`"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        "launch" => {
+            validate_enum_argument(tool_name, args, "clientMode", RUNTIME_CLIENT_MODES)?;
+            let client_mode = args.get("clientMode").and_then(Value::as_str);
+            let is_mcp_client = matches!(client_mode, Some("mcp" | "mcp-va"));
+            if is_mcp_client
+                && (contains_any(args, &["c", "execute", "usePrivilegedMode", "output"])
+                    || has_non_empty_array_arg(args, "rawKeys"))
+            {
+                return Err(format!(
+                    "{tool_name} operation `launch` clientMode `mcp` does not accept direct launch flags"
+                ));
+            }
+            if client_mode.is_some()
+                && !is_mcp_client
+                && contains_any(args, &["mcpConfig", "mcpPort"])
+            {
+                return Err(format!(
+                    "{tool_name} operation `launch` direct client modes do not accept MCP flags"
+                ));
+            }
+        }
+        "tools-download" => {
+            validate_enum_argument(tool_name, args, "tool", RUNTIME_TOOLS)?;
+            if args
+                .get("sources")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && args
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .is_some_and(|tool| tool == "vanessa")
+            {
+                return Err(format!(
+                    "{tool_name} operation `tools-download` accepts `sources` only for `yaxunit` or `client-mcp`"
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn runtime_operation_args(operation: &str) -> &'static [&'static str] {
+    match operation {
+        "config-init" => RUNTIME_CONFIG_INIT_ARGS,
+        "init" => RUNTIME_INIT_ARGS,
+        "build" => RUNTIME_BUILD_OPERATION_ARGS,
+        "dump" => RUNTIME_DUMP_OPERATION_ARGS,
+        "convert" => RUNTIME_CONVERT_OPERATION_ARGS,
+        "make" => RUNTIME_MAKE_OPERATION_ARGS,
+        "load" => RUNTIME_LOAD_OPERATION_ARGS,
+        "syntax" => RUNTIME_SYNTAX_OPERATION_ARGS,
+        "test" => RUNTIME_TEST_OPERATION_ARGS,
+        "launch" => RUNTIME_LAUNCH_OPERATION_ARGS,
+        "extensions" => RUNTIME_EXTENSIONS_OPERATION_ARGS,
+        "tools-download" => RUNTIME_TOOLS_DOWNLOAD_OPERATION_ARGS,
+        _ => &[],
+    }
+}
+
+fn has_non_empty_array_arg(args: &Map<String, Value>, key: &str) -> bool {
+    args.get(key)
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
 }
 
 pub fn validate_workspace_paths(
@@ -901,9 +1261,33 @@ fn property_schema(name: &str) -> Value {
             | "createIfMissing"
             | "IsFunction"
             | "isFunction"
+            | "allExtensions"
+            | "checkUseModality"
+            | "checkUseSynchronousCalls"
+            | "configLogIntegrity"
+            | "distributiveModules"
+            | "emptyHandlers"
+            | "externalConnection"
+            | "externalConnectionServer"
+            | "fullOutput"
             | "fullRebuild"
+            | "handlersExistence"
+            | "incorrectReferences"
+            | "mobileAppClient"
+            | "mobileAppServer"
+            | "mobileClient"
+            | "mobileClientDigiSign"
             | "server"
+            | "sources"
+            | "thickClientManagedApplication"
+            | "thickClientOrdinaryApplication"
+            | "thickClientServerManagedApplication"
+            | "thickClientServerOrdinaryApplication"
             | "thinClient"
+            | "unsupportedFunctional"
+            | "unreferenceProcedures"
+            | "usePrivilegedMode"
+            | "webClient"
             | "includeMethods"
             | "ignoreCase"
             | "regex"
@@ -935,6 +1319,14 @@ fn property_schema(name: &str) -> Value {
             | "edgeKinds"
             | "provenance"
             | "sections"
+            | "features"
+            | "filterTags"
+            | "ignoreTags"
+            | "objects"
+            | "projects"
+            | "rawKeys"
+            | "scenarioFilters"
+            | "sourceSets"
     ) {
         "array"
     } else {
@@ -958,11 +1350,12 @@ fn property_schema_for_tool(tool: &ToolSpec, name: &str) -> Value {
             "clientMode" => {
                 return json!({
                     "type": "string",
-                    "enum": ["designer", "thin", "thick", "ordinary", "mcp", "mcp-va"]
+                    "enum": RUNTIME_CLIENT_MODES
                 });
             }
-            "testRunner" => return json!({ "type": "string", "enum": ["yaxunit", "va"] }),
-            "testScope" => return json!({ "type": "string", "enum": ["all", "module"] }),
+            "testRunner" => return json!({ "type": "string", "enum": RUNTIME_TEST_RUNNERS }),
+            "testScope" => return json!({ "type": "string", "enum": RUNTIME_TEST_SCOPES }),
+            "tool" => return json!({ "type": "string", "enum": RUNTIME_TOOLS }),
             _ => {}
         }
     }
@@ -1040,9 +1433,33 @@ fn expected_scalar_type(key: &str) -> Option<&'static str> {
             | "createIfMissing"
             | "IsFunction"
             | "isFunction"
+            | "allExtensions"
+            | "checkUseModality"
+            | "checkUseSynchronousCalls"
+            | "configLogIntegrity"
+            | "distributiveModules"
+            | "emptyHandlers"
+            | "externalConnection"
+            | "externalConnectionServer"
+            | "fullOutput"
             | "fullRebuild"
+            | "handlersExistence"
+            | "incorrectReferences"
+            | "mobileAppClient"
+            | "mobileAppServer"
+            | "mobileClient"
+            | "mobileClientDigiSign"
             | "server"
+            | "sources"
+            | "thickClientManagedApplication"
+            | "thickClientOrdinaryApplication"
+            | "thickClientServerManagedApplication"
+            | "thickClientServerOrdinaryApplication"
             | "thinClient"
+            | "unsupportedFunctional"
+            | "unreferenceProcedures"
+            | "usePrivilegedMode"
+            | "webClient"
             | "includeMethods"
             | "ignoreCase"
             | "regex"
@@ -1074,6 +1491,14 @@ fn expected_scalar_type(key: &str) -> Option<&'static str> {
             | "edgeKinds"
             | "provenance"
             | "sections"
+            | "features"
+            | "filterTags"
+            | "ignoreTags"
+            | "objects"
+            | "projects"
+            | "rawKeys"
+            | "scenarioFilters"
+            | "sourceSets"
     ) {
         Some("array")
     } else {
@@ -1263,6 +1688,57 @@ mod tests {
     }
 
     #[test]
+    fn runtime_contract_rejects_operation_specific_unsupported_payloads() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.runtime.execute")
+            .unwrap();
+        let cases = vec![
+            (
+                json!({"operation": "build", "extension": "MyExtension"}),
+                "operation `build` does not accept `extension`",
+            ),
+            (
+                json!({"operation": "convert", "path": "src"}),
+                "operation `convert` does not accept `path`",
+            ),
+            (
+                json!({"operation": "test", "testRunner": "yaxunit", "fullRebuild": true}),
+                "operation `test` does not accept `fullRebuild`",
+            ),
+            (
+                json!({"operation": "load", "path": "build/config.cf", "mode": "update"}),
+                "load --mode update is not supported",
+            ),
+            (
+                json!({"operation": "load", "path": "build/config.cf", "mode": "merge"}),
+                "operation `load` with mode `merge` requires `settings`",
+            ),
+            (
+                json!({"operation": "load", "path": "build/config.cf", "settings": "merge-settings.xml"}),
+                "operation `load` accepts `settings` only with mode `merge`",
+            ),
+            (
+                json!({"operation": "dump", "mode": "partial"}),
+                "operation `dump` with mode `partial` requires `object` or `objects`",
+            ),
+            (
+                json!({"operation": "tools-download", "tool": "vanessa", "sources": true}),
+                "operation `tools-download` accepts `sources` only for `yaxunit` or `client-mcp`",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let args = input.as_object().unwrap().clone();
+            let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+            assert!(
+                error.contains(expected),
+                "expected error containing {expected:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
     fn runtime_schema_exposes_typed_arguments_without_additional_properties() {
         let tool = tools()
             .into_iter()
@@ -1281,10 +1757,26 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("build")));
+        assert!(schema["properties"]["operation"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("tools-download")));
         assert!(schema["properties"]["clientMode"]["enum"]
             .as_array()
             .unwrap()
             .contains(&json!("mcp-va")));
+        assert!(schema["properties"]["tool"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("client-mcp")));
+        assert_eq!(schema["properties"]["fullOutput"]["type"], "boolean");
+        assert_eq!(schema["properties"]["objects"]["type"], "array");
+        assert_eq!(schema["properties"]["sourceSets"]["type"], "array");
+        assert_eq!(schema["properties"]["features"]["type"], "array");
+        assert_eq!(schema["properties"]["filterTags"]["type"], "array");
+        assert_eq!(schema["properties"]["ignoreTags"]["type"], "array");
+        assert_eq!(schema["properties"]["scenarioFilters"]["type"], "array");
+        assert_eq!(schema["properties"]["projects"]["type"], "array");
     }
 
     #[test]
