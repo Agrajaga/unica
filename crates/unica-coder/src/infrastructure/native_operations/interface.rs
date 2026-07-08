@@ -1452,4 +1452,42 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&context.workspace_root);
     }
+
+    #[test]
+    fn create_if_missing_hide_show_create_valid_command_interface() {
+        for (operation, expected_common) in [("hide", "false"), ("show", "true")] {
+            let context = temp_context(&format!("create-if-missing-{operation}"));
+            let ci_rel = format!("src/Subsystems/New{operation}/Ext/CommandInterface.xml");
+            let ci_path = context.cwd.join(&ci_rel);
+            let mut args = Map::new();
+            args.insert("CIPath".to_string(), Value::String(ci_rel));
+            args.insert(
+                "Operation".to_string(),
+                Value::String(operation.to_string()),
+            );
+            args.insert(
+                "Value".to_string(),
+                Value::String("Catalog.Products.StandardCommand.OpenList".to_string()),
+            );
+            args.insert("CreateIfMissing".to_string(), Value::Bool(true));
+
+            let outcome = edit_interface(&args, &context);
+
+            assert!(outcome.ok, "{operation}: {outcome:?}");
+            assert!(
+                outcome
+                    .stdout
+                    .as_deref()
+                    .is_some_and(|stdout| stdout.contains("Validation OK")),
+                "{operation}: validation did not run successfully: {outcome:?}"
+            );
+            let text = fs::read_to_string(&ci_path).unwrap();
+            assert!(text.contains("<CommandsVisibility>"), "{operation}: {text}");
+            assert!(
+                text.contains(&format!("<xr:Common>{expected_common}</xr:Common>")),
+                "{operation}: {text}"
+            );
+            let _ = fs::remove_dir_all(&context.workspace_root);
+        }
+    }
 }
