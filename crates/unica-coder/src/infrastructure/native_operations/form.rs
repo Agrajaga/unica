@@ -3657,6 +3657,8 @@ pub(crate) fn edit_form(args: &Map<String, Value>, context: &WorkspaceContext) -
         if !xml_text.ends_with('\n') {
             xml_text.push('\n');
         }
+        form_edit_ensure_emitted_namespaces(&mut xml_text)?;
+        Document::parse(&xml_text).map_err(|err| format!("[ERROR] XML parse error: {err}"))?;
         write_utf8_bom(&form_path, &xml_text)?;
 
         let mut stdout = format!("=== form-edit: {form_name} ===\n\n");
@@ -4231,7 +4233,13 @@ pub(crate) fn form_edit_insert_child_items_into_element(
 ) -> Result<(), String> {
     let content = lines.join("\n");
     let element_text = &xml_text[range.clone()];
-    if let Some(relative_pos) = element_text.rfind("/>") {
+    let open_tag_end = form_edit_opening_tag_end(element_text, 0)
+        .ok_or_else(|| format!("No opening <{tag}> tag found in form target"))?;
+    let opening_tag = &element_text[..=open_tag_end];
+    if opening_tag.trim_end().ends_with("/>") {
+        let relative_pos = opening_tag
+            .rfind("/>")
+            .expect("self-closing opening tag checked above");
         let pos = range.start + relative_pos;
         xml_text.replace_range(
             pos..pos + 2,
@@ -4255,6 +4263,62 @@ pub(crate) fn form_edit_insert_child_items_into_element(
             "{child_items_indent}<ChildItems>\n{content}\n{child_items_indent}</ChildItems>\n"
         ),
     );
+    Ok(())
+}
+
+pub(crate) fn form_edit_opening_tag_end(text: &str, start: usize) -> Option<usize> {
+    let mut quote = None::<char>;
+    for (relative_idx, ch) in text[start..].char_indices() {
+        if let Some(quote_ch) = quote {
+            if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '>' => return Some(start + relative_idx),
+            _ => {}
+        }
+    }
+    None
+}
+
+pub(crate) fn form_edit_ensure_emitted_namespaces(xml_text: &mut String) -> Result<(), String> {
+    let Some(root_start) = xml_text.find("<Form") else {
+        return Ok(());
+    };
+    let root_open_end = form_edit_opening_tag_end(xml_text, root_start)
+        .ok_or_else(|| "No opening <Form> tag found in form".to_string())?;
+    let additions = {
+        let root_opening = &xml_text[root_start..=root_open_end];
+        let mut additions = String::new();
+        for (prefix, uri, needed) in [
+            (
+                "v8",
+                FORM_V8_NS,
+                xml_text.contains("<v8:") || xml_text.contains("</v8:"),
+            ),
+            (
+                "xr",
+                "http://v8.1c.ru/8.3/xcf/readable",
+                xml_text.contains("<xr:") || xml_text.contains("</xr:"),
+            ),
+            (
+                "xsi",
+                "http://www.w3.org/2001/XMLSchema-instance",
+                xml_text.contains("xsi:"),
+            ),
+        ] {
+            if needed && !root_opening.contains(&format!("xmlns:{prefix}=")) {
+                additions.push_str(&format!(" xmlns:{prefix}=\"{uri}\""));
+            }
+        }
+        additions
+    };
+    if !additions.is_empty() {
+        xml_text.insert_str(root_open_end, &additions);
+    }
     Ok(())
 }
 
@@ -6767,6 +6831,70 @@ mod tests {
     }
 
     #[test]
+    fn edit_form_creates_child_items_after_self_closing_extended_tooltip() {
+        let context = temp_context("edit-group-with-extended-tooltip");
+        let form_path = context.cwd.join("Form.xml");
+        let json_path = context.cwd.join("edit.json");
+        write_file(
+            &form_path,
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.17">
+	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+	<ChildItems>
+		<UsualGroup name="ГруппаЗамены" id="1">
+			<ExtendedTooltip name="ГруппаЗаменыРасширеннаяПодсказка" id="2"/>
+		</UsualGroup>
+	</ChildItems>
+	<Attributes/>
+	<Commands/>
+</Form>
+"#,
+        );
+        write_file(
+            &json_path,
+            r#"{
+  "into": "ГруппаЗамены",
+  "elements": [
+    { "table": "ТаблицаЗамены" }
+  ]
+}
+"#,
+        );
+
+        let mut args = Map::new();
+        args.insert(
+            "FormPath".to_string(),
+            json!(form_path.display().to_string()),
+        );
+        args.insert(
+            "JsonPath".to_string(),
+            json!(json_path.display().to_string()),
+        );
+
+        let outcome = edit_form(&args, &context);
+        assert!(outcome.ok, "{outcome:?}");
+        let updated = fs::read_to_string(&form_path).unwrap();
+        let tooltip_pos = updated
+            .find("<ExtendedTooltip name=\"ГруппаЗаменыРасширеннаяПодсказка\" id=\"2\"/>")
+            .unwrap();
+        let child_items_pos = updated[tooltip_pos..]
+            .find("<ChildItems>")
+            .map(|pos| tooltip_pos + pos)
+            .unwrap();
+        assert!(tooltip_pos < child_items_pos, "{updated}");
+        assert!(
+            updated.contains("<Table name=\"ТаблицаЗамены\""),
+            "{updated}"
+        );
+        Document::parse(updated.trim_start_matches('\u{feff}')).unwrap();
+
+        let validate_outcome = validate_form(&args, &context);
+        assert!(validate_outcome.ok, "{validate_outcome:?}");
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
     fn edit_form_inserts_element_after_existing_element() {
         let context = temp_context("edit-after-element");
         let form_path = context.cwd.join("Form.xml");
@@ -7075,6 +7203,55 @@ mod tests {
             !updated.contains("<ChildItems>\n\n</ChildItems>"),
             "{updated}"
         );
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_form_rejects_unparseable_mutation_without_writing_file() {
+        let context = temp_context("edit-invalid-generated-xml");
+        let form_path = context.cwd.join("Form.xml");
+        let json_path = context.cwd.join("edit.json");
+        write_file(
+            &form_path,
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.17">
+	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+	<ChildItems/>
+	<Attributes/>
+	<Commands/>
+</Form>
+"#,
+        );
+        let original = fs::read_to_string(&form_path).unwrap();
+        write_file(
+            &json_path,
+            r#"{
+  "elements": [
+    {
+      "check": "ФлагПроверки",
+      "checkBoxType": "Bad<Name"
+    }
+  ]
+}
+"#,
+        );
+
+        let mut args = Map::new();
+        args.insert(
+            "FormPath".to_string(),
+            json!(form_path.display().to_string()),
+        );
+        args.insert(
+            "JsonPath".to_string(),
+            json!(json_path.display().to_string()),
+        );
+
+        let outcome = edit_form(&args, &context);
+        assert!(!outcome.ok, "{outcome:?}");
+        let stderr = outcome.stderr.unwrap_or_default();
+        assert!(stderr.contains("XML parse error"), "{stderr}");
+        assert_eq!(fs::read_to_string(&form_path).unwrap(), original);
 
         let _ = fs::remove_dir_all(&context.cwd);
     }
