@@ -1926,6 +1926,184 @@ mod tests {
         )
     }
 
+    fn bot_configuration_xml(include_bot: bool) -> String {
+        let children = if include_bot {
+            concat!(
+                "\t\t\t<Language>Русский</Language>\n",
+                "\t\t\t<CommonModule>Core</CommonModule>\n",
+                "\t\t\t<Bot>Assistant</Bot>\n",
+                "\t\t\t<CommonAttribute>Shared</CommonAttribute>"
+            )
+        } else {
+            concat!(
+                "\t\t\t<Language>Русский</Language>\n",
+                "\t\t\t<CommonModule>Core</CommonModule>\n",
+                "\t\t\t<CommonAttribute>Shared</CommonAttribute>"
+            )
+        };
+        include_str!(
+            "../../../../tests/fixtures/unica_mcp_script_parity/cf-validate/Configuration.xml"
+        )
+        .replace("\t\t\t<Language>Русский</Language>", children)
+    }
+
+    fn bot_cf_workspace(prefix: &str, include_bot: bool) -> (PathBuf, PathBuf, PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("{prefix}-{nanos}"));
+        let workspace = root.join("workspace");
+        let src = workspace.join("src");
+        for directory in ["Languages", "CommonModules", "Bots", "CommonAttributes"] {
+            std::fs::create_dir_all(src.join(directory)).unwrap();
+        }
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        )
+        .unwrap();
+        let config_path = src.join("Configuration.xml");
+        std::fs::write(
+            &config_path,
+            format!("\u{feff}{}", bot_configuration_xml(include_bot)),
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("Languages/Русский.xml"),
+            include_str!("../../../../tests/fixtures/unica_mcp_script_parity/cf-validate/Languages/Русский.xml"),
+        )
+        .unwrap();
+        if include_bot {
+            std::fs::write(src.join("Bots/Assistant.xml"), "<MetaDataObject/>").unwrap();
+        }
+        (root, workspace, config_path)
+    }
+
+    #[test]
+    fn cf_info_and_validate_recognize_bot_in_canonical_order() {
+        let (root, workspace, _config_path) = bot_cf_workspace("unica-cf-bot-read", true);
+        let mut args = Map::new();
+        args.insert(
+            "cwd".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        args.insert("ConfigPath".to_string(), Value::String("src".to_string()));
+
+        let overview = UnicaApplication::new()
+            .call_tool("unica.cf.info", &args)
+            .unwrap();
+        assert!(overview.ok, "{overview:?}");
+        let overview_stdout = overview.stdout.unwrap();
+        assert!(
+            overview_stdout
+                .lines()
+                .any(|line| line.starts_with("  Боты") && line.ends_with('1')),
+            "{overview_stdout}"
+        );
+
+        args.insert("Mode".to_string(), Value::String("full".to_string()));
+        let full = UnicaApplication::new()
+            .call_tool("unica.cf.info", &args)
+            .unwrap();
+        assert!(full.ok, "{full:?}");
+        let full_stdout = full.stdout.unwrap();
+        assert!(full_stdout.contains("Боты (Bot): 1"), "{full_stdout}");
+        assert!(full_stdout.contains("    Assistant"), "{full_stdout}");
+
+        args.remove("Mode");
+        let validation = UnicaApplication::new()
+            .call_tool("unica.cf.validate", &args)
+            .unwrap();
+        assert!(validation.ok, "{validation:?}");
+        let validation_stdout = validation.stdout.unwrap_or_default();
+        assert!(!validation_stdout.contains("Unknown type 'Bot'"));
+        assert!(!validation_stdout.contains("out of canonical order"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cf_edit_adds_removes_and_noops_bot_through_registry() {
+        let (root, workspace, config_path) = bot_cf_workspace("unica-cf-bot-edit", false);
+        let src = workspace.join("src");
+        std::fs::write(src.join("Bots/Assistant.xml"), "<MetaDataObject/>").unwrap();
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        let add = UnicaApplication::new()
+            .call_tool(
+                "unica.cf.edit",
+                &cf_edit_args(&workspace, "add-childObject", "Bot.Assistant"),
+            )
+            .unwrap();
+        assert!(add.ok, "{add:?}");
+        let after_add = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            after_add.find("<CommonModule>Core</CommonModule>").unwrap()
+                < after_add.find("<Bot>Assistant</Bot>").unwrap()
+        );
+        assert!(
+            after_add.find("<Bot>Assistant</Bot>").unwrap()
+                < after_add
+                    .find("<CommonAttribute>Shared</CommonAttribute>")
+                    .unwrap()
+        );
+
+        let duplicate = UnicaApplication::new()
+            .call_tool(
+                "unica.cf.edit",
+                &cf_edit_args(&workspace, "add-childObject", "Bot.Assistant"),
+            )
+            .unwrap();
+        assert!(duplicate.ok, "{duplicate:?}");
+        assert!(duplicate.changes.is_empty(), "{duplicate:?}");
+        assert!(duplicate.cache.events.is_empty(), "{duplicate:?}");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), after_add);
+
+        let remove = UnicaApplication::new()
+            .call_tool(
+                "unica.cf.edit",
+                &cf_edit_args(&workspace, "remove-childObject", "Bot.Assistant"),
+            )
+            .unwrap();
+        assert!(remove.ok, "{remove:?}");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
+
+        let missing = UnicaApplication::new()
+            .call_tool(
+                "unica.cf.edit",
+                &cf_edit_args(&workspace, "add-childObject", "Bot.Missing"),
+            )
+            .unwrap();
+        assert!(!missing.ok, "{missing:?}");
+        let missing_errors = missing.errors.join("\n");
+        assert!(missing_errors.contains("Bots/Missing.xml"), "{missing:?}");
+        assert!(!missing_errors.contains("use meta-compile"), "{missing:?}");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
+
+        let unknown = UnicaApplication::new()
+            .call_tool(
+                "unica.cf.edit",
+                &cf_edit_args(
+                    &workspace,
+                    "remove-childObject",
+                    "SyntheticMetadata.Unknown",
+                ),
+            )
+            .unwrap();
+        assert!(!unknown.ok, "{unknown:?}");
+        assert!(
+            unknown
+                .errors
+                .join("\n")
+                .contains("Unknown type 'SyntheticMetadata'"),
+            "{unknown:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), before);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn cf_edit_add_child_object_does_not_escape_structural_crlf() {
         let root = std::env::temp_dir().join(format!("unica-cf-child-crlf-{}", std::process::id()));
@@ -2717,6 +2895,32 @@ mod tests {
         assert!(config_text.contains("<Report>MetaCompileBomReport</Report>"));
         roxmltree::Document::parse(config_text.trim_start_matches('\u{feff}')).unwrap();
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn meta_compile_keeps_bot_outside_its_narrow_capability_gate() {
+        let root = temp_meta_compile_workspace("unica-meta-compile-bot-unsupported");
+        let workspace = root.join("workspace");
+        let json_path = workspace.join("bot.json");
+        std::fs::write(
+            &json_path,
+            r#"{
+  "type": "Bot",
+  "name": "Assistant",
+  "synonym": "Assistant"
+}"#,
+        )
+        .unwrap();
+
+        let result = call_meta_compile(&workspace, &json_path);
+
+        assert!(!result.ok, "{result:?}");
+        assert!(
+            result.errors.join("\n").contains("Unsupported type: Bot"),
+            "{result:?}"
+        );
+        assert!(!workspace.join("src/Bots").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

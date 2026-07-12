@@ -1,6 +1,9 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::domain::workspace::WorkspaceContext;
+use crate::infrastructure::metadata_kinds::{
+    metadata_kind, metadata_kind_by_directory, metadata_kind_index, METADATA_KIND_TAGS,
+};
 use crate::infrastructure::AdapterOutcome;
 use roxmltree::Document;
 use serde_json::{json, Map, Value};
@@ -800,108 +803,15 @@ pub(crate) fn cf_validate_enum_allowed(property: &str) -> &'static [&'static str
 }
 
 pub(crate) fn cf_validate_child_object_type_index(type_name: &str) -> Option<usize> {
-    cf_validate_child_object_types()
-        .iter()
-        .position(|known| *known == type_name)
+    metadata_kind_index(type_name)
 }
 
 pub(crate) fn cf_validate_child_object_types() -> &'static [&'static str] {
-    &[
-        "Language",
-        "Subsystem",
-        "StyleItem",
-        "Style",
-        "CommonPicture",
-        "SessionParameter",
-        "Role",
-        "CommonTemplate",
-        "FilterCriterion",
-        "CommonModule",
-        "CommonAttribute",
-        "ExchangePlan",
-        "XDTOPackage",
-        "WebService",
-        "HTTPService",
-        "WSReference",
-        "EventSubscription",
-        "ScheduledJob",
-        "SettingsStorage",
-        "FunctionalOption",
-        "FunctionalOptionsParameter",
-        "DefinedType",
-        "CommonCommand",
-        "CommandGroup",
-        "Constant",
-        "CommonForm",
-        "Catalog",
-        "Document",
-        "DocumentNumerator",
-        "Sequence",
-        "DocumentJournal",
-        "Enum",
-        "Report",
-        "DataProcessor",
-        "InformationRegister",
-        "AccumulationRegister",
-        "ChartOfCharacteristicTypes",
-        "ChartOfAccounts",
-        "AccountingRegister",
-        "ChartOfCalculationTypes",
-        "CalculationRegister",
-        "BusinessProcess",
-        "Task",
-        "IntegrationService",
-    ]
+    METADATA_KIND_TAGS
 }
 
 pub(crate) fn cf_validate_child_type_dir(type_name: &str) -> Option<&'static str> {
-    match type_name {
-        "Language" => Some("Languages"),
-        "Subsystem" => Some("Subsystems"),
-        "StyleItem" => Some("StyleItems"),
-        "Style" => Some("Styles"),
-        "CommonPicture" => Some("CommonPictures"),
-        "SessionParameter" => Some("SessionParameters"),
-        "Role" => Some("Roles"),
-        "CommonTemplate" => Some("CommonTemplates"),
-        "FilterCriterion" => Some("FilterCriteria"),
-        "CommonModule" => Some("CommonModules"),
-        "CommonAttribute" => Some("CommonAttributes"),
-        "ExchangePlan" => Some("ExchangePlans"),
-        "XDTOPackage" => Some("XDTOPackages"),
-        "WebService" => Some("WebServices"),
-        "HTTPService" => Some("HTTPServices"),
-        "WSReference" => Some("WSReferences"),
-        "EventSubscription" => Some("EventSubscriptions"),
-        "ScheduledJob" => Some("ScheduledJobs"),
-        "SettingsStorage" => Some("SettingsStorages"),
-        "FunctionalOption" => Some("FunctionalOptions"),
-        "FunctionalOptionsParameter" => Some("FunctionalOptionsParameters"),
-        "DefinedType" => Some("DefinedTypes"),
-        "CommonCommand" => Some("CommonCommands"),
-        "CommandGroup" => Some("CommandGroups"),
-        "Constant" => Some("Constants"),
-        "CommonForm" => Some("CommonForms"),
-        "Catalog" => Some("Catalogs"),
-        "Document" => Some("Documents"),
-        "DocumentNumerator" => Some("DocumentNumerators"),
-        "Sequence" => Some("Sequences"),
-        "DocumentJournal" => Some("DocumentJournals"),
-        "Enum" => Some("Enums"),
-        "Report" => Some("Reports"),
-        "DataProcessor" => Some("DataProcessors"),
-        "InformationRegister" => Some("InformationRegisters"),
-        "AccumulationRegister" => Some("AccumulationRegisters"),
-        "ChartOfCharacteristicTypes" => Some("ChartsOfCharacteristicTypes"),
-        "ChartOfAccounts" => Some("ChartsOfAccounts"),
-        "AccountingRegister" => Some("AccountingRegisters"),
-        "ChartOfCalculationTypes" => Some("ChartsOfCalculationTypes"),
-        "CalculationRegister" => Some("CalculationRegisters"),
-        "BusinessProcess" => Some("BusinessProcesses"),
-        "Task" => Some("Tasks"),
-        "IntegrationService" => Some("IntegrationServices"),
-        _ => None,
-    }
+    metadata_kind(type_name).map(|kind| kind.directory)
 }
 
 pub(crate) fn cf_validate_form_properties() -> &'static [&'static str] {
@@ -1799,101 +1709,76 @@ pub(crate) fn cf_paginate(lines: Vec<String>, args: &Map<String, Value>) -> Stri
 }
 
 pub(crate) fn cf_type_order() -> &'static [&'static str] {
-    &[
-        "Language",
-        "Subsystem",
-        "StyleItem",
-        "Style",
-        "CommonPicture",
-        "SessionParameter",
-        "Role",
-        "CommonTemplate",
-        "FilterCriterion",
-        "CommonModule",
-        "CommonAttribute",
-        "ExchangePlan",
-        "XDTOPackage",
-        "WebService",
-        "HTTPService",
-        "WSReference",
-        "EventSubscription",
-        "ScheduledJob",
-        "SettingsStorage",
-        "FunctionalOption",
-        "FunctionalOptionsParameter",
-        "DefinedType",
-        "CommonCommand",
-        "CommandGroup",
-        "Constant",
-        "CommonForm",
-        "Catalog",
-        "Document",
-        "DocumentNumerator",
-        "Sequence",
-        "DocumentJournal",
-        "Enum",
-        "Report",
-        "DataProcessor",
-        "InformationRegister",
-        "AccumulationRegister",
-        "ChartOfCharacteristicTypes",
-        "ChartOfAccounts",
-        "AccountingRegister",
-        "ChartOfCalculationTypes",
-        "CalculationRegister",
-        "BusinessProcess",
-        "Task",
-        "IntegrationService",
-    ]
+    METADATA_KIND_TAGS
 }
 
 pub(crate) fn cf_type_ru_name(type_name: &str) -> &'static str {
-    match type_name {
-        "Language" => "Языки",
-        "Subsystem" => "Подсистемы",
-        "StyleItem" => "Элементы стиля",
-        "Style" => "Стили",
-        "CommonPicture" => "Общие картинки",
-        "SessionParameter" => "Параметры сеанса",
-        "Role" => "Роли",
-        "CommonTemplate" => "Общие макеты",
-        "FilterCriterion" => "Критерии отбора",
-        "CommonModule" => "Общие модули",
-        "CommonAttribute" => "Общие реквизиты",
-        "ExchangePlan" => "Планы обмена",
-        "XDTOPackage" => "XDTO-пакеты",
-        "WebService" => "Веб-сервисы",
-        "HTTPService" => "HTTP-сервисы",
-        "WSReference" => "WS-ссылки",
-        "EventSubscription" => "Подписки на события",
-        "ScheduledJob" => "Регламентные задания",
-        "SettingsStorage" => "Хранилища настроек",
-        "FunctionalOption" => "Функциональные опции",
-        "FunctionalOptionsParameter" => "Параметры ФО",
-        "DefinedType" => "Определяемые типы",
-        "CommonCommand" => "Общие команды",
-        "CommandGroup" => "Группы команд",
-        "Constant" => "Константы",
-        "CommonForm" => "Общие формы",
-        "Catalog" => "Справочники",
-        "Document" => "Документы",
-        "DocumentNumerator" => "Нумераторы",
-        "Sequence" => "Последовательности",
-        "DocumentJournal" => "Журналы документов",
-        "Enum" => "Перечисления",
-        "Report" => "Отчёты",
-        "DataProcessor" => "Обработки",
-        "InformationRegister" => "Регистры сведений",
-        "AccumulationRegister" => "Регистры накопления",
-        "ChartOfCharacteristicTypes" => "ПВХ",
-        "ChartOfAccounts" => "Планы счетов",
-        "AccountingRegister" => "Регистры бухгалтерии",
-        "ChartOfCalculationTypes" => "ПВР",
-        "CalculationRegister" => "Регистры расчёта",
-        "BusinessProcess" => "Бизнес-процессы",
-        "Task" => "Задачи",
-        "IntegrationService" => "Сервисы интеграции",
-        _ => "Unknown",
+    metadata_kind(type_name).map_or("Unknown", |kind| kind.display_name_ru)
+}
+
+#[cfg(test)]
+mod metadata_kind_consumer_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn cf_consumers_share_the_canonical_metadata_kind_order() {
+        let validate_kinds = cf_validate_child_object_types();
+
+        assert_eq!(validate_kinds.len(), 45);
+        assert_eq!(validate_kinds, cf_type_order());
+        let bot_index = validate_kinds
+            .iter()
+            .position(|kind| *kind == "Bot")
+            .expect("Bot must be a modeled metadata kind");
+        assert_eq!(validate_kinds[bot_index - 1], "CommonModule");
+        assert_eq!(validate_kinds[bot_index + 1], "CommonAttribute");
+        assert_eq!(cf_validate_child_type_dir("Bot"), Some("Bots"));
+        assert_eq!(cf_type_ru_name("Bot"), "Боты");
+        assert_eq!(cf_validate_child_type_dir("SyntheticMetadata"), None);
+
+        let directories = validate_kinds
+            .iter()
+            .map(|kind| cf_validate_child_type_dir(kind).expect("known kind has a directory"))
+            .collect::<HashSet<_>>();
+        assert_eq!(directories.len(), validate_kinds.len());
+        for kind in validate_kinds {
+            let directory = cf_validate_child_type_dir(kind).unwrap();
+            assert_eq!(cf_edit_dir_to_type(directory), Some(*kind));
+        }
+    }
+
+    #[test]
+    fn child_object_insertion_orders_bot_and_rejects_unknown_kinds() {
+        let mut xml = concat!(
+            "<MetaDataObject><Configuration><ChildObjects>\n",
+            "\t<CommonModule>Core</CommonModule>\n",
+            "\t<CommonAttribute>Shared</CommonAttribute>\n",
+            "</ChildObjects></Configuration></MetaDataObject>"
+        )
+        .to_string();
+
+        assert!(cf_edit_add_child_object_text(&mut xml, "Bot", "Assistant").unwrap());
+        assert!(
+            xml.find("<CommonModule>Core</CommonModule>").unwrap()
+                < xml.find("<Bot>Assistant</Bot>").unwrap()
+        );
+        assert!(
+            xml.find("<Bot>Assistant</Bot>").unwrap()
+                < xml
+                    .find("<CommonAttribute>Shared</CommonAttribute>")
+                    .unwrap()
+        );
+        assert!(!cf_edit_add_child_object_text(&mut xml, "Bot", "Assistant").unwrap());
+
+        let before_unknown = xml.clone();
+        let error = cf_edit_add_child_object_text(&mut xml, "SyntheticMetadata", "Unknown")
+            .expect_err("unknown metadata kinds must be rejected");
+        assert!(
+            error.contains("Unknown type 'SyntheticMetadata'"),
+            "{error}"
+        );
+        assert_eq!(xml, before_unknown);
     }
 }
 
@@ -1996,6 +1881,13 @@ pub(crate) fn edit_cf(args: &Map<String, Value>, context: &WorkspaceContext) -> 
                             .join(type_dir)
                             .join(format!("{obj_name_val}.xml"));
                         if !object_file.exists() {
+                            if type_name == "Bot" {
+                                return Err(format!(
+                                    "Object file not found: {type_dir}/{obj_name_val}.xml\n\
+                                     cf-edit add-childObject only references objects that already exist on disk.\n\
+                                     meta-compile does not support Bot; create the Bot metadata with platform tooling, then retry."
+                                ));
+                            }
                             let hint_skill = match type_name.as_str() {
                                 "Subsystem" => "subsystem-compile",
                                 "Role" => "role-compile",
@@ -2423,7 +2315,9 @@ pub(crate) fn cf_edit_child_object_entries(
         } else {
             range.start
         };
-        let end = if text[range.end..].starts_with('\n') {
+        let end = if text[range.end..].starts_with("\r\n") {
+            range.end + 2
+        } else if text[range.end..].starts_with('\n') {
             range.end + 1
         } else {
             range.end
@@ -2474,6 +2368,9 @@ pub(crate) fn cf_edit_remove_child_object_text(
     type_name: &str,
     object_name: &str,
 ) -> Result<bool, String> {
+    if metadata_kind(type_name).is_none() {
+        return Err(format!("Unknown type '{type_name}'"));
+    }
     let entries = cf_edit_child_object_entries(text)?;
     let Some(entry) = entries
         .into_iter()
@@ -2490,6 +2387,8 @@ pub(crate) fn cf_edit_add_child_object_text(
     type_name: &str,
     object_name: &str,
 ) -> Result<bool, String> {
+    let new_type_index =
+        metadata_kind_index(type_name).ok_or_else(|| format!("Unknown type '{type_name}'"))?;
     let Some((child_start, child_end, body_range)) = cf_edit_element_range(text, "ChildObjects")
     else {
         return Err("No <ChildObjects> element found".to_string());
@@ -2502,7 +2401,6 @@ pub(crate) fn cf_edit_add_child_object_text(
         return Ok(false);
     }
 
-    let new_type_index = cf_validate_child_object_type_index(type_name).unwrap_or(usize::MAX);
     let target = entries.iter().find(|entry| {
         let entry_type_index =
             cf_validate_child_object_type_index(&entry.type_name).unwrap_or(usize::MAX);
@@ -2966,27 +2864,7 @@ pub(crate) fn cf_edit_ru_type(value: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn cf_edit_dir_to_type(value: &str) -> Option<&'static str> {
-    match value.to_lowercase().as_str() {
-        "catalogs" => Some("Catalog"),
-        "documents" => Some("Document"),
-        "enums" => Some("Enum"),
-        "reports" => Some("Report"),
-        "dataprocessors" => Some("DataProcessor"),
-        "commonforms" => Some("CommonForm"),
-        "documentjournals" => Some("DocumentJournal"),
-        "informationregisters" => Some("InformationRegister"),
-        "accumulationregisters" => Some("AccumulationRegister"),
-        "chartsofcharacteristictypes" => Some("ChartOfCharacteristicTypes"),
-        "chartsofaccounts" => Some("ChartOfAccounts"),
-        "accountingregisters" => Some("AccountingRegister"),
-        "chartsofcalculationtypes" => Some("ChartOfCalculationTypes"),
-        "calculationregisters" => Some("CalculationRegister"),
-        "businessprocesses" => Some("BusinessProcess"),
-        "tasks" => Some("Task"),
-        "exchangeplans" => Some("ExchangePlan"),
-        "settingsstorages" => Some("SettingsStorage"),
-        _ => None,
-    }
+    metadata_kind_by_directory(value).map(|kind| kind.tag)
 }
 
 pub(crate) fn cf_edit_json_object(

@@ -1,5 +1,6 @@
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
+use crate::infrastructure::metadata_kinds::{metadata_kind, metadata_kind_by_directory};
 use crate::infrastructure::plugin_runtime::{find_plugin_root, value_to_cli_string};
 use crate::infrastructure::workspace_index::{
     IndexReadiness, IndexRunner, WorkspaceIndexService, SYSTEM_INDEX_RUNNER,
@@ -1466,7 +1467,9 @@ fn split_profile_name(raw: &str) -> (Option<String>, String) {
         "InformationRegister" | "РегистрСведений" => "InformationRegister",
         "AccumulationRegister" | "РегистрНакопления" => "AccumulationRegister",
         "Enum" | "Перечисление" => "Enum",
-        other => other,
+        other => metadata_kind(other)
+            .or_else(|| metadata_kind_by_directory(other))
+            .map_or(other, |kind| kind.tag),
     };
     (Some(category.to_string()), name.trim().to_string())
 }
@@ -2983,6 +2986,30 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn metadata_profile_selector_normalizes_bot_tag_and_directory_alias() {
+        assert_eq!(
+            split_profile_name("Bot.Assistant"),
+            (Some("Bot".to_string()), "Assistant".to_string())
+        );
+        assert_eq!(
+            split_profile_name("Bots.Assistant"),
+            (Some("Bot".to_string()), "Assistant".to_string())
+        );
+        assert_eq!(
+            split_profile_name("CommonModules.Core"),
+            (Some("CommonModule".to_string()), "Core".to_string())
+        );
+        assert_eq!(
+            split_profile_name("ОбщийМодуль.Core"),
+            (Some("CommonModule".to_string()), "Core".to_string())
+        );
+        assert_eq!(
+            split_profile_name("SyntheticMetadata.Unknown"),
+            (Some("SyntheticMetadata".to_string()), "Unknown".to_string())
+        );
+    }
 
     #[test]
     fn standards_search_maps_to_v8std_search_request() {
