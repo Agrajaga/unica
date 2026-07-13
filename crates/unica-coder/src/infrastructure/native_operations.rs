@@ -7,6 +7,7 @@ pub(crate) mod cf;
 pub(crate) mod cfe;
 pub(crate) mod common;
 pub(crate) mod form;
+pub(crate) mod form_event_registry;
 pub(crate) mod help;
 pub(crate) mod interface;
 pub(crate) mod meta;
@@ -35,6 +36,22 @@ impl NativeOperationAdapter {
         mutating: bool,
     ) -> Result<AdapterOutcome, String> {
         if dry_run {
+            if operation == "form-edit"
+                && args.keys().any(|key| {
+                    matches!(
+                        key.as_str(),
+                        "FormPath"
+                            | "formPath"
+                            | "Path"
+                            | "path"
+                            | "JsonPath"
+                            | "jsonPath"
+                            | "definition"
+                    )
+                })
+            {
+                return Ok(form::preview_form_edit(args, context));
+            }
             return Ok(AdapterOutcome {
                 ok: true,
                 summary: format!("dry run: {tool_name} would execute native XML/DSL operation"),
