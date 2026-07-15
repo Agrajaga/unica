@@ -4075,7 +4075,7 @@ pub(crate) fn form_edit_plan_events(
     let direct_main_count = form_edit_direct_main_attribute_count(root);
     form_edit_validate_projected_main_attribute_count(direct_main_count, definition)?;
     let context =
-        form_edit_project_event_context(context_from_root(root), direct_main_count, definition);
+        form_project_event_context(context_from_root(root), direct_main_count, definition);
     let mut planner = FormEditEventPlanner::new(context.clone());
 
     if let Some(values) = definition.get("formEvents") {
@@ -4174,7 +4174,7 @@ pub(crate) fn form_edit_plan_events(
     Ok(planner.finish())
 }
 
-fn form_edit_project_event_context(
+fn form_project_event_context(
     mut context: FormEventContext,
     direct_main_count: usize,
     definition: &Value,
@@ -5476,6 +5476,11 @@ pub(crate) struct FormCompileStats {
     pub(crate) parameters: usize,
 }
 
+struct FormCompileEvent {
+    name: String,
+    handler: String,
+}
+
 pub(crate) struct FormIdAllocator {
     pub(crate) next: usize,
 }
@@ -5613,13 +5618,19 @@ pub(crate) fn form_compile_xml(
     defn: &Value,
     format_version: &str,
 ) -> Result<(String, FormCompileStats), String> {
-    if let Some(elements) = defn.get("elements").and_then(Value::as_array) {
-        let context = FormEventContext {
+    let context = form_project_event_context(
+        FormEventContext {
             definition: FormDefinitionKind::Regular,
             main_attribute: MainAttributeKind::Unknown,
             main_attribute_type: None,
             main_attribute_provenance: MainAttributeProvenance::Missing,
-        };
+        },
+        0,
+        defn,
+    );
+    let events = form_compile_plan_events(defn, &context)?;
+
+    if let Some(elements) = defn.get("elements").and_then(Value::as_array) {
         form_edit_validate_new_element_event_tree(elements, &context)?;
     }
 
@@ -5653,6 +5664,7 @@ pub(crate) fn form_compile_xml(
     }
 
     emit_form_auto_command_bar(&mut lines, defn, "\t");
+    emit_form_events(&mut lines, &events, "\t");
 
     if let Some(elements) = defn.get("elements").and_then(Value::as_array) {
         if !elements.is_empty() {
@@ -5692,6 +5704,68 @@ pub(crate) fn form_compile_xml(
             parameters,
         },
     ))
+}
+
+fn form_compile_plan_events(
+    defn: &Value,
+    context: &FormEventContext,
+) -> Result<Vec<FormCompileEvent>, String> {
+    let Some(value) = defn.get("events") else {
+        return Ok(Vec::new());
+    };
+    let events = value.as_object().ok_or_else(|| {
+        FormEventDiagnostic::new(FormEventDiagnosticCode::EventNotAllowed, "form", "events")
+            .with_detail("events must be an object mapping event names to string handlers")
+            .to_string()
+    })?;
+
+    events
+        .iter()
+        .map(|(name, value)| {
+            let handler = value.as_str().ok_or_else(|| {
+                let (code, detail) = if value
+                    .as_object()
+                    .is_some_and(|event| event.contains_key("callType"))
+                {
+                    (
+                        FormEventDiagnosticCode::EventNotAllowed,
+                        "events map accepts only string handlers; callType is not supported",
+                    )
+                } else {
+                    (
+                        FormEventDiagnosticCode::EmptyHandler,
+                        "event handler must be a string",
+                    )
+                };
+                FormEventDiagnostic::new(code, "form", name)
+                    .with_detail(detail)
+                    .to_string()
+            })?;
+            let binding = FormEventBinding::new(name, handler);
+            validate_event(context, FormEventTarget::Form, &binding)
+                .map_err(|diagnostic| diagnostic.to_string())?;
+            Ok(FormCompileEvent {
+                name: name.clone(),
+                handler: handler.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn emit_form_events(lines: &mut Vec<String>, events: &[FormCompileEvent], indent: &str) {
+    if events.is_empty() {
+        return;
+    }
+
+    lines.push(format!("{indent}<Events>"));
+    for event in events {
+        lines.push(format!(
+            "{indent}\t<Event name=\"{}\">{}</Event>",
+            escape_xml(&event.name),
+            escape_xml(&event.handler)
+        ));
+    }
+    lines.push(format!("{indent}</Events>"));
 }
 
 pub(crate) fn emit_form_auto_command_bar(lines: &mut Vec<String>, defn: &Value, indent: &str) {
@@ -8875,6 +8949,123 @@ mod tests {
             };
             assert!(error.contains(expected_code), "{error}");
         }
+    }
+
+    #[test]
+    fn form_compile_emits_root_events_from_json_map_and_passes_validation() {
+        let context = temp_context("compile-root-events");
+        let definition_path = context.cwd.join("form.json");
+        let form_path = context.cwd.join("Form.xml");
+        write_file(
+            &definition_path,
+            r#"{"events":{"OnCreateAtServer":"ПриСозданииНаСервере"}}"#,
+        );
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = compile_form(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let xml = read_utf8_sig(&form_path).unwrap();
+        assert_eq!(xml.matches("<Events>").count(), 1, "{xml}");
+        assert_eq!(xml.matches("name=\"OnCreateAtServer\"").count(), 1, "{xml}");
+        assert!(
+            xml.contains("<Event name=\"OnCreateAtServer\">ПриСозданииНаСервере</Event>"),
+            "{xml}"
+        );
+        let validation_args = Map::from_iter([(
+            "FormPath".to_string(),
+            json!(form_path.display().to_string()),
+        )]);
+        let validation = validate_form(&validation_args, &context);
+        assert!(validation.ok, "{validation:?}");
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_compile_rejects_invalid_root_events_before_writing() {
+        let context = temp_context("compile-invalid-root-events");
+        let definition_path = context.cwd.join("form.json");
+        let form_path = context.cwd.join("Form.xml");
+        let original = b"do-not-replace-invalid-form";
+        let cases = [
+            (
+                "event outside root registry",
+                json!({"events": {"Opening": "OnOpening"}}),
+                "FORM_EVENT_NOT_ALLOWED",
+            ),
+            (
+                "record event without main attribute",
+                json!({"events": {"OnReadAtServer": "OnReadAtServer"}}),
+                "FORM_EVENT_CONTEXT_UNKNOWN",
+            ),
+            (
+                "record event with non-persistent main attribute",
+                json!({
+                    "attributes": [{"name": "List", "type": "DynamicList", "main": true}],
+                    "events": {"OnReadAtServer": "OnReadAtServer"}
+                }),
+                "FORM_EVENT_NOT_ALLOWED",
+            ),
+            (
+                "events payload is not a map",
+                json!({"events": ["OnOpen"]}),
+                "FORM_EVENT_NOT_ALLOWED",
+            ),
+            (
+                "event handler is not a string",
+                json!({"events": {"OnOpen": 42}}),
+                "FORM_EVENT_EMPTY_HANDLER",
+            ),
+            (
+                "map does not silently accept call type",
+                json!({
+                    "events": {"OnOpen": {"handler": "OnOpen", "callType": "Before"}}
+                }),
+                "FORM_EVENT_NOT_ALLOWED",
+            ),
+        ];
+
+        for (name, definition, expected_code) in cases {
+            write_file(
+                &definition_path,
+                &serde_json::to_string(&definition).unwrap(),
+            );
+            fs::write(&form_path, original).unwrap();
+            let args = Map::from_iter([
+                (
+                    "JsonPath".to_string(),
+                    json!(definition_path.display().to_string()),
+                ),
+                (
+                    "OutputPath".to_string(),
+                    json!(form_path.display().to_string()),
+                ),
+            ]);
+
+            let outcome = compile_form(&args, &context);
+
+            assert!(!outcome.ok, "{name}: {outcome:?}");
+            assert!(
+                outcome.errors.join("\n").contains(expected_code),
+                "{name}: {outcome:?}"
+            );
+            assert!(outcome.changes.is_empty(), "{name}: {outcome:?}");
+            assert!(outcome.artifacts.is_empty(), "{name}: {outcome:?}");
+            assert!(outcome.stdout.is_none(), "{name}: {outcome:?}");
+            assert_eq!(fs::read(&form_path).unwrap(), original, "{name}");
+        }
+
+        let _ = fs::remove_dir_all(&context.cwd);
     }
 
     #[test]

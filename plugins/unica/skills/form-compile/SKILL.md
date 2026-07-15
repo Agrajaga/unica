@@ -110,7 +110,7 @@ allowed-tools:
 
 - `title` — заголовок формы (multilingual). Можно указать и в `properties`, но лучше на верхнем уровне
 - `properties` — свойства формы: `autoTitle`, `windowOpeningMode`, `commandBarLocation`, `saveDataInSettings`, `width`, `height` и др.
-- `events` — обработчики событий формы (ключ: имя события 1С, значение: имя процедуры)
+- `events` — обработчики событий формы (ключ: имя события 1С, значение: непустое строковое имя процедуры). Этот формат не поддерживает `callType`.
 - `excludedCommands` — исключённые стандартные команды
 
 ### Новые возможности DSL
@@ -157,9 +157,11 @@ allowed-tools:
 
 ### Допустимые имена событий (`on`)
 
-Компилятор предупреждает о неизвестных событиях. Имена регистрозависимы — используйте точно как указано.
+Компилятор отклоняет незарегистрированные события. Имена регистрозависимы — используйте точно как указано.
 
-**Форма** (`events`): `OnCreateAtServer`, `OnOpen`, `BeforeClose`, `OnClose`, `NotificationProcessing`, `ChoiceProcessing`, `OnReadAtServer`, `BeforeWriteAtServer`, `OnWriteAtServer`, `AfterWriteAtServer`, `BeforeWrite`, `AfterWrite`, `FillCheckProcessingAtServer`, `BeforeLoadDataFromSettingsAtServer`, `OnLoadDataFromSettingsAtServer`, `ExternalEvent`, `Opening`
+**Форма** (`events`): `OnCreateAtServer`, `OnOpen`, `BeforeClose`, `OnClose`, `NotificationProcessing`, `ChoiceProcessing`, `ExternalEvent`, `OnReopen`, `OnMainServerAvailabilityChange`, `OnReadAtServer`, `BeforeWrite`, `NewWriteProcessing`, `FillCheckProcessingAtServer`, `BeforeWriteAtServer`, `OnWriteAtServer`, `AfterWriteAtServer`, `AfterWrite`, `BeforeLoadDataFromSettingsAtServer`, `OnLoadDataFromSettingsAtServer`, `OnSaveDataInSettingsAtServer`, `BeforeLoadUserSettingsAtServer`, `OnLoadUserSettingsAtServer`, `OnSaveUserSettingsAtServer`, `OnUpdateUserSettingSetAtServer`, `BeforeLoadVariantAtServer`, `OnLoadVariantAtServer`, `OnSaveVariantAtServer`, `OnChangeDisplaySettings`, `URLProcessing`, `URLListGetProcessing`, `URLGetProcessing`, `NavigationProcessing`
+
+События `OnReadAtServer`, `BeforeWrite`, `BeforeWriteAtServer`, `OnWriteAtServer`, `AfterWriteAtServer` и `AfterWrite` допустимы только при главном реквизите формы постоянного объекта или записи.
 
 **input / picField**: `OnChange`, `StartChoice`, `ChoiceProcessing`, `AutoComplete`, `TextEditEnd`, `Clearing`, `Creating`, `EditTextChange`
 
