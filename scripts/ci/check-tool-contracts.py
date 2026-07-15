@@ -16,7 +16,6 @@ TOOL_HELP_CHECKS = [
         ["analyze", "--help"],
         ["--source-dir", "--format", "jsonl"],
     ),
-    ("bsl-analyzer search namespace", "bsl-analyzer", ["search", "--help"], ["baseline"]),
     (
         "bsl-analyzer mcp workspace stdio",
         "bsl-analyzer",

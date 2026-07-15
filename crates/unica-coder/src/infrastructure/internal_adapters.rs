@@ -76,7 +76,6 @@ pub struct RuntimeAdapter<'a> {
 }
 
 pub struct CodeSearchAdapter<'a> {
-    bsl_runner: &'a dyn ProcessRunner,
     grep_runner: &'a dyn ProcessRunner,
     index_runner: &'a dyn IndexRunner,
     use_workspace_service: bool,
@@ -352,7 +351,6 @@ impl<'a> Default for RuntimeAdapter<'a> {
 impl<'a> CodeSearchAdapter<'a> {
     pub fn new() -> Self {
         Self {
-            bsl_runner: &SYSTEM_PROCESS_RUNNER,
             grep_runner: &SYSTEM_PROCESS_RUNNER,
             index_runner: &SYSTEM_INDEX_RUNNER,
             use_workspace_service: true,
@@ -361,25 +359,10 @@ impl<'a> CodeSearchAdapter<'a> {
 
     #[cfg(test)]
     pub fn with_runners(
-        analyzer_runner: &'a dyn ProcessRunner,
-        index_runner: &'a dyn IndexRunner,
-    ) -> Self {
-        Self {
-            bsl_runner: analyzer_runner,
-            grep_runner: analyzer_runner,
-            index_runner,
-            use_workspace_service: false,
-        }
-    }
-
-    #[cfg(test)]
-    pub fn with_backend_runners(
-        bsl_runner: &'a dyn ProcessRunner,
         grep_runner: &'a dyn ProcessRunner,
         index_runner: &'a dyn IndexRunner,
     ) -> Self {
         Self {
-            bsl_runner,
             grep_runner,
             index_runner,
             use_workspace_service: false,
@@ -408,7 +391,6 @@ impl<'a> CodeSearchAdapter<'a> {
         }
 
         let sections = [
-            self.bsl_search(context, args),
             self.rlm_search(context, args),
             self.git_grep_search(tool_name, args, context),
         ];
@@ -442,47 +424,6 @@ impl<'a> CodeSearchAdapter<'a> {
             stderr: None,
             command: None,
         })
-    }
-
-    fn bsl_search(
-        &self,
-        context: &WorkspaceContext,
-        args: &Map<String, Value>,
-    ) -> SearchBackendResult {
-        let plugin_root = match find_plugin_root(&context.cwd) {
-            Some(plugin_root) => plugin_root,
-            None => {
-                return unavailable_backend(
-                    "bsl-analyzer",
-                    "could not locate Unica plugin root for bsl-analyzer search",
-                )
-            }
-        };
-        let bundled_tool = match resolve_bundled_tool(&plugin_root, "bsl-analyzer", true) {
-            Ok(bundled_tool) => bundled_tool,
-            Err(error) => return unavailable_backend("bsl-analyzer", error),
-        };
-        let mut process_args = vec!["search".to_string()];
-        match cli_args(args, false) {
-            Ok(args) => process_args.extend(args),
-            Err(error) => return failed_backend("bsl-analyzer", error),
-        }
-        match self.bsl_runner.run(&ProcessCommand {
-            program: bundled_tool.program,
-            args: process_args,
-            cwd: context.cwd.clone(),
-            timeout: Some(DEFAULT_PROCESS_TIMEOUT),
-        }) {
-            Ok(output) if output.status_success => {
-                let body = non_empty_body(&output.stdout, "No bsl-analyzer matches.");
-                successful_backend("bsl-analyzer", body, Vec::new())
-            }
-            Ok(output) => {
-                let reason = failed_process_reason("bsl-analyzer search", &output);
-                failed_backend("bsl-analyzer", reason)
-            }
-            Err(error) => unavailable_backend("bsl-analyzer", error),
-        }
     }
 
     fn rlm_search(
@@ -603,15 +544,6 @@ fn failed_backend(name: &'static str, reason: impl Into<String>) -> SearchBacken
     }
 }
 
-fn non_empty_body(stdout: &str, empty_message: &'static str) -> String {
-    let body = stdout.trim();
-    if body.is_empty() {
-        empty_message.to_string()
-    } else {
-        body.to_string()
-    }
-}
-
 fn section_body(stdout: &str, section_name: &str) -> String {
     let expected_header = format!("=== {section_name} ===");
     let text = stdout.trim();
@@ -620,18 +552,6 @@ fn section_body(stdout: &str, section_name: &str) -> String {
         .filter(|body| !body.is_empty())
         .unwrap_or(text)
         .to_string()
-}
-
-fn failed_process_reason(label: &str, output: &ProcessOutput) -> String {
-    if output.timed_out {
-        return process_timeout_error(label, Some(DEFAULT_PROCESS_TIMEOUT));
-    }
-    let stderr = output.stderr.trim();
-    if stderr.is_empty() {
-        format!("{label} exited with status {}", output.status)
-    } else {
-        stderr.to_string()
-    }
 }
 
 fn process_exit_code_is(status: &str, code: i32) -> bool {
@@ -3368,26 +3288,6 @@ mod tests {
     }
 
     #[test]
-    fn code_adapter_dry_run_builds_bsl_analyzer_command() {
-        let context = temp_context("code-adapter-dry-run");
-        let mut args = Map::new();
-        args.insert("query".to_string(), json!("ОбщийМодуль"));
-
-        let outcome = CliAdapter::new("bsl-analyzer", &["search"], "code analysis")
-            .invoke("unica.code.search", &args, &context, true, false)
-            .unwrap();
-
-        let command = outcome.command.unwrap().join(" ");
-        assert!(command.contains("bin/"));
-        assert!(command.contains("bsl-analyzer"));
-        assert!(!command.contains("run-bsl-analyzer.sh"));
-        assert!(command.contains("search"));
-        assert!(command.contains("--query"));
-        assert!(command.contains("ОбщийМодуль"));
-        cleanup_context(&context);
-    }
-
-    #[test]
     fn code_search_adapter_dry_run_reports_typed_code_search() {
         let context = WorkspaceContext::discover(std::env::current_dir().unwrap()).unwrap();
         let grep = FakeProcessRunner {
@@ -3453,12 +3353,23 @@ mod tests {
     }
 
     #[test]
-    fn code_search_adapter_returns_three_backend_sections_in_order() {
+    fn code_search_adapter_returns_rlm_then_git_grep_without_analyzer_search() {
         let context = temp_context("search-three-backends");
         fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
         let db_path = context.cache_root.join("rlm-tools-bsl/test/bsl_index.db");
         create_rlm_search_db(&db_path);
-        let runner = FakeProcessRunner {
+        let bsl = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: "unexpected analyzer result\n".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        };
+        let runner = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
             output: ProcessOutput {
                 status_success: true,
                 status: "exit status: 0".to_string(),
@@ -3485,11 +3396,9 @@ mod tests {
         assert!(outcome.ok);
         assert!(outcome.command.is_none());
         let stdout = outcome.stdout.unwrap();
-        let bsl_pos = stdout.find("=== bsl-analyzer ===").unwrap();
-        let rlm_pos = stdout.find("=== rlm ===").unwrap();
-        let grep_pos = stdout.find("=== git grep ===").unwrap();
-        assert!(bsl_pos < rlm_pos);
-        assert!(rlm_pos < grep_pos);
+        assert!(bsl.commands.borrow().is_empty());
+        assert!(!stdout.contains("=== bsl-analyzer ==="));
+        assert!(stdout.find("=== rlm ===").unwrap() < stdout.find("=== git grep ===").unwrap());
         assert!(stdout.contains("=== rlm ==="));
         assert!(stdout.contains("=== git grep ==="));
         assert!(stdout.contains("CommonModules/Проведение.bsl:42"));
@@ -3499,76 +3408,8 @@ mod tests {
     }
 
     #[test]
-    fn code_search_adapter_runs_bsl_analyzer_search_natively() {
-        let context = temp_context("search-bsl-command");
-        let bsl = RecordingProcessRunner {
-            commands: RefCell::new(Vec::new()),
-            output: ProcessOutput {
-                status_success: true,
-                status: "exit status: 0".to_string(),
-                stdout: "bsl result\n".to_string(),
-                stderr: String::new(),
-                timed_out: false,
-            },
-        };
-        let grep = RecordingProcessRunner {
-            commands: RefCell::new(Vec::new()),
-            output: ProcessOutput {
-                status_success: true,
-                status: "exit status: 0".to_string(),
-                stdout: "CommonModules/Проведение.bsl:42:ОбработкаПроведения\n".to_string(),
-                stderr: String::new(),
-                timed_out: false,
-            },
-        };
-        let index = FakeIndexRunner {
-            outputs: RefCell::new(vec![index_success("Index not found: /tmp/bsl_index.db")]),
-            ..Default::default()
-        };
-        let mut args = Map::new();
-        args.insert("query".to_string(), json!("ОбработкаПроведения"));
-
-        let outcome = CodeSearchAdapter::with_backend_runners(&bsl, &grep, &index)
-            .invoke("unica.code.search", &args, &context, false)
-            .unwrap();
-
-        assert!(outcome.ok);
-        assert!(outcome.command.is_none());
-        let bsl_commands = bsl.commands.borrow();
-        assert_eq!(bsl_commands.len(), 1);
-        assert!(bsl_commands[0].program.to_string_lossy().contains("bin/"));
-        assert!(!bsl_commands[0]
-            .program
-            .to_string_lossy()
-            .contains("run-bsl-analyzer.sh"));
-        assert_eq!(bsl_commands[0].args[0], "search");
-        assert!(bsl_commands[0].args.contains(&"--query".to_string()));
-        let grep_commands = grep.commands.borrow();
-        assert_eq!(grep_commands[0].program, PathBuf::from("git"));
-        cleanup_context(&context);
-    }
-
-    #[test]
     fn code_search_adapter_keeps_unavailable_sections_when_git_grep_succeeds() {
         let context = temp_context("search-unavailable");
-        fs::remove_file(
-            context
-                .workspace_root
-                .join("plugins/unica/bin/darwin-arm64/bsl-analyzer"),
-        )
-        .ok();
-        fs::remove_file(
-            context
-                .workspace_root
-                .join("plugins/unica/bin/linux-x64/bsl-analyzer"),
-        )
-        .ok();
-        fs::remove_file(
-            context
-                .workspace_root
-                .join("plugins/unica/bin/win-x64/bsl-analyzer.exe"),
-        )
-        .ok();
         let grep = FakeProcessRunner {
             output: ProcessOutput {
                 status_success: true,
@@ -3592,7 +3433,7 @@ mod tests {
 
         assert!(outcome.ok);
         let stdout = outcome.stdout.unwrap();
-        assert!(stdout.contains("=== bsl-analyzer ===\nunavailable:"));
+        assert!(!stdout.contains("=== bsl-analyzer ==="));
         assert!(stdout.contains("=== rlm ===\nunavailable: rlm index unavailable"));
         assert!(stdout.contains("=== git grep ==="));
         assert!(stdout.contains("CommonModules/SmokeModule/Ext/Module.bsl:2"));
@@ -3600,26 +3441,8 @@ mod tests {
     }
 
     #[test]
-    fn code_search_adapter_returns_three_failed_sections_when_no_backend_runs() {
+    fn code_search_adapter_returns_two_failed_sections_when_no_backend_runs() {
         let context = temp_context("search-all-failed");
-        fs::remove_file(
-            context
-                .workspace_root
-                .join("plugins/unica/bin/darwin-arm64/bsl-analyzer"),
-        )
-        .ok();
-        fs::remove_file(
-            context
-                .workspace_root
-                .join("plugins/unica/bin/linux-x64/bsl-analyzer"),
-        )
-        .ok();
-        fs::remove_file(
-            context
-                .workspace_root
-                .join("plugins/unica/bin/win-x64/bsl-analyzer.exe"),
-        )
-        .ok();
         let grep = FakeProcessRunner {
             output: ProcessOutput {
                 status_success: false,
@@ -3643,7 +3466,7 @@ mod tests {
 
         assert!(!outcome.ok);
         let stdout = outcome.stdout.unwrap();
-        assert!(stdout.contains("=== bsl-analyzer ===\nunavailable:"));
+        assert!(!stdout.contains("=== bsl-analyzer ==="));
         assert!(stdout.contains("=== rlm ===\nunavailable: rlm index unavailable"));
         assert!(stdout.contains("=== git grep ===\nfailed: fatal: not a git repository"));
         cleanup_context(&context);

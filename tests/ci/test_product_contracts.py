@@ -18,6 +18,16 @@ def load_contract_module():
 
 
 class ProductContractTests(unittest.TestCase):
+    BSL_ANALYZER_HELP = (
+        "#!/usr/bin/env sh\n"
+        "case \"$*\" in\n"
+        "  'analyze --help') printf '%s\\n' '--source-dir --format jsonl' ;;\n"
+        "  'mcp serve --help') printf '%s\\n' '--profile --source-dir --mode stdio' ;;\n"
+        "  'smoke --help') printf '%s\\n' '--scenarios --json' ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n"
+    )
+
     def test_ai_entrypoints_document_source_of_truth_and_ignored_corpus(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         entrypoint = repo_root / "AGENTS.md"
@@ -68,9 +78,7 @@ class ProductContractTests(unittest.TestCase):
             self.write_executable(
                 tools_dir,
                 "bsl-analyzer",
-                "#!/usr/bin/env sh\n"
-                "printf '%s\\n' '--source-dir --format jsonl baseline --profile workspace reference "
-                "--mode stdio --scenarios --json mcp serve analyze search smoke'\n",
+                self.BSL_ANALYZER_HELP,
             )
             self.write_executable(
                 tools_dir,
@@ -100,9 +108,7 @@ class ProductContractTests(unittest.TestCase):
             self.write_executable(
                 tools_dir,
                 "bsl-analyzer",
-                "#!/usr/bin/env sh\n"
-                "printf '%s\\n' '--source-dir --format jsonl baseline --profile workspace reference "
-                "--mode stdio --scenarios --json mcp serve analyze search smoke'\n",
+                self.BSL_ANALYZER_HELP,
             )
             self.write_executable(
                 tools_dir,
@@ -150,9 +156,7 @@ class ProductContractTests(unittest.TestCase):
             self.write_executable(
                 tools_dir,
                 "bsl-analyzer",
-                "#!/usr/bin/env sh\n"
-                "printf '%s\\n' '--source-dir --format jsonl baseline --profile workspace reference "
-                "--mode stdio --scenarios --json mcp serve analyze search smoke'\n",
+                self.BSL_ANALYZER_HELP,
             )
             self.write_executable(tools_dir, "rlm-bsl-index", "#!/usr/bin/env sh\nprintf '%s\\n' 'index build update info'\n")
             self.write_executable(tools_dir, "rlm-tools-bsl", "#!/usr/bin/env sh\nprintf '%s\\n' 'service'\n")
