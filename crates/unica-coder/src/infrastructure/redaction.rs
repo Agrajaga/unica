@@ -5,10 +5,47 @@ pub(crate) fn redactor(text: &str) -> String {
     output
 }
 
-#[derive(Debug, Default)]
+const EXACT_SECRET_KEYS: &[&str] = &["connection", "pwd"];
+const SUBSTRING_SECRET_KEYS: &[&str] = &["password", "token", "secret"];
+const MAX_RETAINED_KEY_BYTES: usize = "connection".len();
+
+#[derive(Debug)]
 pub(crate) struct StreamRedactor {
-    pending: String,
-    redacting_secret_value: bool,
+    state: StreamRedactorState,
+}
+
+#[derive(Debug)]
+enum StreamRedactorState {
+    Text,
+    Candidate {
+        pending: String,
+        exact_key: ExactKeyStatus,
+    },
+    ConfirmedSecretKey,
+    AfterSecretKey,
+    RedactingSecretValue {
+        marker: RedactionMarker,
+    },
+}
+
+#[derive(Debug)]
+enum ExactKeyStatus {
+    Possible,
+    Discarded,
+}
+
+#[derive(Debug)]
+enum RedactionMarker {
+    Pending,
+    Written,
+}
+
+impl Default for StreamRedactor {
+    fn default() -> Self {
+        Self {
+            state: StreamRedactorState::Text,
+        }
+    }
 }
 
 impl StreamRedactor {
@@ -17,88 +54,230 @@ impl StreamRedactor {
     }
 
     pub(crate) fn push(&mut self, chunk: &str) -> String {
-        self.pending.push_str(chunk);
+        let mut output = String::with_capacity(chunk.len());
 
-        let chars = self.pending.chars().collect::<Vec<_>>();
-        let mut output = String::with_capacity(chars.len());
-        let mut index = 0;
-
-        while index < chars.len() {
-            if self.redacting_secret_value {
-                if secret_value_delimiter(chars[index]) {
-                    output.push(chars[index]);
-                    self.redacting_secret_value = false;
-                }
-                index += 1;
-                continue;
-            }
-
-            if !secret_key_char(chars[index]) {
-                output.push(chars[index]);
-                index += 1;
-                continue;
-            }
-
-            let key_start = index;
-            index += 1;
-            while index < chars.len() && secret_key_char(chars[index]) {
-                index += 1;
-            }
-            let key_end = index;
-
-            if key_end == chars.len() {
-                self.pending = chars[key_start..].iter().collect();
-                return output;
-            }
-
-            let mut separator = index;
-            while separator < chars.len() && chars[separator].is_whitespace() {
-                separator += 1;
-            }
-            if separator == chars.len() {
-                if is_secret_key(&chars[key_start..key_end].iter().collect::<String>()) {
-                    self.pending = chars[key_start..].iter().collect();
-                    return output;
-                }
-                output.extend(chars[key_start..separator].iter());
-                index = separator;
-                continue;
-            }
-
-            if matches!(chars[separator], '=' | ':')
-                && is_secret_key(&chars[key_start..key_end].iter().collect::<String>())
-            {
-                let mut value_start = separator + 1;
-                while value_start < chars.len() && chars[value_start].is_whitespace() {
-                    value_start += 1;
-                }
-                output.extend(chars[key_start..value_start].iter());
-                output.push_str("<redacted>");
-                self.redacting_secret_value = true;
-                index = value_start;
-                continue;
-            }
-
-            output.extend(chars[key_start..key_end].iter());
+        for ch in chunk.chars() {
+            let state = std::mem::replace(&mut self.state, StreamRedactorState::Text);
+            self.state = state.push(ch, &mut output);
         }
-
-        self.pending.clear();
         output
     }
 
     pub(crate) fn finish(&mut self) -> String {
-        self.redacting_secret_value = false;
-        std::mem::take(&mut self.pending)
+        let state = std::mem::replace(&mut self.state, StreamRedactorState::Text);
+        state.finish()
+    }
+
+    #[cfg(test)]
+    fn retained_len(&self) -> usize {
+        match &self.state {
+            StreamRedactorState::Candidate { pending, .. } => pending.len(),
+            StreamRedactorState::Text
+            | StreamRedactorState::ConfirmedSecretKey
+            | StreamRedactorState::AfterSecretKey
+            | StreamRedactorState::RedactingSecretValue { .. } => 0,
+        }
+    }
+}
+
+impl StreamRedactorState {
+    fn push(self, ch: char, output: &mut String) -> Self {
+        match self {
+            Self::Text => {
+                if secret_key_char(ch) {
+                    Self::advance_candidate(ch.to_string(), ExactKeyStatus::Possible, output)
+                } else {
+                    output.push(ch);
+                    Self::Text
+                }
+            }
+            Self::Candidate {
+                mut pending,
+                exact_key,
+            } => {
+                if secret_key_char(ch) {
+                    pending.push(ch);
+                    Self::advance_candidate(pending, exact_key, output)
+                } else {
+                    let is_secret = matches!(exact_key, ExactKeyStatus::Possible)
+                        && is_exact_secret_key(&pending);
+                    output.push_str(&pending);
+                    if is_secret {
+                        Self::after_secret_key(ch, output)
+                    } else {
+                        output.push(ch);
+                        Self::Text
+                    }
+                }
+            }
+            Self::ConfirmedSecretKey => {
+                if secret_key_char(ch) {
+                    output.push(ch);
+                    Self::ConfirmedSecretKey
+                } else {
+                    Self::after_secret_key(ch, output)
+                }
+            }
+            Self::AfterSecretKey => Self::after_secret_key(ch, output),
+            Self::RedactingSecretValue { marker } => Self::redact_value(ch, marker, output),
+        }
+    }
+
+    fn advance_candidate(
+        mut pending: String,
+        exact_key: ExactKeyStatus,
+        output: &mut String,
+    ) -> Self {
+        if contains_substring_secret_key(&pending) {
+            output.push_str(&pending);
+            return Self::ConfirmedSecretKey;
+        }
+
+        let exact_key = exact_key.advance(&pending);
+        if matches!(exact_key, ExactKeyStatus::Possible) {
+            return Self::Candidate { pending, exact_key };
+        }
+
+        retain_secret_key_suffix(&mut pending, output);
+        Self::Candidate { pending, exact_key }
+    }
+
+    fn after_secret_key(ch: char, output: &mut String) -> Self {
+        if matches!(ch, '=' | ':') {
+            output.push(ch);
+            Self::RedactingSecretValue {
+                marker: RedactionMarker::Pending,
+            }
+        } else if ch.is_whitespace() {
+            output.push(ch);
+            Self::AfterSecretKey
+        } else if secret_key_char(ch) {
+            Self::advance_candidate(ch.to_string(), ExactKeyStatus::Possible, output)
+        } else {
+            output.push(ch);
+            Self::Text
+        }
+    }
+
+    fn redact_value(ch: char, marker: RedactionMarker, output: &mut String) -> Self {
+        match marker {
+            RedactionMarker::Pending if ch.is_whitespace() => {
+                output.push(ch);
+                Self::RedactingSecretValue {
+                    marker: RedactionMarker::Pending,
+                }
+            }
+            RedactionMarker::Pending => {
+                output.push_str("<redacted>");
+                if secret_value_delimiter(ch) {
+                    output.push(ch);
+                    Self::Text
+                } else {
+                    Self::RedactingSecretValue {
+                        marker: RedactionMarker::Written,
+                    }
+                }
+            }
+            RedactionMarker::Written if secret_value_delimiter(ch) => {
+                output.push(ch);
+                Self::Text
+            }
+            RedactionMarker::Written => Self::RedactingSecretValue {
+                marker: RedactionMarker::Written,
+            },
+        }
+    }
+
+    fn finish(self) -> String {
+        match self {
+            Self::Candidate { pending, .. } => pending,
+            Self::RedactingSecretValue {
+                marker: RedactionMarker::Pending,
+            } => "<redacted>".to_string(),
+            Self::Text
+            | Self::ConfirmedSecretKey
+            | Self::AfterSecretKey
+            | Self::RedactingSecretValue {
+                marker: RedactionMarker::Written,
+            } => String::new(),
+        }
+    }
+}
+
+impl ExactKeyStatus {
+    fn advance(self, key: &str) -> Self {
+        match self {
+            Self::Possible if is_possible_exact_secret_key(key) => Self::Possible,
+            Self::Possible | Self::Discarded => Self::Discarded,
+        }
     }
 }
 
 pub(crate) fn is_secret_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
-    key == "connection"
-        || key == "pwd"
-        || key.contains("password")
-        || key.contains("token")
-        || key.contains("secret")
+    EXACT_SECRET_KEYS.contains(&key.as_str())
+        || SUBSTRING_SECRET_KEYS
+            .iter()
+            .any(|secret_key| key.contains(secret_key))
+}
+
+fn is_possible_exact_secret_key(key: &str) -> bool {
+    EXACT_SECRET_KEYS.iter().any(|secret_key| {
+        secret_key
+            .get(..key.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(key))
+    })
+}
+
+fn is_exact_secret_key(key: &str) -> bool {
+    EXACT_SECRET_KEYS
+        .iter()
+        .any(|secret_key| secret_key.eq_ignore_ascii_case(key))
+}
+
+fn contains_substring_secret_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    SUBSTRING_SECRET_KEYS
+        .iter()
+        .any(|secret_key| key.contains(secret_key))
+}
+
+fn retain_secret_key_suffix(pending: &mut String, output: &mut String) {
+    let mut retained_len = 0;
+    for length in (1..=MAX_RETAINED_KEY_BYTES).rev() {
+        let Some(suffix_start) = pending.len().checked_sub(length) else {
+            continue;
+        };
+        let Some(suffix) = pending.get(suffix_start..) else {
+            continue;
+        };
+        if SUBSTRING_SECRET_KEYS.iter().any(|secret_key| {
+            secret_key
+                .get(..length)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(suffix))
+        }) {
+            retained_len = length;
+            break;
+        }
+    }
+
+    if retained_len == 0 {
+        output.push_str(pending);
+        pending.clear();
+        return;
+    }
+
+    let Some(suffix_start) = pending.len().checked_sub(retained_len) else {
+        return;
+    };
+    let Some(prefix) = pending.get(..suffix_start) else {
+        return;
+    };
+    let Some(suffix) = pending.get(suffix_start..) else {
+        return;
+    };
+    output.push_str(prefix);
+    *pending = suffix.to_string();
 }
 
 fn secret_key_char(ch: char) -> bool {
@@ -122,6 +301,18 @@ mod tests {
             redactor.push("wd=super-secret\nfinished\n"),
             "Pwd=<redacted>\nfinished\n"
         );
+    }
+
+    #[test]
+    fn stream_redactor_bounds_state_for_delimiter_free_chunks() {
+        let mut redactor = StreamRedactor::new();
+
+        for _ in 0..1_024 {
+            assert_eq!(redactor.push("x"), "x");
+            assert!(redactor.retained_len() <= 10);
+        }
+
+        assert_eq!(redactor.push("token=super-secret\n"), "token=<redacted>\n");
     }
 
     #[test]
