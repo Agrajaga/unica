@@ -168,15 +168,11 @@ allowed-tools:
 |----------|--------------------------|
 | `input` | `OnChange`, `StartChoice`, `Clearing`, `ChoiceProcessing`, `AutoComplete`, `TextEditEnd`, `Opening`, `Creating`, `EditTextChange`, `Tuning`, `StartListChoice`, `MultipleValuesDelete` |
 | `check` | `OnChange` |
-| `label` | `Click`, `URLProcessing` |
 | `labelField` | `URLProcessing`, `Click`, `OnChange` |
 | `table` | `Selection`, `OnActivateRow`, `BeforeAddRow`, `BeforeDeleteRow`, `OnStartEdit`, `OnChange`, `BeforeRowChange`, `AfterDeleteRow`, `OnEditEnd`, `OnActivateCell`, `OnGetDataAtServer`, `Drag`, `DragCheck`, `ValueChoice`, `ChoiceProcessing`, `DragStart`, `BeforeEditEnd`, `BeforeExpand`, `DragEnd`, `OnUpdateUserSettingSetAtServer`, `BeforeCollapse`, `BeforeLoadUserSettingsAtServer`, `OnActivateField`, `RefreshRequestProcessing`, `NewWriteProcessing`, `OnLoadUserSettingsAtServer`, `OnCurrentParentChange`, `OnSaveUserSettingsAtServer`, `URLGetProcessing` |
 | `pages` | `OnCurrentPageChange` |
 | `page` | — |
 | `button` | — |
-| `picture` | `Click`, `Drag`, `DragCheck` |
-| `picField` | `Click` |
-| `calendar` | `Selection`, `OnChange`, `OnPeriodOutput` |
 | `cmdBar` | — |
 | `autoCmdBar` | — |
 | `group` | — |

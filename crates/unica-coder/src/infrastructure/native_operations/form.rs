@@ -9069,6 +9069,32 @@ mod tests {
     }
 
     #[test]
+    fn form_compile_event_table_documents_only_supported_dsl_keys() {
+        const SKILL: &str =
+            include_str!("../../../../../plugins/unica/skills/form-compile/SKILL.md");
+        const START: &str = "<!-- form-event-registry:start -->";
+        const END: &str = "<!-- form-event-registry:end -->";
+
+        let section = SKILL
+            .split_once(START)
+            .and_then(|(_, tail)| tail.split_once(END).map(|(section, _)| section))
+            .expect("form-compile event table must be delimited for contract checks");
+        let documented_keys = section.lines().filter_map(|line| {
+            line.strip_prefix("| `")
+                .and_then(|line| line.split_once("` | "))
+                .map(|(key, _)| key)
+        });
+
+        for key in documented_keys {
+            let element = Map::from_iter([(key.to_string(), json!("DocumentedElement"))]);
+            assert!(
+                FormEditElementDefinitionKind::from_object(&element).is_ok(),
+                "form-compile event table documents unsupported DSL key `{key}`"
+            );
+        }
+    }
+
+    #[test]
     fn edit_form_emits_and_validates_new_table_and_column_events() {
         let context = temp_context("edit-new-element-events");
         let form_path = context.cwd.join("Form.xml");
