@@ -4,6 +4,7 @@ pub mod native_operations;
 pub mod path_policy;
 pub mod plugin_runtime;
 pub(crate) mod redaction;
+pub(crate) mod runtime_jobs;
 pub mod workspace_index;
 pub mod workspace_services;
 pub mod workspace_state;
