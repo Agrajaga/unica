@@ -1,5 +1,7 @@
 # Durable runtime jobs Implementation Plan
 
+> Historical: this plan is preserved as execution context. Current source of truth is code/tests/package metadata, then `spec/`, not this plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Добавить durable, typed и безопасный lifecycle для долгих `v8-runner` операций без изменения `unica.runtime.execute`.
