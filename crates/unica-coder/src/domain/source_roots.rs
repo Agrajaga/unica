@@ -45,19 +45,28 @@ pub fn resolve_source_root(
     context: &WorkspaceContext,
     explicit: Option<&str>,
 ) -> Result<ResolvedSourceRoot, String> {
-    if let Some(raw) = explicit.filter(|value| !value.trim().is_empty()) {
-        return resolve_explicit(context, raw);
-    }
-    let map = discover_project_source_map(&context.workspace_root)?;
-    let selected = select_default_source_set(&map.source_sets)?;
-    Ok(ResolvedSourceRoot {
-        source_set: Some(selected.name.clone()),
-        path: normalize_path_identity(&context.workspace_root.join(&selected.path))?,
-    })
+    let result = if let Some(raw) = explicit.filter(|value| !value.trim().is_empty()) {
+        resolve_explicit(context, raw)
+    } else {
+        resolve_default(context)
+    };
+    result.map_err(invalid_source_root)
 }
 
 pub fn normalize_path_identity(path: &Path) -> Result<PathBuf, String> {
     Ok(normalize_lexically(path))
+}
+
+fn resolve_default(context: &WorkspaceContext) -> Result<ResolvedSourceRoot, String> {
+    let map = discover_project_source_map(&context.workspace_root)?;
+    let selected = select_default_source_set(&map.source_sets)?;
+    let workspace_root = normalize_path_identity(&context.workspace_root)?;
+    let path = normalize_path_identity(&context.workspace_root.join(&selected.path))?;
+    ensure_inside_workspace(&path, &workspace_root)?;
+    Ok(ResolvedSourceRoot {
+        source_set: Some(selected.name.clone()),
+        path,
+    })
 }
 
 fn resolve_explicit(context: &WorkspaceContext, raw: &str) -> Result<ResolvedSourceRoot, String> {
@@ -69,25 +78,34 @@ fn resolve_explicit(context: &WorkspaceContext, raw: &str) -> Result<ResolvedSou
     };
     let path = normalize_path_identity(&path)?;
     let workspace_root = normalize_path_identity(&context.workspace_root)?;
-    if !path.starts_with(&workspace_root) {
-        return Err(format!(
-            "sourceDir must be inside workspace root {}: {}",
-            workspace_root.display(),
-            path.display()
-        ));
-    }
+    ensure_inside_workspace(&path, &workspace_root)?;
 
     let map = discover_project_source_map(&context.workspace_root)?;
-    let source_set = map
-        .source_sets
-        .iter()
-        .find(|source_set| {
-            normalize_path_identity(&context.workspace_root.join(&source_set.path))
-                .map(|configured_path| configured_path == path)
-                .unwrap_or(false)
-        })
-        .map(|source_set| source_set.name.clone());
+    let mut source_set = None;
+    for configured in &map.source_sets {
+        let configured_path =
+            normalize_path_identity(&context.workspace_root.join(&configured.path))?;
+        if configured_path == path {
+            source_set = Some(configured.name.clone());
+            break;
+        }
+    }
     Ok(ResolvedSourceRoot { source_set, path })
+}
+
+fn ensure_inside_workspace(path: &Path, workspace_root: &Path) -> Result<(), String> {
+    if path.starts_with(workspace_root) {
+        return Ok(());
+    }
+    Err(format!(
+        "sourceDir must be inside workspace root {}: {}",
+        workspace_root.display(),
+        path.display()
+    ))
+}
+
+fn invalid_source_root(error: String) -> String {
+    format!("invalid_source_root: {error}")
 }
 
 fn normalize_lexically(path: &Path) -> PathBuf {
@@ -172,6 +190,7 @@ mod tests {
         ]);
         let error = resolve_source_root(&context, None).unwrap_err();
 
+        assert!(error.starts_with("invalid_source_root:"));
         assert!(error.contains("sourceDir"));
         assert!(error.contains("app"));
         assert!(error.contains("tests"));
@@ -183,7 +202,37 @@ mod tests {
         let context = fixture(&[("main", "CONFIGURATION", "src/cf")]);
         let error = resolve_source_root(&context, Some("../outside")).unwrap_err();
 
+        assert!(error.starts_with("invalid_source_root:"));
         assert!(error.contains("workspace"));
+        cleanup(&context);
+    }
+
+    #[test]
+    fn rejects_main_source_set_configured_outside_the_workspace() {
+        let context = fixture(&[("main", "CONFIGURATION", "../outside")]);
+        let error = resolve_source_root(&context, None).unwrap_err();
+
+        assert!(error.starts_with("invalid_source_root:"));
+        assert!(error.contains("workspace"));
+        cleanup(&context);
+    }
+
+    #[test]
+    fn rejects_sole_configuration_configured_outside_the_workspace() {
+        let context = fixture(&[("app", "CONFIGURATION", "../outside")]);
+        let error = resolve_source_root(&context, None).unwrap_err();
+
+        assert!(error.starts_with("invalid_source_root:"));
+        assert!(error.contains("workspace"));
+        cleanup(&context);
+    }
+
+    #[test]
+    fn prefixes_project_discovery_errors() {
+        let context = fixture(&[("main", "UNKNOWN", "src")]);
+        let error = resolve_source_root(&context, None).unwrap_err();
+
+        assert!(error.starts_with("invalid_source_root:"));
         cleanup(&context);
     }
 
