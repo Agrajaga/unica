@@ -2,6 +2,7 @@ use crate::domain::project_sources::{
     discover_project_source_map, ProjectSourceSet, SourceSetKind,
 };
 use crate::domain::workspace::WorkspaceContext;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +55,40 @@ pub fn resolve_source_root(
 }
 
 pub fn normalize_path_identity(path: &Path) -> Result<PathBuf, String> {
-    Ok(normalize_lexically(path))
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| format!("failed to determine current directory: {err}"))?
+            .join(path)
+    };
+    let normalized = normalize_lexically(&strip_windows_extended_length_prefix(&absolute));
+    let canonical = fs::canonicalize(&normalized).unwrap_or(normalized);
+    Ok(strip_windows_extended_length_prefix(&canonical))
+}
+
+#[cfg(windows)]
+fn strip_windows_extended_length_prefix(path: &Path) -> PathBuf {
+    let path = path.as_os_str().to_string_lossy();
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    if let Some(regular) = path.strip_prefix(r"\\?\") {
+        let bytes = regular.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/')
+        {
+            return PathBuf::from(regular);
+        }
+    }
+    PathBuf::from(path.as_ref())
+}
+
+#[cfg(not(windows))]
+fn strip_windows_extended_length_prefix(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 fn resolve_default(context: &WorkspaceContext) -> Result<ResolvedSourceRoot, String> {
@@ -124,7 +158,7 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_source_root;
+    use super::{normalize_path_identity, resolve_source_root};
     use crate::domain::workspace::WorkspaceContext;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -234,6 +268,37 @@ mod tests {
 
         assert!(error.starts_with("invalid_source_root:"));
         cleanup(&context);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extended_length_and_regular_paths_have_same_identity() {
+        let root = temp_workspace("path-identity");
+        let regular = normalize_path_identity(&root).unwrap();
+        let extended = PathBuf::from(format!(r"\\?\{}", root.display()));
+
+        assert_eq!(regular, normalize_path_identity(&extended).unwrap());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extended_length_unc_paths_use_regular_unc_identity() {
+        let extended = PathBuf::from(r"\\?\UNC\server\share\source");
+
+        assert_eq!(
+            PathBuf::from(r"\\server\share\source"),
+            normalize_path_identity(&extended).unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn preserves_non_drive_verbatim_path_namespaces() {
+        let verbatim = PathBuf::from(r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\source");
+
+        assert_eq!(verbatim, normalize_path_identity(&verbatim).unwrap());
     }
 
     fn fixture(source_sets: &[(&str, &str, &str)]) -> WorkspaceContext {

@@ -1,4 +1,5 @@
 use crate::domain::events::DomainEvent;
+use crate::domain::source_roots::normalize_path_identity;
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
 use crate::infrastructure::plugin_runtime::find_plugin_root;
@@ -11,7 +12,7 @@ use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -37,8 +38,10 @@ pub struct WorkspaceServiceIdentity {
 
 impl WorkspaceServiceIdentity {
     pub fn new(context: &WorkspaceContext, source_root: &Path) -> Result<Self, String> {
-        let workspace_root = canonical_display(&context.workspace_root);
-        let source_root = canonical_display(source_root);
+        let workspace_root = normalize_path_identity(&context.workspace_root)?;
+        let source_root = normalize_path_identity(source_root)?;
+        let workspace_root = workspace_root.display().to_string();
+        let source_root = source_root.display().to_string();
         let key = service_key(&workspace_root, &source_root);
         let service_dir = context.cache_root.join("services").join(&key);
         Ok(Self {
@@ -225,7 +228,10 @@ impl<'a> WorkspaceServiceManager<'a> {
             .iter()
             .map(|event| event.name().to_string())
             .collect::<Vec<_>>();
-        let workspace_root = canonical_display(&context.workspace_root);
+        let Ok(workspace_root) = normalize_path_identity(&context.workspace_root) else {
+            return;
+        };
+        let workspace_root = workspace_root.display().to_string();
         for entry in entries.flatten() {
             let record_path = entry.path().join("service.json");
             let Ok(text) = fs::read_to_string(record_path) else {
@@ -1166,27 +1172,6 @@ fn service_key(workspace_root: &str, source_root: &str) -> String {
     format!("svc-{:016x}", hasher.finish())
 }
 
-fn canonical_display(path: &Path) -> String {
-    fs::canonicalize(path)
-        .unwrap_or_else(|_| normalize_lexical_path(path))
-        .display()
-        .to_string()
-}
-
-fn normalize_lexical_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1218,6 +1203,19 @@ mod tests {
 
         cleanup(&context);
         cleanup(&other_workspace);
+    }
+
+    #[test]
+    fn service_identity_reuses_normalized_paths() {
+        let context = test_context("normalized-identity");
+        let plain =
+            WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src")).unwrap();
+        let dotted =
+            WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src/./"))
+                .unwrap();
+
+        assert_eq!(plain.key, dotted.key);
+        cleanup(&context);
     }
 
     #[test]
