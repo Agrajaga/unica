@@ -9069,11 +9069,30 @@ mod tests {
     }
 
     #[test]
-    fn form_compile_event_table_documents_only_supported_dsl_keys() {
+    fn form_compile_skill_tables_document_only_supported_dsl_keys() {
         const SKILL: &str =
             include_str!("../../../../../plugins/unica/skills/form-compile/SKILL.md");
+        const ELEMENTS_START: &str = "### Элементы (ключ определяет тип)\n\n";
         const START: &str = "<!-- form-event-registry:start -->";
         const END: &str = "<!-- form-event-registry:end -->";
+
+        let element_table = SKILL
+            .split_once(ELEMENTS_START)
+            .and_then(|(_, tail)| tail.split_once("\n\n### ").map(|(table, _)| table))
+            .expect("form-compile element table must remain present for contract checks");
+        let documented_element_keys = element_table.lines().filter_map(|line| {
+            line.strip_prefix("| `\"")
+                .and_then(|line| line.split_once("\"`"))
+                .map(|(key, _)| key)
+        });
+
+        for key in documented_element_keys {
+            let element = Map::from_iter([(key.to_string(), json!("DocumentedElement"))]);
+            assert!(
+                FormEditElementDefinitionKind::from_object(&element).is_ok(),
+                "form-compile element table documents unsupported DSL key `{key}`"
+            );
+        }
 
         let section = SKILL
             .split_once(START)

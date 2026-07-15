@@ -130,18 +130,13 @@ allowed-tools:
 | `"group"`    | UsualGroup        | `"horizontal"` / `"vertical"` / `"alwaysHorizontal"` / `"alwaysVertical"` / `"collapsible"` |
 | `"input"`    | InputField        | имя элемента                                      |
 | `"check"`    | CheckBoxField     | имя                                               |
-| `"label"`    | LabelDecoration   | имя (текст задаётся через `title`)                |
 | `"labelField"` | LabelField      | имя                                               |
 | `"table"`    | Table             | имя                                               |
 | `"pages"`    | Pages             | имя                                               |
 | `"page"`     | Page              | имя                                               |
 | `"button"`   | Button            | имя                                               |
-| `"picture"`  | PictureDecoration | имя                                               |
-| `"picField"` | PictureField      | имя                                               |
-| `"calendar"` | CalendarField     | имя                                               |
 | `"cmdBar"`   | CommandBar        | имя                                               |
 | `"autoCmdBar"` | AutoCommandBar формы | имя — наполняет главную АКП формы (id=-1), не попадает в `<ChildItems>` |
-| `"popup"`    | Popup             | имя                                               |
 
 ### Общие свойства (все типы элементов)
 
@@ -203,14 +198,6 @@ allowed-tools:
 |------|----------|
 | `path` | DataPath |
 | `titleLocation` | Размещение заголовка |
-
-### Надпись-декорация (label)
-
-| Ключ | Описание |
-|------|----------|
-| `title` | Текст надписи (обязательно) |
-| `hyperlink: true` | Сделать ссылкой |
-| `width` / `height` | Размер |
 
 ### Группа (group)
 
@@ -287,29 +274,12 @@ allowed-tools:
 |------|----------|
 | `autofill: true/false` | Автозаполнение стандартными командами |
 | `horizontalAlign` | `"Left"` / `"Center"` / `"Right"` |
-| `children: [...]` | Кнопки/popup |
+| `children: [...]` | Кнопки |
 
 ```json
 { "autoCmdBar": "ФормаКоманднаяПанель", "autofill": true, "children": [
    { "button": "ИзменитьВыделенные", "command": "ИзменитьВыделенные",
      "locationInCommandBar": "InAdditionalSubmenu" }
-]}
-```
-
-### Выпадающее меню (popup)
-
-| Ключ | Описание |
-|------|----------|
-| `title` | Заголовок подменю |
-| `children: [...]` | Кнопки подменю |
-
-Используется внутри `cmdBar` для группировки кнопок в подменю:
-```json
-{ "cmdBar": "Панель", "children": [
-  { "popup": "Добавить", "title": "Добавить", "children": [
-    { "button": "ДобавитьСтроку", "stdCommand": "Товары.Add" },
-    { "button": "ДобавитьИзДокумента", "command": "ДобавитьИзДокумента", "title": "Из документа" }
-  ]}
 ]}
 ```
 
