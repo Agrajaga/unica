@@ -152,7 +152,7 @@ allowed-tools:
 | `visible: false` | Скрыть (синоним: `hidden: true`) |
 | `enabled: false` | Сделать недоступным (синоним: `disabled: true`) |
 | `readOnly: true` | Только чтение |
-| `on: [...]` | События с автоименованием обработчиков |
+| `on: [...]` | События с автоименованием обработчиков (если они допустимы для типа элемента) |
 | `handlers: {...}` | Явное задание имён обработчиков: `{"OnChange": "МоёИмя"}` |
 
 ### Допустимые имена событий (`on`)
@@ -163,19 +163,24 @@ allowed-tools:
 
 События `OnReadAtServer`, `BeforeWrite`, `BeforeWriteAtServer`, `OnWriteAtServer`, `AfterWriteAtServer` и `AfterWrite` допустимы только при главном реквизите формы постоянного объекта или записи.
 
-**input / picField**: `OnChange`, `StartChoice`, `ChoiceProcessing`, `AutoComplete`, `TextEditEnd`, `Clearing`, `Creating`, `EditTextChange`
-
-**check**: `OnChange`
-
-**table**: `OnStartEdit`, `OnEditEnd`, `OnChange`, `Selection`, `ValueChoice`, `BeforeAddRow`, `BeforeDeleteRow`, `AfterDeleteRow`, `BeforeRowChange`, `BeforeEditEnd`, `OnActivateRow`, `OnActivateCell`, `Drag`, `DragStart`, `DragCheck`, `DragEnd`
-
-**label / picture**: `Click`, `URLProcessing`
-
-**labelField**: `OnChange`, `StartChoice`, `ChoiceProcessing`, `Click`, `URLProcessing`, `Clearing`
-
-**button**: `Click`
-
-**pages**: `OnCurrentPageChange`
+<!-- form-event-registry:start -->
+| DSL ключ | Допустимые события `on` |
+|----------|--------------------------|
+| `input` | `OnChange`, `StartChoice`, `Clearing`, `ChoiceProcessing`, `AutoComplete`, `TextEditEnd`, `Opening`, `Creating`, `EditTextChange`, `Tuning`, `StartListChoice`, `MultipleValuesDelete` |
+| `check` | `OnChange` |
+| `label` | `Click`, `URLProcessing` |
+| `labelField` | `URLProcessing`, `Click`, `OnChange` |
+| `table` | `Selection`, `OnActivateRow`, `BeforeAddRow`, `BeforeDeleteRow`, `OnStartEdit`, `OnChange`, `BeforeRowChange`, `AfterDeleteRow`, `OnEditEnd`, `OnActivateCell`, `OnGetDataAtServer`, `Drag`, `DragCheck`, `ValueChoice`, `ChoiceProcessing`, `DragStart`, `BeforeEditEnd`, `BeforeExpand`, `DragEnd`, `OnUpdateUserSettingSetAtServer`, `BeforeCollapse`, `BeforeLoadUserSettingsAtServer`, `OnActivateField`, `RefreshRequestProcessing`, `NewWriteProcessing`, `OnLoadUserSettingsAtServer`, `OnCurrentParentChange`, `OnSaveUserSettingsAtServer`, `URLGetProcessing` |
+| `pages` | `OnCurrentPageChange` |
+| `page` | — |
+| `button` | — |
+| `picture` | `Click`, `Drag`, `DragCheck` |
+| `picField` | `Click` |
+| `calendar` | `Selection`, `OnChange`, `OnPeriodOutput` |
+| `cmdBar` | — |
+| `autoCmdBar` | — |
+| `group` | — |
+<!-- form-event-registry:end -->
 
 ### Поле ввода (input)
 

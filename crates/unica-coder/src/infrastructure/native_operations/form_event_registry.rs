@@ -1296,6 +1296,69 @@ mod tests {
     }
 
     #[test]
+    fn form_compile_skill_documents_registered_events_for_each_documented_element() {
+        const SKILL: &str =
+            include_str!("../../../../../plugins/unica/skills/form-compile/SKILL.md");
+        const START: &str = "<!-- form-event-registry:start -->";
+        const END: &str = "<!-- form-event-registry:end -->";
+
+        let section = SKILL
+            .split_once(START)
+            .and_then(|(_, tail)| tail.split_once(END).map(|(section, _)| section))
+            .expect("form-compile event table must be delimited for parity checks");
+        let cases = [
+            ("input", FormElementKind::InputField),
+            ("check", FormElementKind::CheckBoxField),
+            ("label", FormElementKind::LabelDecoration),
+            ("labelField", FormElementKind::LabelField),
+            ("table", FormElementKind::Table),
+            ("pages", FormElementKind::Pages),
+            ("page", FormElementKind::Page),
+            ("button", FormElementKind::Button),
+            ("picture", FormElementKind::PictureDecoration),
+            ("picField", FormElementKind::PictureField),
+            ("calendar", FormElementKind::CalendarField),
+            ("cmdBar", FormElementKind::CommandBar),
+            ("autoCmdBar", FormElementKind::CommandBar),
+            ("group", FormElementKind::Group),
+        ];
+
+        let documented_keys = section
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("| `")
+                    .and_then(|line| line.split_once("` | "))
+                    .map(|(key, _)| key)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            documented_keys,
+            cases.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            "the documented event table must cover exactly the documented form DSL elements"
+        );
+
+        for (key, kind) in cases {
+            let expected = if kind.allowed_events().is_empty() {
+                "—".to_string()
+            } else {
+                kind.allowed_events()
+                    .iter()
+                    .map(|event| format!("`{event}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let prefix = format!("| `{key}` | ");
+            let documented = section
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .and_then(|value| value.strip_suffix(" |"))
+                .expect("documented form element event row must be present");
+
+            assert_eq!(documented, expected, "event list for `{key}`");
+        }
+    }
+
+    #[test]
     fn rejects_empty_handler() {
         let error = validate_event(
             &regular_context(MainAttributeKind::Other),
