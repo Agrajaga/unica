@@ -1820,6 +1820,32 @@ mod metadata_kind_consumer_tests {
     }
 
     #[test]
+    fn child_object_insertion_preserves_cr_only_line_boundaries() {
+        let mut xml = concat!(
+            "<MetaDataObject>\r",
+            "\t<Configuration>\r",
+            "\t\t<ChildObjects>\r",
+            "\t\t\t<Catalog>Items</Catalog>\r",
+            "\t\t</ChildObjects>\r",
+            "\t</Configuration>\r",
+            "</MetaDataObject>"
+        )
+        .to_string();
+
+        assert!(cf_edit_add_child_object_text(&mut xml, "Role", "Reader").unwrap());
+
+        assert!(
+            xml.contains(concat!(
+                "\t\t\t<Role>Reader</Role>\r",
+                "\t\t\t<Catalog>Items</Catalog>\r",
+                "\t\t</ChildObjects>"
+            )),
+            "{xml:?}"
+        );
+        assert!(!xml.contains('\n'));
+    }
+
+    #[test]
     fn child_object_insertion_targets_only_the_root_metadata_child_objects() {
         let mut xml = concat!(
             "\u{feff}<MetaDataObject>\r\n",
@@ -2416,7 +2442,7 @@ fn cf_edit_root_child_objects(
     for child in child_objects.children().filter(|node| node.is_element()) {
         let raw_range = child.range();
         let range = (source_offset + raw_range.start)..(source_offset + raw_range.end);
-        let line_start = text[..range.start].rfind('\n').map_or(0, |pos| pos + 1);
+        let line_start = cf_edit_line_start(text, range.start);
         let prefix_is_indent = text[line_start..range.start]
             .chars()
             .all(|ch| ch == '\t' || ch == ' ');
@@ -2427,7 +2453,7 @@ fn cf_edit_root_child_objects(
         };
         let end = if text[range.end..].starts_with("\r\n") {
             range.end + 2
-        } else if text[range.end..].starts_with('\n') {
+        } else if matches!(text[range.end..].chars().next(), Some('\n' | '\r')) {
             range.end + 1
         } else {
             range.end
@@ -2443,13 +2469,19 @@ fn cf_edit_root_child_objects(
 }
 
 pub(crate) fn cf_edit_line_indent(text: &str, index: usize) -> Option<String> {
-    let line_start = text[..index].rfind('\n').map_or(0, |pos| pos + 1);
+    let line_start = cf_edit_line_start(text, index);
     let indent = &text[line_start..index];
     if indent.chars().all(|ch| ch == '\t' || ch == ' ') {
         Some(indent.to_string())
     } else {
         None
     }
+}
+
+fn cf_edit_line_start(text: &str, index: usize) -> usize {
+    text[..index]
+        .rfind(['\r', '\n'])
+        .map_or(0, |position| position + 1)
 }
 
 pub(crate) fn cf_edit_child_name_key(value: &str) -> String {
@@ -2560,7 +2592,7 @@ pub(crate) fn cf_edit_add_child_object_text(
         return Ok(true);
     };
 
-    let close_line_start = text[..body_end].rfind('\n').map_or(body_end, |pos| pos + 1);
+    let close_line_start = cf_edit_line_start(text, body_end);
     let close_indent = if text[close_line_start..body_end]
         .chars()
         .all(|ch| ch == '\t' || ch == ' ')

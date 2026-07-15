@@ -1458,6 +1458,50 @@ mod tests {
     }
 
     #[test]
+    fn appended_registration_preserves_cr_only_line_boundaries() {
+        let root = temp_root("cr-only-append");
+        let config = root.join("Configuration.xml");
+        fs::write(
+            &config,
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r",
+                "<MetaDataObject>\r",
+                "\t<Configuration>\r",
+                "\t\t<ChildObjects>\r",
+                "\t\t\t<Catalog>Items</Catalog>\r",
+                "\t\t</ChildObjects>\r",
+                "\t</Configuration>\r",
+                "</MetaDataObject>"
+            ),
+        )
+        .expect("fixture must be written");
+        let mut transaction = CompileTransaction::new();
+
+        assert_eq!(
+            transaction
+                .register_canonical_child(&config, "Document", "Orders")
+                .expect("registration must plan"),
+            RegistrationStatus::Added
+        );
+        transaction.commit().expect("transaction must commit");
+
+        let actual = String::from_utf8(fs::read(&config).expect("configuration must be readable"))
+            .expect("configuration must remain UTF-8");
+        assert!(
+            actual.contains(concat!(
+                "\t\t\t<Catalog>Items</Catalog>\r",
+                "\t\t\t<Document>Orders</Document>\r",
+                "\t\t</ChildObjects>"
+            )),
+            "{actual:?}"
+        );
+        assert!(!actual.contains("\r\r\t\t</ChildObjects>"), "{actual:?}");
+        assert!(!actual.contains('\n'));
+        assert!(transaction_debris(&root).is_empty());
+        fs::remove_dir_all(root).expect("temporary root must be removed");
+    }
+
+    #[test]
     fn already_present_registration_commits_as_a_byte_for_byte_noop() {
         let root = temp_root("registration-noop");
         let config = root.join("Configuration.xml");
