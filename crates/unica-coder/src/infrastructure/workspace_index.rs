@@ -1,3 +1,4 @@
+use crate::domain::source_roots::resolve_source_root;
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
 use crate::infrastructure::plugin_runtime::find_plugin_root;
@@ -149,13 +150,15 @@ impl<'a> WorkspaceIndexService<'a> {
             return IndexStartReport::default();
         }
 
-        let Some(source_root) = resolve_source_root(context, args) else {
-            let _ = write_status(
-                context,
-                BslIndexStatus::unavailable("could not resolve 1C source root", None),
-            );
-            return IndexStartReport::default();
-        };
+        let source_root =
+            match resolve_source_root(context, args.get("sourceDir").and_then(Value::as_str)) {
+                Ok(resolved) => resolved.path,
+                Err(error) => {
+                    let _ =
+                        write_status(context, BslIndexStatus::unavailable(error.as_str(), None));
+                    return IndexStartReport::default();
+                }
+            };
 
         if active_lock(context, &source_root) {
             return IndexStartReport {
@@ -228,9 +231,11 @@ impl<'a> WorkspaceIndexService<'a> {
         context: &WorkspaceContext,
         args: &Map<String, Value>,
     ) -> IndexReadiness {
-        let Some(source_root) = resolve_source_root(context, args) else {
-            return IndexReadiness::Unavailable("could not resolve 1C source root".to_string());
-        };
+        let source_root =
+            match resolve_source_root(context, args.get("sourceDir").and_then(Value::as_str)) {
+                Ok(resolved) => resolved.path,
+                Err(error) => return IndexReadiness::Unavailable(error),
+            };
 
         if active_lock(context, &source_root) {
             return IndexReadiness::Building;
@@ -1082,51 +1087,6 @@ fn write_status_path(path: &Path, status: BslIndexStatus) -> Result<(), String> 
         .map_err(|error| format!("failed to write RLM index status: {error}"))
 }
 
-fn resolve_source_root(context: &WorkspaceContext, args: &Map<String, Value>) -> Option<PathBuf> {
-    for key in ["sourceDir", "path"] {
-        if let Some(value) = args.get(key).and_then(Value::as_str) {
-            let candidate = resolve_path(&context.cwd, value);
-            if looks_like_1c_source_root(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-
-    [
-        context.workspace_root.join("src"),
-        context.workspace_root.join("src").join("cf"),
-        context.workspace_root.clone(),
-    ]
-    .into_iter()
-    .find(|candidate| looks_like_1c_source_root(candidate))
-}
-
-fn resolve_path(cwd: &Path, value: &str) -> PathBuf {
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        path
-    } else {
-        cwd.join(path)
-    }
-}
-
-fn looks_like_1c_source_root(path: &Path) -> bool {
-    if !path.is_dir() {
-        return false;
-    }
-    let source_dirs = [
-        "CommonModules",
-        "Catalogs",
-        "Documents",
-        "DataProcessors",
-        "Reports",
-        "InformationRegisters",
-        "AccumulationRegisters",
-    ];
-    path.join("Configuration.xml").is_file()
-        || source_dirs.iter().any(|name| path.join(name).is_dir())
-}
-
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1162,6 +1122,40 @@ mod tests {
         assert!(report.warnings.is_empty());
         assert!(runner.commands.borrow().is_empty());
         assert!(!status_path(&context).exists());
+        cleanup(&context);
+    }
+
+    #[test]
+    fn multi_source_set_uses_main_configuration_root_for_rlm_commands() {
+        let context = test_context("multi-source-set");
+        fs::write(
+            context.workspace_root.join("v8project.yaml"),
+            r#"
+source-set:
+  - name: main
+    type: CONFIGURATION
+    path: src/cf
+  - name: TESTS
+    type: EXTENSION
+    path: exts/TESTS
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(context.workspace_root.join("src/cf")).unwrap();
+        fs::write(
+            context.workspace_root.join("src/cf/Configuration.xml"),
+            "<MetaDataObject/>",
+        )
+        .unwrap();
+        let runner = RecordingIndexRunner::default();
+        let service = WorkspaceIndexService::with_runner(&runner);
+
+        service.start_for_workspace(&context, &Map::new(), false);
+
+        assert_eq!(
+            PathBuf::from(&runner.commands.borrow()[0].args[2]),
+            context.workspace_root.join("src").join("cf")
+        );
         cleanup(&context);
     }
 
@@ -1748,6 +1742,11 @@ mod tests {
     fn test_context(name: &str) -> WorkspaceContext {
         let root = std::env::temp_dir().join(format!("unica-index-{name}-{}", now_nanos()));
         fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("v8project.yaml"),
+            "source-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        )
+        .unwrap();
         create_fake_plugin_root(&root);
         WorkspaceContext {
             cwd: root.clone(),

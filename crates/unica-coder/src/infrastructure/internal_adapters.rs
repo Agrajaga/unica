@@ -1,3 +1,4 @@
+use crate::domain::source_roots::resolve_source_root;
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
 use crate::infrastructure::plugin_runtime::{find_plugin_root, value_to_cli_string};
@@ -1985,13 +1986,8 @@ fn resolve_source_dir(
     context: &WorkspaceContext,
     args: &Map<String, Value>,
 ) -> Result<PathBuf, String> {
-    match args.get("sourceDir").and_then(Value::as_str) {
-        Some(raw) => {
-            let rel = safe_workspace_rel(context, raw)?;
-            Ok(context.workspace_root.join(rel))
-        }
-        None => Ok(context.cwd.clone()),
-    }
+    resolve_source_root(context, args.get("sourceDir").and_then(Value::as_str))
+        .map(|resolved| resolved.path)
 }
 
 fn bsl_mcp_readiness_warnings(text: &str) -> Vec<String> {
@@ -4038,6 +4034,35 @@ mod tests {
     }
 
     #[test]
+    fn multi_source_set_resolve_source_dir_selects_main_configuration_root() {
+        let context = temp_context("multi-source-set");
+        fs::write(
+            context.workspace_root.join("v8project.yaml"),
+            r#"
+source-set:
+  - name: main
+    type: CONFIGURATION
+    path: src/cf
+  - name: TESTS
+    type: EXTENSION
+    path: exts/TESTS
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(context.workspace_root.join("src/cf")).unwrap();
+        fs::write(
+            context.workspace_root.join("src/cf/Configuration.xml"),
+            "<MetaDataObject/>",
+        )
+        .unwrap();
+
+        let selected = resolve_source_dir(&context, &Map::new()).unwrap();
+
+        assert_eq!(selected, context.workspace_root.join("src/cf"));
+        cleanup_context(&context);
+    }
+
+    #[test]
     fn diagnostics_analyze_normalizes_json_format_and_keeps_limit_out_of_cli_args() {
         let context = temp_context("diagnostics-format-dry-run");
         let mut args = Map::new();
@@ -4620,6 +4645,11 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("unica-code-search-{name}-{nanos}"));
         fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("v8project.yaml"),
+            "source-set:\n  - name: main\n    type: CONFIGURATION\n    path: .\n",
+        )
+        .unwrap();
         create_fake_plugin_root(&root);
         WorkspaceContext {
             cwd: root.clone(),
