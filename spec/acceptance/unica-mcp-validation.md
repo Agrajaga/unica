@@ -161,9 +161,18 @@ provided by the plugin, not stale cached MCP registrations.
 - Analyzer and RLM work requests carry unique internal operation IDs. A public
   `notifications/cancelled` request must propagate to the matching operation and
   return JSON-RPC error `-32800` exactly once.
+- EOF gives accepted MCP workers 250 ms to publish, then cancels them and waits
+  at most 2 seconds more. After that bounded deadline the publication gate is
+  closed, so a non-cooperative late worker cannot emit a response after server
+  return. Verify with `cargo test -p unica-coder mcp_dispatcher_closes_publication`.
 - `ping`, cancellation, and shutdown must remain responsive while analyzer or
   RLM work is active. Cancelling one request must not require restarting the
   service before a later request succeeds.
+- A work connector request has one 120-second aggregate budget for connect, write, flush, and read.
+  Every control request has one 500 ms aggregate budget across those phases.
+  Reads poll at 100 ms intervals, and
+  cancellation takes precedence over timeout, EOF, protocol, and successful
+  process-exit races. Verify with `cargo test -p unica-coder cancellable_connector`.
 - Shutdown and client disconnect cancel owned operations and boundedly clean up
   their child process trees. On Windows this guarantee is implemented by
   suspended start followed by Job Object assignment; on Unix by a dedicated

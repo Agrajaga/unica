@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
-import os
+import json
 import re
 import sqlite3
 import tempfile
@@ -68,16 +68,38 @@ class ProductContractTests(unittest.TestCase):
         self.assertIn("permanent local-tool exception", text)
 
     def write_executable(self, tools_dir: Path, name: str, body: str) -> None:
-        if os.name == "nt":
-            path = tools_dir / f"{name}.cmd"
-            outputs = re.findall(r"printf '%s\\n' '([^']*)'", body)
-            path.write_text(
-                "@echo off\n" + "\n".join(f"echo {output}" for output in outputs) + "\n",
-                encoding="utf-8",
+        commands = {
+            "bsl-analyzer": [("analyze", "--help"), ("mcp", "serve", "--help")],
+            "rlm-bsl-index": [
+                ("index", "build", "--help"),
+                ("index", "update", "--help"),
+                ("index", "info", "--help"),
+            ],
+            "rlm-tools-bsl": [("--help",)],
+            "v8-runner": [("--version",), ("build", "--help")],
+        }[name]
+        routed_outputs = {
+            tuple(route.split()): output
+            for route, output in re.findall(
+                r"'([^']+)'\) printf '%s\\n' '([^']*)'",
+                body,
             )
-        else:
-            path = tools_dir / name
-            path.write_text(body, encoding="utf-8")
+        }
+        fallback_outputs = re.findall(r"printf '%s\\n' '([^']*)'", body)
+        fallback = fallback_outputs[0] if fallback_outputs else ""
+        routes = {" ".join(command): routed_outputs.get(command, fallback) for command in commands}
+        path = tools_dir / f"{name}.py"
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "import sys\n"
+            f"ROUTES = json.loads({json.dumps(json.dumps(routes))})\n"
+            "key = ' '.join(sys.argv[1:])\n"
+            "if key not in ROUTES:\n"
+            "    raise SystemExit(1)\n"
+            "print(ROUTES[key])\n",
+            encoding="utf-8",
+        )
         path.chmod(path.stat().st_mode | 0o755)
 
     def test_tool_help_contracts_pass_with_expected_cli_surface(self) -> None:
@@ -157,6 +179,63 @@ class ProductContractTests(unittest.TestCase):
             errors = module.check_tool_contracts(tools_dir)
 
         self.assertTrue(any("--source-dir" in error for error in errors), errors)
+
+    def test_analyze_help_cannot_borrow_tokens_from_mcp_serve_help(self) -> None:
+        module = load_contract_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tools_dir = Path(tmp)
+            self.write_executable(
+                tools_dir,
+                "bsl-analyzer",
+                "#!/usr/bin/env sh\n"
+                "case \"$*\" in\n"
+                "  'analyze --help') printf '%s\\n' '--format jsonl' ;;\n"
+                "  'mcp serve --help') printf '%s\\n' '--profile --source-dir --mode stdio' ;;\n"
+                "  *) exit 1 ;;\n"
+                "esac\n",
+            )
+            self.write_executable(
+                tools_dir,
+                "rlm-bsl-index",
+                "#!/usr/bin/env sh\nprintf '%s\\n' 'index build update info'\n",
+            )
+            self.write_executable(
+                tools_dir,
+                "rlm-tools-bsl",
+                "#!/usr/bin/env sh\nprintf '%s\\n' '--transport stdio streamable-http service'\n",
+            )
+            self.write_executable(
+                tools_dir,
+                "v8-runner",
+                "#!/usr/bin/env sh\nprintf '%s\\n' 'v8-runner version build'\n",
+            )
+
+            errors = module.check_tool_contracts(tools_dir)
+
+        self.assertTrue(
+            any("bsl-analyzer analyze" in error and "--source-dir" in error for error in errors),
+            errors,
+        )
+
+    def test_runtime_docs_define_aggregate_workspace_service_budgets(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        runtime = (repo_root / "spec" / "architecture" / "arc42" / "06-runtime-view.md").read_text(
+            encoding="utf-8"
+        )
+        acceptance = (repo_root / "spec" / "acceptance" / "unica-mcp-validation.md").read_text(
+            encoding="utf-8"
+        )
+        adr = (repo_root / "spec" / "decisions" / "0006-workspace-scoped-internal-services.md").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (runtime, acceptance, adr):
+            self.assertIn("120-second aggregate budget", text)
+            self.assertIn("500 ms aggregate budget", text)
+            self.assertIn("connect, write, flush, and read", text)
+            self.assertIn("cancellation takes precedence", text)
+            self.assertIn("100 ms", text)
 
     def test_tool_help_contracts_report_missing_rlm_server_transport_surface(self) -> None:
         module = load_contract_module()

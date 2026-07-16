@@ -61,11 +61,10 @@ fn run_stdio_with_handler<R, W>(
         let message = match serde_json::from_str::<Value>(&line) {
             Ok(message) => message,
             Err(err) => {
-                if !write_response(
+                if !registry.publish(
                     &writer,
                     error_response(Value::Null, -32700, &format!("parse error: {err}")),
                 ) {
-                    registry.fail();
                     break;
                 }
                 continue;
@@ -91,8 +90,7 @@ fn run_stdio_with_handler<R, W>(
         }
 
         if let Some(response) = handle_message(&app, message) {
-            if !write_response(&writer, response) {
-                registry.fail();
+            if !registry.publish(&writer, response) {
                 break;
             }
         }
@@ -100,8 +98,8 @@ fn run_stdio_with_handler<R, W>(
 
     let drained = registry.wait_for_workers(EOF_DRAIN_GRACE);
     registry.cancel_all();
-    if !drained {
-        registry.wait_for_workers(EOF_CANCELLATION_GRACE);
+    if !drained && !registry.wait_for_workers(EOF_CANCELLATION_GRACE) {
+        registry.close();
     }
 }
 
@@ -115,17 +113,13 @@ fn dispatch_tool_call<W: Write + Send + 'static>(
     let cancellation = match registry.register(&id) {
         Ok(cancellation) => cancellation,
         Err(message) => {
-            if !write_response(&writer, error_response(id, -32600, &message)) {
-                registry.fail();
-            }
+            registry.publish(&writer, error_response(id, -32600, &message));
             return false;
         }
     };
     if let Err(message) = registry.worker_started() {
         registry.finish(&id);
-        if !write_response(&writer, error_response(id, -32603, &message)) {
-            registry.fail();
-        }
+        registry.publish(&writer, error_response(id, -32603, &message));
         return false;
     }
 
@@ -149,9 +143,7 @@ fn dispatch_tool_call<W: Write + Send + 'static>(
             }
         };
 
-        if !write_response(&writer, response) {
-            registry.fail();
-        }
+        registry.publish(&writer, response);
     });
     true
 }
@@ -167,6 +159,7 @@ fn write_response<W: Write>(writer: &Arc<Mutex<W>>, response: Value) -> bool {
 pub struct CancellationRegistry {
     state: Arc<Mutex<CancellationRegistryState>>,
     workers: Arc<(Mutex<usize>, Condvar)>,
+    publication_closed: Arc<Mutex<bool>>,
 }
 
 #[derive(Default)]
@@ -267,7 +260,34 @@ impl CancellationRegistry {
         true
     }
 
+    fn publish<W: Write>(&self, writer: &Arc<Mutex<W>>, response: Value) -> bool {
+        let Ok(mut closed) = self.publication_closed.lock() else {
+            return false;
+        };
+        if *closed {
+            return false;
+        }
+        if write_response(writer, response) {
+            return true;
+        }
+        *closed = true;
+        drop(closed);
+        self.fail_state();
+        false
+    }
+
+    fn close(&self) {
+        self.fail();
+    }
+
     fn fail(&self) {
+        if let Ok(mut closed) = self.publication_closed.lock() {
+            *closed = true;
+        }
+        self.fail_state();
+    }
+
+    fn fail_state(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.failed = true;
             for cancellation in state.requests.values() {
@@ -764,6 +784,74 @@ mod tests {
             responses[0]["result"]["content"][0]["text"],
             "completed before EOF grace expired"
         );
+    }
+
+    #[test]
+    fn mcp_dispatcher_closes_publication_after_bounded_eof_cancellation() {
+        let (sender, receiver) = mpsc::channel();
+        let writer = SharedWriter::default();
+        let output = writer.clone();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let release_for_handler = Arc::clone(&release);
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_for_handler = Arc::clone(&finished);
+        let handler = Arc::new(
+            move |_: &str, _: &Map<String, Value>, _: CancellationToken| {
+                let (released, changed) = &*release_for_handler;
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                finished_for_handler.store(true, Ordering::SeqCst);
+                Ok("late result must not publish".to_string())
+            },
+        );
+        let dispatcher = thread::spawn(move || {
+            run_stdio_with_handler(
+                BufReader::new(ChannelReader::new(receiver)),
+                writer,
+                Arc::new(UnicaApplication::new()),
+                handler,
+            )
+        });
+
+        send_message(
+            &sender,
+            json!({ "jsonrpc": "2.0", "id": "stuck", "method": "tools/call", "params": { "name": "unica.code.search", "arguments": {} } }),
+        );
+        drop(sender);
+        let started = Instant::now();
+        dispatcher.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(output.responses().is_empty());
+
+        let (released, changed) = &*release;
+        *released.lock().unwrap() = true;
+        changed.notify_all();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !finished.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "late worker did not finish");
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(20));
+        assert!(
+            output.responses().is_empty(),
+            "late response escaped terminal gate"
+        );
+    }
+
+    #[test]
+    fn terminal_registry_rejects_new_work_and_publication() {
+        let registry = CancellationRegistry::default();
+        let writer = SharedWriter::default();
+        let output = writer.clone();
+        let writer = Arc::new(Mutex::new(writer));
+
+        registry.close();
+
+        assert!(registry.register(&json!("late")).is_err());
+        assert!(!registry.publish(&writer, success_response(json!("late"), json!({}))));
+        assert!(output.responses().is_empty());
     }
 
     #[test]

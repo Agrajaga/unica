@@ -65,6 +65,10 @@ Unica may start hidden internal services scoped by workspace and source root.
     authority. Package and executable-interface contract tests read the selected
     version from that lock; they do not duplicate a `bsl-analyzer` version
     literal in CI assertions.
+15. Internal work requests use one 120-second aggregate budget for connect, write, flush, and read;
+    control requests use one 500 ms aggregate budget
+    over the same phases. Reads poll every 100 ms, and cancellation takes precedence over timeout,
+    EOF, protocol, and successful process-exit races.
 
 ## Неграницы
 

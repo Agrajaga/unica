@@ -25,8 +25,11 @@
    token is propagated through the application ports, CLI/index commands, and
    the workspace-service connector.
 4. A cancelled request emits at most one response: JSON-RPC error `-32800` with
-   message `request cancelled`. EOF or response-writer failure cancels all
-   active requests.
+   message `request cancelled`. On EOF, already accepted workers get a 250 ms
+   publication grace, then are cancelled and get up to 2 seconds to publish a
+   terminal response. The publication gate then closes; a non-cooperative late
+   worker cannot write after the stdio handler returns. Response-writer failure
+   also closes the gate and cancels all active requests.
 
 ## Mutating Dry Run
 
@@ -80,11 +83,16 @@ state and, in future slices, trigger lazy refresh if a required cache is stale.
 9. MCP cancellation causes the connector to send `cancel { operation_id }` on a
    separate connection. A disconnected work socket also cancels its operation.
    An operation guard removes the ID on every completion path, so the next call
-   does not require a service restart.
-10. Shutdown marks the runtime unavailable, cancels all active operations,
+    does not require a service restart.
+10. A work request has one 120-second aggregate budget measured from the start
+    of connect through connect, write, flush, and read. Control requests use one
+    500 ms aggregate budget across the same phases. Socket reads poll every
+    100 ms so cancellation can be observed; cancellation takes precedence over
+    timeout, EOF, protocol, and successful process-exit races.
+11. Shutdown marks the runtime unavailable, cancels all active operations,
     rejects new work, removes the service record it owns, and drains handlers
     within the configured grace period.
-11. Persistent analyzer and RLM subprocesses use `ManagedChild`. Windows starts
+12. Persistent analyzer and RLM subprocesses use `ManagedChild`. Windows starts
     each process suspended, assigns it to a kill-on-close Job Object, then
     resumes it; Unix creates a dedicated process group. Cancellation, timeout,
     and drop terminate the whole tree with bounded waits. Platforms other than

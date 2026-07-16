@@ -7,6 +7,7 @@ import argparse
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -71,7 +72,10 @@ RLM_REQUIRED_META = {
 
 
 def run_command(command: list[str], cwd: Path) -> tuple[int, str]:
-    if os.name == "nt" and Path(command[0]).suffix.lower() in {".bat", ".cmd"}:
+    suffix = Path(command[0]).suffix.lower()
+    if suffix == ".py":
+        command = [sys.executable, *command]
+    elif os.name == "nt" and suffix in {".bat", ".cmd"}:
         command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", *command]
     result = subprocess.run(
         command,
@@ -107,7 +111,7 @@ def tool_executable(tools_dir: Path, tool_name: str, target: str | None) -> Path
     if exe_candidate.exists():
         return exe_candidate
     if target is None:
-        for script_suffix in (".cmd", ".bat"):
+        for script_suffix in (".py", ".cmd", ".bat"):
             script_candidate = tools_dir / f"{tool_name}{script_suffix}"
             if script_candidate.exists():
                 return script_candidate

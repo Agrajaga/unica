@@ -4358,15 +4358,14 @@ def run_python_script(
     *,
     skills_root: Path = REFERENCE_SKILLS_ROOT,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    result = subprocess.run(
         command_for_script(skill, script, arguments, skills_root=skills_root),
         cwd=workspace,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
         check=False,
     )
+    return decoded_completed_process(result)
 
 
 def run_cc_python_script(
@@ -4628,14 +4627,29 @@ def run_reference_skill_raw(
 ) -> subprocess.CompletedProcess[str]:
     skill, script = cc_script_skill_and_script(script_rel)
     script_path = REFERENCE_SKILLS_ROOT / skill / "scripts" / script
-    return subprocess.run(
+    result = subprocess.run(
         ["python3", str(script_path), *args],
         cwd=workspace,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
         check=False,
+    )
+    return decoded_completed_process(result)
+
+
+def decoded_completed_process(
+    result: subprocess.CompletedProcess[bytes],
+) -> subprocess.CompletedProcess[str]:
+    def decode(data: bytes) -> str:
+        if os.name == "nt":
+            data = data.replace(b"\r\r\n", b"\r\n")
+        return data.decode("utf-8")
+
+    return subprocess.CompletedProcess(
+        result.args,
+        result.returncode,
+        stdout=decode(result.stdout),
+        stderr=decode(result.stderr),
     )
 
 
@@ -4809,7 +4823,7 @@ def normalize_command(command: list[str], workspace: Path) -> list[str]:
 
 
 def normalize_text(text: str, workspace: Path) -> str:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = text.replace("\r\r\n", "\r\n").replace("\r\n", "\n").replace("\r", "\n")
     normalized = normalized.replace(str(workspace.resolve()), "<WORKSPACE>")
     normalized = normalized.replace(str(workspace), "<WORKSPACE>")
     normalized = normalized.replace(str(REPO_ROOT), "<REPO>")
@@ -4820,12 +4834,20 @@ def normalize_text(text: str, workspace: Path) -> str:
         normalized = normalized.replace(r"\\?\<WORKSPACE>", "<WORKSPACE>")
         normalized = normalized.replace(r"\\?\<REPO>", "<REPO>")
         normalized = re.sub(
-            r"<(?:WORKSPACE|REPO)>[^\n\"']*",
+            r"<(?:WORKSPACE|REPO)>[^\s\"']*",
             lambda match: match.group(0).replace("\\", "/"),
             normalized,
         )
-        normalized = normalized.replace("\\", "/")
-        normalized = re.sub(r"\n[ \t]*\n+", "\n", normalized)
+        normalized = re.sub(
+            r"(?<![\w.-])(?:src(?:-cfe)?|exts|[.]build)\\[^\s\"'<>]+",
+            lambda match: match.group(0).replace("\\", "/"),
+            normalized,
+        )
+        normalized = re.sub(
+            r"(?m)^(?P<label>[ \t]*(?:File|Module|Output|Path|Config|Configuration):[ \t]+)(?P<path>[^\r\n]+)$",
+            lambda match: match.group("label") + match.group("path").replace("\\", "/"),
+            normalized,
+        )
     normalized = re.sub(
         r"<REPO>/tests/fixtures/unica_mcp_script_parity/reference_skills/([^/\s\"']+)/scripts/([^/\s\"']+)",
         r"<REPO>/<SKILL_SCRIPT>/\1/\2",
@@ -4841,18 +4863,54 @@ def normalize_text(text: str, workspace: Path) -> str:
 
 
 def normalize_snapshot_text(text: str, workspace: Path) -> str:
-    normalized = normalize_text(text.replace("&#13;", ""), workspace)
-    if os.name == "nt":
-        terminal_newline = normalized.endswith("\n")
-        normalized = "\n".join(line for line in normalized.splitlines() if line.strip())
-        if terminal_newline:
-            normalized += "\n"
+    normalized = normalize_text(
+        text.replace("&#13;\r\n", "\r\n").replace("&#13;\n", "\n"),
+        workspace,
+    )
     return re.sub(
         r'(<\?xml\s+version="1\.0"\s+encoding=")utf-8(")',
         r"\1UTF-8\2",
         normalized,
         count=1,
     )
+
+
+class WindowsParityNormalizationTests(unittest.TestCase):
+    def test_non_path_backslashes_remain_significant(self) -> None:
+        workspace = Path("C:/parity-workspace")
+
+        self.assertNotEqual(normalize_text(r"a\b", workspace), normalize_text("a/b", workspace))
+
+    def test_blank_lines_remain_significant(self) -> None:
+        workspace = Path("C:/parity-workspace")
+
+        self.assertNotEqual(normalize_text("first\n\nsecond\n", workspace), normalize_text("first\nsecond\n", workspace))
+
+    @unittest.skipUnless(os.name == "nt", "Windows text-mode newline artifact")
+    def test_subprocess_decode_removes_only_doubled_carriage_return(self) -> None:
+        doubled = subprocess.CompletedProcess([], 0, stdout=b"first\r\r\nsecond", stderr=b"")
+        real_blank = subprocess.CompletedProcess([], 0, stdout=b"first\r\n\r\nsecond", stderr=b"")
+
+        self.assertEqual(decoded_completed_process(doubled).stdout, "first\r\nsecond")
+        self.assertEqual(decoded_completed_process(real_blank).stdout, "first\r\n\r\nsecond")
+
+    @unittest.skipUnless(os.name == "nt", "Windows path separator equivalence")
+    def test_known_workspace_paths_normalize_separators(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unica-normalize-path-") as tmp:
+            workspace = Path(tmp)
+            windows_path = f"output={workspace}\\src\\Template.xml"
+            slash_path = f"output={workspace.as_posix()}/src/Template.xml"
+
+            self.assertEqual(normalize_text(windows_path, workspace), normalize_text(slash_path, workspace))
+
+    @unittest.skipUnless(os.name == "nt", "Windows path field equivalence")
+    def test_documented_path_fields_normalize_separators(self) -> None:
+        workspace = Path("C:/parity-workspace")
+
+        self.assertEqual(
+            normalize_text("     File: .\\Catalogs\\Item.xml\n", workspace),
+            normalize_text("     File: ./Catalogs/Item.xml\n", workspace),
+        )
 
 
 def snapshot_workspace(workspace: Path) -> dict[str, str]:
