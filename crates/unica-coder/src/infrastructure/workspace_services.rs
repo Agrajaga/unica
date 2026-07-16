@@ -22,6 +22,7 @@ const DEFAULT_IDLE_SECS: u64 = 7200;
 const DEFAULT_MAX_AGE_SECS: u64 = 28800;
 const SERVICE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVICE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const BSL_DIAGNOSTICS_WARMUP_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVICE_SPAWN_LOCK_STALE_SECS: u64 = 30;
 
 static SYSTEM_SERVICE_CONNECTOR: SystemServiceConnector = SystemServiceConnector;
@@ -186,6 +187,7 @@ impl<'a> WorkspaceServiceManager<'a> {
         Ok(WorkspaceServiceBslOutput {
             result_text: response.result_text.unwrap_or_default(),
             stderr: response.stderr.unwrap_or_default(),
+            warnings: response.warnings,
         })
     }
 
@@ -505,6 +507,7 @@ impl WorkspaceServiceState {
                 ok: true,
                 result_text: Some(output.result_text),
                 stderr: Some(output.stderr),
+                warnings: output.warnings,
                 ..ServiceResponse::default()
             },
             Err(error) => {
@@ -657,6 +660,7 @@ impl ServiceResponse {
 pub struct WorkspaceServiceBslOutput {
     pub result_text: String,
     pub stderr: String,
+    pub warnings: Vec<String>,
 }
 
 struct BslMcpSession {
@@ -666,6 +670,7 @@ struct BslMcpSession {
     stdout_reader: Option<thread::JoinHandle<()>>,
     stderr_text: Arc<Mutex<String>>,
     next_id: i64,
+    diagnostics_warmup_attempted: bool,
 }
 
 impl BslMcpSession {
@@ -764,6 +769,7 @@ impl BslMcpSession {
             stdout_reader: Some(stdout_reader),
             stderr_text,
             next_id: 2,
+            diagnostics_warmup_attempted: false,
         })
     }
 
@@ -783,12 +789,26 @@ impl BslMcpSession {
                 "method": "tools/call",
                 "params": {
                     "name": tool_name,
-                    "arguments": tool_args
+                    "arguments": tool_args.clone()
                 }
             }),
         )?;
         let response = read_json_response(&self.rx, id, timeout)?;
         let result_text = mcp_tool_text(&response)?;
+        let mut warnings = Vec::new();
+        if diagnostics_status_needs_warmup(
+            self.diagnostics_warmup_attempted,
+            tool_name,
+            &tool_args,
+            &result_text,
+        ) {
+            self.diagnostics_warmup_attempted = true;
+            self.start_diagnostics_initial_reload()?;
+            warnings.push(
+                "bsl-analyzer diagnostics initial reload has been started; retry status after it completes"
+                    .to_string(),
+            );
+        }
         let stderr = self
             .stderr_text
             .lock()
@@ -797,8 +817,48 @@ impl BslMcpSession {
         Ok(WorkspaceServiceBslOutput {
             result_text,
             stderr,
+            warnings,
         })
     }
+
+    fn start_diagnostics_initial_reload(&mut self) -> Result<(), String> {
+        let id = self.next_id;
+        self.next_id += 1;
+        send_json_line(
+            &mut self.stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "diagnostics",
+                    "arguments": { "action": "schema" }
+                }
+            }),
+        )?;
+        let response = read_json_response(&self.rx, id, BSL_DIAGNOSTICS_WARMUP_TIMEOUT)?;
+        mcp_tool_text(&response).map(|_| ())
+    }
+}
+
+fn diagnostics_status_needs_warmup(
+    warmup_attempted: bool,
+    tool_name: &str,
+    tool_args: &Value,
+    result_text: &str,
+) -> bool {
+    if warmup_attempted
+        || tool_name != "diagnostics"
+        || tool_args.get("action").and_then(Value::as_str) != Some("status")
+    {
+        return false;
+    }
+    let Ok(status) = serde_json::from_str::<Value>(result_text) else {
+        return false;
+    };
+    status.get("generation").and_then(Value::as_u64) == Some(0)
+        && status.get("reload").and_then(Value::as_str) == Some("none")
+        && status.get("state").and_then(Value::as_str) == Some("loading")
 }
 
 impl Drop for BslMcpSession {
@@ -945,14 +1005,14 @@ fn hash_source_path(hasher: &mut DefaultHasher, path: &Path, depth: usize) {
         return;
     };
     path.display().to_string().hash(hasher);
-    metadata.len().hash(hasher);
-    if let Ok(modified) = metadata.modified() {
-        if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
-            duration.as_secs().hash(hasher);
-            duration.subsec_nanos().hash(hasher);
-        }
-    }
     if !metadata.is_dir() {
+        metadata.len().hash(hasher);
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                duration.as_secs().hash(hasher);
+                duration.subsec_nanos().hash(hasher);
+            }
+        }
         return;
     }
     let Ok(entries) = fs::read_dir(path) else {
@@ -962,11 +1022,14 @@ fn hash_source_path(hasher: &mut DefaultHasher, path: &Path, depth: usize) {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
-            path.is_dir()
-                || matches!(
-                    path.extension().and_then(|value| value.to_str()),
-                    Some("bsl" | "xml" | "yaml" | "yml")
-                )
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .is_none_or(|name| name != ".build")
+                && (path.is_dir()
+                    || matches!(
+                        path.extension().and_then(|value| value.to_str()),
+                        Some("bsl" | "xml" | "yaml" | "yml")
+                    ))
         })
         .collect::<Vec<_>>();
     paths.sort();
@@ -1147,6 +1210,23 @@ fn mcp_tool_text(response: &Value) -> Result<String, String> {
     let result = response
         .get("result")
         .ok_or_else(|| "bsl-analyzer MCP response is missing result".to_string())?;
+    if result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let message = result
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|content| {
+                content
+                    .iter()
+                    .filter_map(|item| item.get("text").and_then(Value::as_str))
+                    .next()
+            })
+            .unwrap_or("bsl-analyzer MCP tool returned an error");
+        return Err(message.to_string());
+    }
     if let Some(content) = result.get("content").and_then(Value::as_array) {
         let parts = content
             .iter()
@@ -1194,6 +1274,69 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn mcp_tool_text_rejects_tool_level_error() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "content": [{ "type": "text", "text": "schema is unavailable" }],
+                "isError": true
+            }
+        });
+
+        let error = mcp_tool_text(&response).unwrap_err();
+
+        assert_eq!(error, "schema is unavailable");
+    }
+
+    #[test]
+    fn diagnostics_status_warmup_is_one_shot_for_a_persistent_session() {
+        let status = "{\"generation\":0,\"reload\":\"none\",\"state\":\"loading\"}";
+        let arguments = json!({ "action": "status" });
+
+        assert!(diagnostics_status_needs_warmup(
+            false,
+            "diagnostics",
+            &arguments,
+            status,
+        ));
+        assert!(!diagnostics_status_needs_warmup(
+            true,
+            "diagnostics",
+            &arguments,
+            status,
+        ));
+        assert!(!diagnostics_status_needs_warmup(
+            false,
+            "diagnostics",
+            &json!({ "action": "file" }),
+            status,
+        ));
+    }
+
+    #[test]
+    fn source_generation_ignores_generated_build_cache_but_tracks_bsl_source() {
+        let context = test_context("source-generation");
+        let source_root = context.workspace_root.join("src");
+        let module = source_root.join("CommonModules/SmokeModule.bsl");
+        fs::write(&module, "Процедура Тест() Экспорт\nКонецПроцедуры\n").unwrap();
+        let baseline = source_generation(&source_root);
+
+        let generated = source_root.join(".build/bsl-graph.db");
+        fs::create_dir_all(generated.parent().unwrap()).unwrap();
+        fs::write(&generated, "generated cache").unwrap();
+        assert_eq!(source_generation(&source_root), baseline);
+
+        fs::write(
+            &module,
+            "Процедура Тест() Экспорт\n\tСообщить(\"Изменено\");\nКонецПроцедуры\n",
+        )
+        .unwrap();
+        assert_ne!(source_generation(&source_root), baseline);
+        cleanup(&context);
+    }
 
     #[test]
     fn service_identity_reuses_same_workspace_source_root_and_separates_other_roots() {

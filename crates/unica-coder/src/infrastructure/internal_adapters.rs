@@ -51,6 +51,7 @@ pub struct BslMcpCommand {
 pub struct BslMcpOutput {
     pub result_text: String,
     pub stderr: String,
+    pub warnings: Vec<String>,
 }
 
 pub trait BslMcpRunner {
@@ -1073,6 +1074,8 @@ impl<'a> BslAnalyzerMcpAdapter<'a> {
         }
 
         let output = self.runner.call(&command)?;
+        let mut warnings = bsl_mcp_readiness_warnings(&output.result_text);
+        warnings.extend(output.warnings.clone());
         let section = if command.tool_name == "graph" {
             "bsl-analyzer-graph"
         } else {
@@ -1082,7 +1085,7 @@ impl<'a> BslAnalyzerMcpAdapter<'a> {
             ok: true,
             summary: format!("{tool_name} completed through typed bsl-analyzer MCP adapter"),
             changes: Vec::new(),
-            warnings: bsl_mcp_readiness_warnings(&output.result_text),
+            warnings,
             errors: Vec::new(),
             artifacts: vec![
                 source_dir.display().to_string(),
@@ -2139,6 +2142,7 @@ impl BslMcpRunner for SystemBslMcpRunner {
         Ok(BslMcpOutput {
             result_text: output.result_text,
             stderr: output.stderr,
+            warnings: output.warnings,
         })
     }
 }
@@ -4069,6 +4073,7 @@ mod tests {
             output: BslMcpOutput {
                 result_text: "{\"action\":\"callers\",\"nodes\":[]}".to_string(),
                 stderr: String::new(),
+                warnings: Vec::new(),
             },
         };
         let mut args = Map::new();
@@ -4112,6 +4117,7 @@ mod tests {
             output: BslMcpOutput {
                 result_text: "{\"action\":\"file\",\"findings\":[]}".to_string(),
                 stderr: String::new(),
+                warnings: Vec::new(),
             },
         };
         let mut args = Map::new();
@@ -4152,6 +4158,7 @@ mod tests {
                 result_text: "{\"action\":\"status\",\"reload\":\"running\",\"state\":\"loading\"}"
                     .to_string(),
                 stderr: String::new(),
+                warnings: Vec::new(),
             },
         };
         let mut args = Map::new();
