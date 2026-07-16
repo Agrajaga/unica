@@ -1,5 +1,7 @@
 pub(crate) mod bundled_tools;
 pub mod internal_adapters;
+#[allow(dead_code)]
+pub mod managed_child;
 pub mod native_operations;
 pub mod path_policy;
 pub mod plugin_runtime;
