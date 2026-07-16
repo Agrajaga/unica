@@ -1,5 +1,8 @@
 # Issue #89 Search and Source Root Implementation Plan
 
+> **Historical execution record.** Current requirements live in code, tests,
+> package metadata, and `spec/`; this completed plan is retained for traceability.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove the invalid analyzer search backend and make every workspace analyzer/index operation choose the same deterministic 1C source root.

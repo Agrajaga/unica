@@ -4112,6 +4112,11 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
             temp_root = Path(temp)
             workspace = temp_root / "workspace"
             workspace.mkdir()
+            (workspace / "src" / "cf").mkdir(parents=True)
+            (workspace / "v8project.yaml").write_text(
+                "format: DESIGNER\nsource-set:\n  main:\n    type: CONFIGURATION\n    path: src/cf\n",
+                encoding="utf-8",
+            )
             messages = [
                 dry_run_message_for_example(example, index + 1, workspace)
                 for index, example in enumerate(examples)
@@ -4308,6 +4313,7 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
             cwd=REPO_ROOT,
             env=env,
             check=False,
@@ -4334,6 +4340,7 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
             cwd=REPO_ROOT,
             env=env,
             check=False,
@@ -4357,6 +4364,7 @@ def run_python_script(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 
@@ -4626,6 +4634,7 @@ def run_reference_skill_raw(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 
@@ -4804,6 +4813,19 @@ def normalize_text(text: str, workspace: Path) -> str:
     normalized = normalized.replace(str(workspace.resolve()), "<WORKSPACE>")
     normalized = normalized.replace(str(workspace), "<WORKSPACE>")
     normalized = normalized.replace(str(REPO_ROOT), "<REPO>")
+    if os.name == "nt":
+        normalized = normalized.replace(str(workspace.resolve()).replace("\\", "/"), "<WORKSPACE>")
+        normalized = normalized.replace(str(workspace).replace("\\", "/"), "<WORKSPACE>")
+        normalized = normalized.replace(str(REPO_ROOT).replace("\\", "/"), "<REPO>")
+        normalized = normalized.replace(r"\\?\<WORKSPACE>", "<WORKSPACE>")
+        normalized = normalized.replace(r"\\?\<REPO>", "<REPO>")
+        normalized = re.sub(
+            r"<(?:WORKSPACE|REPO)>[^\n\"']*",
+            lambda match: match.group(0).replace("\\", "/"),
+            normalized,
+        )
+        normalized = normalized.replace("\\", "/")
+        normalized = re.sub(r"\n[ \t]*\n+", "\n", normalized)
     normalized = re.sub(
         r"<REPO>/tests/fixtures/unica_mcp_script_parity/reference_skills/([^/\s\"']+)/scripts/([^/\s\"']+)",
         r"<REPO>/<SKILL_SCRIPT>/\1/\2",
@@ -4819,8 +4841,12 @@ def normalize_text(text: str, workspace: Path) -> str:
 
 
 def normalize_snapshot_text(text: str, workspace: Path) -> str:
-    normalized = normalize_text(text, workspace)
-    normalized = normalized.replace("&#13;\n", "\n")
+    normalized = normalize_text(text.replace("&#13;", ""), workspace)
+    if os.name == "nt":
+        terminal_newline = normalized.endswith("\n")
+        normalized = "\n".join(line for line in normalized.splitlines() if line.strip())
+        if terminal_newline:
+            normalized += "\n"
     return re.sub(
         r'(<\?xml\s+version="1\.0"\s+encoding=")utf-8(")',
         r"\1UTF-8\2",

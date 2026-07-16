@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import re
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 
@@ -65,8 +68,16 @@ class ProductContractTests(unittest.TestCase):
         self.assertIn("permanent local-tool exception", text)
 
     def write_executable(self, tools_dir: Path, name: str, body: str) -> None:
-        path = tools_dir / name
-        path.write_text(body, encoding="utf-8")
+        if os.name == "nt":
+            path = tools_dir / f"{name}.cmd"
+            outputs = re.findall(r"printf '%s\\n' '([^']*)'", body)
+            path.write_text(
+                "@echo off\n" + "\n".join(f"echo {output}" for output in outputs) + "\n",
+                encoding="utf-8",
+            )
+        else:
+            path = tools_dir / name
+            path.write_text(body, encoding="utf-8")
         path.chmod(path.stat().st_mode | 0o755)
 
     def test_tool_help_contracts_pass_with_expected_cli_surface(self) -> None:
@@ -170,7 +181,7 @@ class ProductContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "bsl_index.db"
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 conn.execute("CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT)")
                 conn.execute("INSERT INTO index_meta (key, value) VALUES ('builder_version', '14')")
                 conn.execute(
@@ -218,7 +229,7 @@ class ProductContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "bsl_index.db"
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 conn.execute("CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT)")
                 conn.execute("INSERT INTO index_meta (key, value) VALUES ('builder_version', '14')")
                 conn.execute("CREATE TABLE modules (id INTEGER, rel_path TEXT)")
@@ -239,7 +250,7 @@ class ProductContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "bsl_index.db"
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 conn.execute("CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT)")
                 conn.execute("INSERT INTO index_meta (key, value) VALUES ('builder_version', '14')")
                 conn.execute(
@@ -268,7 +279,7 @@ class ProductContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "bsl_index.db"
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn, conn:
                 conn.execute("CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT)")
                 conn.execute("INSERT INTO index_meta (key, value) VALUES ('builder_version', '12')")
                 conn.execute(

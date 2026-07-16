@@ -25,6 +25,9 @@ Expected:
 - Old adapter names are not public MCP registrations.
 - Hidden workspace analyzer services are internal implementation details and do
   not add keys under `mcpServers`.
+- Bundled-tool versions come from `plugins/unica/third-party/tools.lock.json`.
+  Contract tests must load the locked entry and validate the corresponding
+  artifact/interface; they must not hardcode a second `bsl-analyzer` version.
 - Skill-local operation files are not a target execution path. The target path is
   MCP `unica`; runtime shell/PowerShell wrappers are not shipped.
 
@@ -148,3 +151,37 @@ provided by the plugin, not stale cached MCP registrations.
   service record.
 - Another workspace or source root must use another service key.
 - Stale or version-mismatched `service.json` records must be replaced.
+- With no `sourceDir`, a source set named `main` is the effective source root;
+  otherwise the sole `CONFIGURATION` source set is used. Multiple configuration
+  source sets without `main` must fail with `invalid_source_root:`. An explicit
+  `sourceDir` is resolved relative to request `cwd`, normalized, and rejected if
+  it escapes the workspace.
+- `project.status` and `project.map`, analyzer commands, RLM commands, and the
+  workspace-service identity must agree on that effective source root.
+- Analyzer and RLM work requests carry unique internal operation IDs. A public
+  `notifications/cancelled` request must propagate to the matching operation and
+  return JSON-RPC error `-32800` exactly once.
+- `ping`, cancellation, and shutdown must remain responsive while analyzer or
+  RLM work is active. Cancelling one request must not require restarting the
+  service before a later request succeeds.
+- Shutdown and client disconnect cancel owned operations and boundedly clean up
+  their child process trees. On Windows this guarantee is implemented by
+  suspended start followed by Job Object assignment; on Unix by a dedicated
+  process group. Other targets guarantee only immediate-child termination.
+
+The issue-89 end-to-end regression exercises a workspace with `main` and
+`TESTS` source sets, concurrent analyzer/RLM calls, cancellation, ping, a
+subsequent successful request, and descendant cleanup:
+
+```sh
+cargo test -p unica-coder --test issue_89_workspace_service -- --nocapture
+```
+
+Run it three consecutive times. Each run must finish within its test deadlines,
+all recorded backend roots must end in `src/cf`, and no PID created by the
+fixture may survive. On Windows, additionally inspect without terminating any
+pre-existing user process:
+
+```powershell
+Get-Process rlm-bsl-index,bsl-analyzer -ErrorAction SilentlyContinue
+```

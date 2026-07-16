@@ -15,6 +15,19 @@
 2. The response contains only `unica.*` tools.
 3. Internal adapters are not listed.
 
+## Concurrent MCP Dispatch and Cancellation
+
+1. The stdio reader handles `initialize`, `tools/list`, and `ping` without
+   waiting for an active `tools/call`; each tool call runs in its own worker.
+2. The dispatcher registers the JSON-RPC request ID with a cancellation token.
+   Numeric and string IDs remain distinct.
+3. `notifications/cancelled` with `params.requestId` cancels that token. The
+   token is propagated through the application ports, CLI/index commands, and
+   the workspace-service connector.
+4. A cancelled request emits at most one response: JSON-RPC error `-32800` with
+   message `request cancelled`. EOF or response-writer failure cancels all
+   active requests.
+
 ## Mutating Dry Run
 
 1. Caller invokes a mutating tool without `dryRun: false`.
@@ -40,9 +53,15 @@ state and, in future slices, trigger lazy refresh if a required cache is stale.
 ## Workspace Analyzer Service
 
 1. `unica.code.graph`, MCP-mode `unica.code.diagnostics`, and RLM-backed code
-   navigation resolve the workspace and source root.
+   navigation resolve the workspace and one effective source root. An explicit
+   non-empty `sourceDir` is resolved relative to the request working directory.
+   Without it, a source set named `main` wins; otherwise the sole
+   `CONFIGURATION` source set wins. Missing or ambiguous choices fail with
+   `invalid_source_root:` instead of silently using the workspace root.
 2. The application asks the internal workspace service manager for a service
-   keyed by `workspaceRoot + sourceRoot`.
+   keyed by normalized `workspaceRoot + sourceRoot`. The resolved source must
+   remain inside the workspace and is also reported as the effective root by
+   `project.status` and `project.map`.
 3. If a matching live service exists, `unica` sends an internal localhost JSONL
    request using the token from `service.json`.
 4. If the service is missing, stale, unreachable, or has a mismatched version,
@@ -51,6 +70,30 @@ state and, in future slices, trigger lazy refresh if a required cache is stale.
    restarts it when source generation or explicit invalidation changes.
 6. RLM index readiness/build/update is coordinated by the same service, but the
    RLM index remains a persistent file index under the workspace cache root.
+7. Every analyzer or RLM work request carries a UUID `operation_id`. The shared
+   runtime registers one cancellation token per operation and rejects duplicate
+   IDs or new work after shutdown begins.
+8. Accepted connections are handled independently. `ping`, `cancel`, and
+   `shutdown` never acquire the analyzer lane and remain responsive while work
+   is active. RLM jobs run outside that lane; only mutable access to the single
+   warm analyzer session is serialized.
+9. MCP cancellation causes the connector to send `cancel { operation_id }` on a
+   separate connection. A disconnected work socket also cancels its operation.
+   An operation guard removes the ID on every completion path, so the next call
+   does not require a service restart.
+10. Shutdown marks the runtime unavailable, cancels all active operations,
+    rejects new work, removes the service record it owns, and drains handlers
+    within the configured grace period.
+11. Persistent analyzer and RLM subprocesses use `ManagedChild`. Windows starts
+    each process suspended, assigns it to a kill-on-close Job Object, then
+    resumes it; Unix creates a dedicated process group. Cancellation, timeout,
+    and drop terminate the whole tree with bounded waits. Platforms other than
+    Windows and Unix provide only immediate-child termination.
 
 `initialize`, `tools/list`, `project.status`, `project.map`, `dryRun`, and
 `unica.code.grep` do not start workspace analyzer services.
+
+Bundled executable versions and assets are selected from
+`plugins/unica/third-party/tools.lock.json`. CI validates the CLI/MCP surface of
+the artifact selected by that lock rather than embedding a second analyzer
+version constant.

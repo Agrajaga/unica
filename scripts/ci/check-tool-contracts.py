@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -70,6 +71,8 @@ RLM_REQUIRED_META = {
 
 
 def run_command(command: list[str], cwd: Path) -> tuple[int, str]:
+    if os.name == "nt" and Path(command[0]).suffix.lower() in {".bat", ".cmd"}:
+        command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", *command]
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -103,6 +106,11 @@ def tool_executable(tools_dir: Path, tool_name: str, target: str | None) -> Path
     exe_candidate = tools_dir / f"{tool_name}.exe"
     if exe_candidate.exists():
         return exe_candidate
+    if target is None:
+        for script_suffix in (".cmd", ".bat"):
+            script_candidate = tools_dir / f"{tool_name}{script_suffix}"
+            if script_candidate.exists():
+                return script_candidate
     return candidate
 
 
@@ -133,7 +141,8 @@ def check_rlm_schema(db_path: Path) -> list[str]:
     errors: list[str] = []
     if not db_path.exists():
         return [f"RLM index DB not found: {db_path}"]
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         existing_tables = {
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual table')")
@@ -151,6 +160,8 @@ def check_rlm_schema(db_path: Path) -> list[str]:
                 actual = row[0] if row else None
                 if actual != expected:
                     errors.append(f"RLM index_meta {key} must be {expected}, got {actual or '<missing>'}")
+    finally:
+        conn.close()
     return errors
 
 
