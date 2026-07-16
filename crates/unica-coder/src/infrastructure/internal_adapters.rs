@@ -3358,16 +3358,6 @@ mod tests {
         fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
         let db_path = context.cache_root.join("rlm-tools-bsl/test/bsl_index.db");
         create_rlm_search_db(&db_path);
-        let bsl = RecordingProcessRunner {
-            commands: RefCell::new(Vec::new()),
-            output: ProcessOutput {
-                status_success: true,
-                status: "exit status: 0".to_string(),
-                stdout: "unexpected analyzer result\n".to_string(),
-                stderr: String::new(),
-                timed_out: false,
-            },
-        };
         let runner = RecordingProcessRunner {
             commands: RefCell::new(Vec::new()),
             output: ProcessOutput {
@@ -3396,7 +3386,6 @@ mod tests {
         assert!(outcome.ok);
         assert!(outcome.command.is_none());
         let stdout = outcome.stdout.unwrap();
-        assert!(bsl.commands.borrow().is_empty());
         assert!(!stdout.contains("=== bsl-analyzer ==="));
         assert!(stdout.find("=== rlm ===").unwrap() < stdout.find("=== git grep ===").unwrap());
         assert!(stdout.contains("=== rlm ==="));

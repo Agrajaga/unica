@@ -22,7 +22,6 @@ TOOL_HELP_CHECKS = [
         ["mcp", "serve", "--help"],
         ["--profile", "--source-dir", "--mode", "stdio"],
     ),
-    ("bsl-analyzer smoke", "bsl-analyzer", ["smoke", "--help"], ["--scenarios", "--json"]),
     ("rlm-bsl-index build", "rlm-bsl-index", ["index", "build", "--help"], ["build"]),
     ("rlm-bsl-index update", "rlm-bsl-index", ["index", "update", "--help"], ["update"]),
     ("rlm-bsl-index info", "rlm-bsl-index", ["index", "info", "--help"], ["info"]),

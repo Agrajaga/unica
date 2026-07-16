@@ -23,7 +23,6 @@ class ProductContractTests(unittest.TestCase):
         "case \"$*\" in\n"
         "  'analyze --help') printf '%s\\n' '--source-dir --format jsonl' ;;\n"
         "  'mcp serve --help') printf '%s\\n' '--profile --source-dir --mode stdio' ;;\n"
-        "  'smoke --help') printf '%s\\n' '--scenarios --json' ;;\n"
         "  *) exit 1 ;;\n"
         "esac\n"
     )
