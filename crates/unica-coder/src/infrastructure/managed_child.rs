@@ -34,8 +34,16 @@ pub struct ManagedOutput {
 pub struct ManagedChild {
     child: Child,
     process_tree: ProcessTree,
+    state: ChildState,
     timeout: Option<Duration>,
     cancellation: CancellationToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildState {
+    Running,
+    Terminating,
+    Reaped,
 }
 
 impl ManagedChild {
@@ -69,6 +77,7 @@ impl ManagedChild {
         Ok(Self {
             child,
             process_tree,
+            state: ChildState::Running,
             timeout,
             cancellation,
         })
@@ -85,6 +94,19 @@ impl ManagedChild {
 
     pub fn id(&self) -> u32 {
         self.child.id()
+    }
+
+    pub fn is_running(&mut self) -> Result<bool, String> {
+        match self.state {
+            ChildState::Reaped | ChildState::Terminating => Ok(false),
+            ChildState::Running => match self.child.try_wait().map_err(process_error)? {
+                Some(_) => {
+                    self.state = ChildState::Reaped;
+                    Ok(false)
+                }
+                None => Ok(true),
+            },
+        }
     }
 
     pub fn take_stdout(&mut self) -> Option<ChildStdout> {
@@ -115,6 +137,7 @@ impl ManagedChild {
 
         loop {
             if let Some(status) = self.child.try_wait().map_err(process_error)? {
+                self.state = ChildState::Reaped;
                 return Ok(finish_output(status, stdout, stderr, false, false));
             }
             if self.cancellation.is_cancelled() {
@@ -135,9 +158,36 @@ impl ManagedChild {
     }
 
     pub fn terminate(&mut self) -> Result<(), String> {
-        self.process_tree
-            .terminate(&mut self.child)
-            .map_err(process_error)
+        if self.state == ChildState::Reaped {
+            return Ok(());
+        }
+        if self.state == ChildState::Running {
+            if self.child.try_wait().map_err(process_error)?.is_some() {
+                self.state = ChildState::Reaped;
+                return Ok(());
+            }
+            if let Err(error) = self.process_tree.terminate(&mut self.child) {
+                if self.child.try_wait().map_err(process_error)?.is_some() {
+                    self.state = ChildState::Reaped;
+                    return Ok(());
+                }
+                return Err(process_error(error));
+            }
+            self.state = ChildState::Terminating;
+        }
+        self.reap_bounded()
+    }
+
+    fn reap_bounded(&mut self) -> Result<(), String> {
+        let started = Instant::now();
+        while started.elapsed() < TERMINATION_WAIT_LIMIT {
+            if self.child.try_wait().map_err(process_error)?.is_some() {
+                self.state = ChildState::Reaped;
+                return Ok(());
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+        Ok(())
     }
 
     fn finish_after_termination(
@@ -150,6 +200,7 @@ impl ManagedChild {
         let started = Instant::now();
         while started.elapsed() < TERMINATION_WAIT_LIMIT {
             if let Some(status) = self.child.try_wait().map_err(process_error)? {
+                self.state = ChildState::Reaped;
                 return Ok(finish_output(status, stdout, stderr, timed_out, cancelled));
             }
             thread::sleep(PROCESS_POLL_INTERVAL);
@@ -168,9 +219,7 @@ impl ManagedChild {
 
 impl Drop for ManagedChild {
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.terminate();
-        }
+        let _ = self.terminate();
     }
 }
 
@@ -434,7 +483,7 @@ fn receive_output(receiver: Option<Receiver<Vec<u8>>>) -> String {
 mod tests {
     #[cfg(windows)]
     use super::ProcessTree;
-    use super::{ManagedChild, ManagedCommand, ManagedOutput};
+    use super::{ChildState, ManagedChild, ManagedCommand, ManagedOutput};
     use crate::domain::cancellation::CancellationToken;
     use std::ffi::OsString;
     use std::io::Read;
@@ -744,6 +793,71 @@ mod tests {
         assert!(output.cancelled);
         assert!(!output.timed_out);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn managed_child_termination_is_idempotent_and_reaps_direct_child() {
+        let mut managed = ManagedChild::spawn(ManagedCommand {
+            program: std::env::current_exe().unwrap(),
+            args: vec![
+                "--exact".to_string(),
+                "infrastructure::managed_child::tests::managed_child_test_helper".to_string(),
+                "--nocapture".to_string(),
+            ],
+            cwd: std::env::current_dir().unwrap(),
+            env: vec![(OsString::from(HELPER_ENV), OsString::from("sleep"))],
+            timeout: None,
+            cancellation: CancellationToken::new(),
+        })
+        .unwrap();
+
+        managed.terminate().unwrap();
+        assert_eq!(managed.state, ChildState::Reaped);
+        let second = Instant::now();
+        managed.terminate().unwrap();
+        assert!(second.elapsed() < Duration::from_millis(100));
+        assert_eq!(managed.state, ChildState::Reaped);
+    }
+
+    #[test]
+    fn managed_child_reaps_already_exited_process_without_tree_kill() {
+        let mut managed = ManagedChild::spawn(ManagedCommand {
+            program: std::env::current_exe().unwrap(),
+            args: vec![
+                "--exact".to_string(),
+                "infrastructure::managed_child::tests::managed_child_test_helper".to_string(),
+                "--nocapture".to_string(),
+            ],
+            cwd: std::env::current_dir().unwrap(),
+            env: vec![(OsString::from(HELPER_ENV), OsString::from("success"))],
+            timeout: None,
+            cancellation: CancellationToken::new(),
+        })
+        .unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        managed.terminate().unwrap();
+        assert_eq!(managed.state, ChildState::Reaped);
+    }
+
+    #[test]
+    fn managed_child_drop_terminates_and_reaps_running_process() {
+        let managed = ManagedChild::spawn(ManagedCommand {
+            program: std::env::current_exe().unwrap(),
+            args: vec![
+                "--exact".to_string(),
+                "infrastructure::managed_child::tests::managed_child_test_helper".to_string(),
+                "--nocapture".to_string(),
+            ],
+            cwd: std::env::current_dir().unwrap(),
+            env: vec![(OsString::from(HELPER_ENV), OsString::from("sleep"))],
+            timeout: None,
+            cancellation: CancellationToken::new(),
+        })
+        .unwrap();
+        let pid = managed.id();
+        drop(managed);
+        assert!(wait_until_dead(pid, Duration::from_secs(2)));
     }
 
     #[test]

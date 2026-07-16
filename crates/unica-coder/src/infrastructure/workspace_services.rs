@@ -1098,6 +1098,12 @@ impl WorkspaceServiceRuntime {
         }
         let timeout = Duration::from_secs(timeout_secs.max(1));
         let result = (|| {
+            if analyzer
+                .as_mut()
+                .is_some_and(|session| !session.is_reusable())
+            {
+                *analyzer = None;
+            }
             if analyzer.is_none() {
                 *analyzer = Some(BslMcpSession::start(
                     &self.context,
@@ -1410,10 +1416,22 @@ pub struct WorkspaceServiceBslOutput {
 
 struct BslMcpSession {
     child: ManagedChild,
-    stdin: ChildStdin,
-    rx: mpsc::Receiver<String>,
+    writer: mpsc::SyncSender<BslWriteRequest>,
+    rx: mpsc::Receiver<BslReaderEvent>,
     stderr_text: Arc<Mutex<String>>,
     next_id: i64,
+    valid: bool,
+}
+
+struct BslWriteRequest {
+    payload: Value,
+    result: mpsc::SyncSender<Result<(), String>>,
+}
+
+enum BslReaderEvent {
+    Message(Value),
+    ProtocolError(String),
+    Closed,
 }
 
 impl BslMcpSession {
@@ -1465,22 +1483,10 @@ impl BslMcpSession {
             .take_stderr()
             .ok_or_else(|| "failed to open persistent bsl-analyzer stderr".to_string())?;
 
-        let (tx, rx) = mpsc::channel::<String>();
-        thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if tx.send(line).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+        let (writer, writer_rx) = mpsc::sync_channel::<BslWriteRequest>(1);
+        thread::spawn(move || bsl_writer(stdin, writer_rx));
+        let (tx, rx) = mpsc::sync_channel::<BslReaderEvent>(8);
+        thread::spawn(move || bsl_reader(stdout, tx));
         let stderr_text = Arc::new(Mutex::new(String::new()));
         let stderr_target = Arc::clone(&stderr_text);
         thread::spawn(move || {
@@ -1494,10 +1500,11 @@ impl BslMcpSession {
 
         let mut session = Self {
             child,
-            stdin,
+            writer,
             rx,
             stderr_text,
             next_id: 2,
+            valid: true,
         };
         session.initialize(cancellation)?;
         Ok(session)
@@ -1509,9 +1516,9 @@ impl BslMcpSession {
                 "persistent bsl-analyzer initialize stopped",
             ));
         }
-        send_json_line(
-            &mut self.stdin,
-            &json!({
+        let deadline = Instant::now() + SERVICE_REQUEST_TIMEOUT;
+        self.send_json_cancellable(
+            json!({
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
@@ -1524,19 +1531,22 @@ impl BslMcpSession {
                     }
                 }
             }),
+            deadline,
+            cancellation,
         )?;
-        let _ = read_json_response_cancellable(&self.rx, 1, SERVICE_REQUEST_TIMEOUT, cancellation)?;
+        let _ = self.read_response(1, deadline, cancellation)?;
         if cancellation.is_cancelled() {
             return Err(cancelled_error(
                 "persistent bsl-analyzer initialize stopped",
             ));
         }
-        send_json_line(
-            &mut self.stdin,
-            &json!({
+        self.send_json_cancellable(
+            json!({
                 "jsonrpc": "2.0",
                 "method": "notifications/initialized"
             }),
+            deadline,
+            cancellation,
         )?;
         if cancellation.is_cancelled() {
             return Err(cancelled_error(
@@ -1558,9 +1568,9 @@ impl BslMcpSession {
         }
         let id = self.next_id;
         self.next_id += 1;
-        if let Err(error) = send_json_line(
-            &mut self.stdin,
-            &json!({
+        let deadline = Instant::now() + timeout;
+        self.send_json_cancellable(
+            json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "method": "tools/call",
@@ -1569,24 +1579,31 @@ impl BslMcpSession {
                     "arguments": tool_args
                 }
             }),
-        ) {
-            let _ = self.child.terminate();
-            return Err(error);
-        }
-        let response = match read_json_response_cancellable(&self.rx, id, timeout, cancellation) {
+            deadline,
+            cancellation,
+        )?;
+        let response = match self.read_response(id, deadline, cancellation) {
             Ok(response) => response,
             Err(error) => {
-                let _ = self.child.terminate();
                 return Err(error);
             }
         };
+        if cancellation.is_cancelled() {
+            return self.fail(cancelled_error("persistent bsl-analyzer request stopped"));
+        }
         let result_text = match mcp_tool_text(&response) {
             Ok(text) => text,
             Err(error) => {
-                let _ = self.child.terminate();
+                if cancellation.is_cancelled() {
+                    return self.fail(cancelled_error("persistent bsl-analyzer request stopped"));
+                }
+                self.invalidate();
                 return Err(error);
             }
         };
+        if cancellation.is_cancelled() {
+            return self.fail(cancelled_error("persistent bsl-analyzer request stopped"));
+        }
         let stderr = self
             .stderr_text
             .lock()
@@ -1597,11 +1614,93 @@ impl BslMcpSession {
             stderr,
         })
     }
+
+    fn is_reusable(&mut self) -> bool {
+        self.valid && self.child.is_running().unwrap_or(false)
+    }
+
+    fn send_json_cancellable(
+        &mut self,
+        payload: Value,
+        deadline: Instant,
+        cancellation: &CancellationToken,
+    ) -> Result<(), String> {
+        let (result, result_rx) = mpsc::sync_channel(1);
+        let mut request = BslWriteRequest { payload, result };
+        loop {
+            if cancellation.is_cancelled() {
+                return self.fail(cancelled_error("persistent bsl-analyzer write stopped"));
+            }
+            if Instant::now() >= deadline {
+                return self.fail("timeout: persistent bsl-analyzer write timed out".to_string());
+            }
+            match self.writer.try_send(request) {
+                Ok(()) => break,
+                Err(mpsc::TrySendError::Full(returned)) => request = returned,
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return self.fail("persistent bsl-analyzer stdin writer stopped".to_string());
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        loop {
+            if cancellation.is_cancelled() {
+                return self.fail(cancelled_error("persistent bsl-analyzer write stopped"));
+            }
+            if Instant::now() >= deadline {
+                return self.fail("timeout: persistent bsl-analyzer write timed out".to_string());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let received = result_rx.recv_timeout(remaining.min(Duration::from_millis(25)));
+            if cancellation.is_cancelled() {
+                return self.fail(cancelled_error("persistent bsl-analyzer write stopped"));
+            }
+            if Instant::now() >= deadline {
+                return self.fail("timeout: persistent bsl-analyzer write timed out".to_string());
+            }
+            match received {
+                Ok(Ok(())) => {
+                    return Ok(());
+                }
+                Ok(Err(error)) => {
+                    return self.fail(error);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return self.fail("persistent bsl-analyzer stdin writer stopped".to_string());
+                }
+            }
+        }
+    }
+
+    fn read_response(
+        &mut self,
+        id: i64,
+        deadline: Instant,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, String> {
+        match read_json_response_cancellable(&self.rx, id, deadline, cancellation) {
+            Ok(value) => Ok(value),
+            Err(error) => self.fail(error),
+        }
+    }
+
+    fn fail<T>(&mut self, error: String) -> Result<T, String> {
+        self.invalidate();
+        Err(error)
+    }
+
+    fn invalidate(&mut self) {
+        if self.valid {
+            self.valid = false;
+            let _ = self.child.terminate();
+        }
+    }
 }
 
 impl Drop for BslMcpSession {
     fn drop(&mut self) {
-        let _ = self.child.terminate();
+        self.invalidate();
     }
 }
 
@@ -2153,40 +2252,119 @@ fn optional_u64_arg(args: &[String], name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn send_json_line(stdin: &mut impl Write, payload: &Value) -> Result<(), String> {
-    stdin
-        .write_all(payload.to_string().as_bytes())
-        .and_then(|_| stdin.write_all(b"\n"))
-        .and_then(|_| stdin.flush())
-        .map_err(|err| format!("failed to write persistent bsl-analyzer request: {err}"))
+fn bsl_writer(mut stdin: ChildStdin, requests: mpsc::Receiver<BslWriteRequest>) {
+    while let Ok(request) = requests.recv() {
+        let result = serde_json::to_vec(&request.payload)
+            .map_err(|error| format!("failed to encode persistent bsl-analyzer request: {error}"))
+            .and_then(|mut bytes| {
+                bytes.push(b'\n');
+                stdin.write_all(&bytes).map_err(|error| {
+                    format!("failed to write persistent bsl-analyzer request: {error}")
+                })
+            })
+            .and_then(|_| {
+                stdin.flush().map_err(|error| {
+                    format!("failed to flush persistent bsl-analyzer request: {error}")
+                })
+            });
+        let failed = result.is_err();
+        let _ = request.result.send(result);
+        if failed {
+            break;
+        }
+    }
+}
+
+fn bsl_reader(mut stdout: impl Read, events: mpsc::SyncSender<BslReaderEvent>) {
+    let mut pending = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        match stdout.read(&mut chunk) {
+            Ok(0) => {
+                let event = if pending.is_empty() {
+                    BslReaderEvent::Closed
+                } else {
+                    BslReaderEvent::ProtocolError(
+                        "persistent bsl-analyzer stdout closed with an incomplete JSON line"
+                            .to_string(),
+                    )
+                };
+                let _ = events.send(event);
+                return;
+            }
+            Ok(count) => {
+                for &byte in &chunk[..count] {
+                    if byte == b'\n' {
+                        if pending.last() == Some(&b'\r') {
+                            pending.pop();
+                        }
+                        let event = match serde_json::from_slice::<Value>(&pending) {
+                            Ok(value) => BslReaderEvent::Message(value),
+                            Err(error) => BslReaderEvent::ProtocolError(format!(
+                                "persistent bsl-analyzer emitted malformed JSON: {error}"
+                            )),
+                        };
+                        let malformed = matches!(event, BslReaderEvent::ProtocolError(_));
+                        if events.send(event).is_err() || malformed {
+                            return;
+                        }
+                        pending.clear();
+                    } else {
+                        pending.push(byte);
+                        if pending.len() > SERVICE_RESPONSE_LINE_LIMIT {
+                            let _ = events.send(BslReaderEvent::ProtocolError(format!(
+                                "persistent bsl-analyzer response exceeds {SERVICE_RESPONSE_LINE_LIMIT} bytes"
+                            )));
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = events.send(BslReaderEvent::ProtocolError(format!(
+                    "failed to read persistent bsl-analyzer stdout: {error}"
+                )));
+                return;
+            }
+        }
+    }
 }
 
 fn read_json_response_cancellable(
-    rx: &mpsc::Receiver<String>,
+    rx: &mpsc::Receiver<BslReaderEvent>,
     id: i64,
-    timeout: Duration,
+    deadline: Instant,
     cancellation: &CancellationToken,
 ) -> Result<Value, String> {
-    let started = Instant::now();
-    while started.elapsed() < timeout {
+    while Instant::now() < deadline {
         if cancellation.is_cancelled() {
             return Err(cancelled_error(format!(
                 "persistent bsl-analyzer request {id} stopped"
             )));
         }
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(line) => {
-                if cancellation.is_cancelled() {
-                    return Err(cancelled_error(format!(
-                        "persistent bsl-analyzer request {id} stopped"
-                    )));
-                }
-                let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
-                    continue;
-                };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let received = rx.recv_timeout(remaining.min(Duration::from_millis(50)));
+        if cancellation.is_cancelled() {
+            return Err(cancelled_error(format!(
+                "persistent bsl-analyzer request {id} stopped"
+            )));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timeout: persistent bsl-analyzer request {id} timed out"
+            ));
+        }
+        match received {
+            Ok(BslReaderEvent::Message(value)) => {
                 if value.get("id").and_then(Value::as_i64) == Some(id) {
                     return Ok(value);
                 }
+            }
+            Ok(BslReaderEvent::ProtocolError(error)) => {
+                return Err(error);
+            }
+            Ok(BslReaderEvent::Closed) => {
+                return Err("persistent bsl-analyzer stdout closed before response".to_string());
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -2199,7 +2377,9 @@ fn read_json_response_cancellable(
             "persistent bsl-analyzer request {id} stopped"
         )));
     }
-    Err(format!("persistent bsl-analyzer request {id} timed out"))
+    Err(format!(
+        "timeout: persistent bsl-analyzer request {id} timed out"
+    ))
 }
 
 fn mcp_tool_text(response: &Value) -> Result<String, String> {
@@ -2603,13 +2783,18 @@ mod tests {
 
     #[test]
     fn workspace_service_control_path_analyzer_wait_observes_operation_token() {
-        let (_tx, rx) = mpsc::channel::<String>();
+        let (_tx, rx) = mpsc::channel::<BslReaderEvent>();
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         let started = Instant::now();
 
-        let error = read_json_response_cancellable(&rx, 7, Duration::from_secs(30), &cancellation)
-            .unwrap_err();
+        let error = read_json_response_cancellable(
+            &rx,
+            7,
+            Instant::now() + Duration::from_secs(30),
+            &cancellation,
+        )
+        .unwrap_err();
 
         assert!(error.starts_with("cancelled:"));
         assert!(started.elapsed() < Duration::from_millis(500));
@@ -3052,7 +3237,7 @@ mod tests {
         let error = session
             .call(
                 "unica.code.search",
-                json!({}),
+                json!({"query": "x".repeat(16 * 1024 * 1024)}),
                 Duration::from_secs(30),
                 &cancellation,
             )
@@ -3066,6 +3251,161 @@ mod tests {
         assert!(wait_for_process_exit(parent_pid, Duration::from_secs(2)));
         assert!(wait_for_process_exit(child_pid, Duration::from_secs(2)));
         cleanup(&context);
+    }
+
+    struct ChunkedReader {
+        bytes: std::io::Cursor<Vec<u8>>,
+        chunk_size: usize,
+    }
+
+    impl Read for ChunkedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let limit = buffer.len().min(self.chunk_size);
+            self.bytes.read(&mut buffer[..limit])
+        }
+    }
+
+    #[test]
+    fn bsl_session_stdout_framing_accepts_fragments_and_rejects_bad_or_oversized_lines() {
+        let (tx, rx) = mpsc::sync_channel(8);
+        bsl_reader(
+            ChunkedReader {
+                bytes: std::io::Cursor::new(
+                    b"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}\n".to_vec(),
+                ),
+                chunk_size: 3,
+            },
+            tx,
+        );
+        assert!(matches!(
+            rx.recv().unwrap(),
+            BslReaderEvent::Message(value) if value["id"] == 7
+        ));
+
+        let (tx, rx) = mpsc::sync_channel(8);
+        bsl_reader(std::io::Cursor::new(b"not-json\n"), tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            BslReaderEvent::ProtocolError(error) if error.contains("malformed JSON")
+        ));
+
+        let (tx, rx) = mpsc::sync_channel(8);
+        bsl_reader(
+            std::io::Cursor::new(vec![b'x'; SERVICE_RESPONSE_LINE_LIMIT + 1]),
+            tx,
+        );
+        assert!(matches!(
+            rx.recv().unwrap(),
+            BslReaderEvent::ProtocolError(error) if error.contains("exceeds")
+        ));
+    }
+
+    #[test]
+    fn bsl_session_cancellation_wins_over_protocol_and_eof_races() {
+        for event in [
+            BslReaderEvent::ProtocolError("bad response".to_string()),
+            BslReaderEvent::Closed,
+        ] {
+            let (tx, rx) = mpsc::channel();
+            tx.send(event).unwrap();
+            let cancellation = CancellationToken::new();
+            cancellation.cancel();
+            let error = read_json_response_cancellable(
+                &rx,
+                7,
+                Instant::now() + Duration::from_secs(1),
+                &cancellation,
+            )
+            .unwrap_err();
+            assert!(error.starts_with("cancelled:"), "{error}");
+        }
+    }
+
+    #[test]
+    fn bsl_session_replaces_dead_warm_process_before_next_request() {
+        let context = test_context("dead-warm-session");
+        let fixture = compile_exit_after_call_fixture(&context);
+        let pid_file = context.cache_root.join("warm-session-pids.txt");
+        let start = || {
+            let mut command = Command::new(&fixture);
+            command.arg(&pid_file);
+            BslMcpSession::start_with_command(command, &CancellationToken::new()).unwrap()
+        };
+        let mut analyzer = Some(start());
+        analyzer
+            .as_mut()
+            .unwrap()
+            .call(
+                "unica.code.search",
+                json!({}),
+                Duration::from_secs(2),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while analyzer.as_mut().unwrap().is_reusable() {
+            assert!(Instant::now() < deadline, "fixture process did not exit");
+            thread::sleep(Duration::from_millis(25));
+        }
+        if analyzer
+            .as_mut()
+            .is_some_and(|session| !session.is_reusable())
+        {
+            drop(analyzer.take());
+        }
+        assert!(analyzer.is_none());
+        analyzer = Some(start());
+        analyzer
+            .as_mut()
+            .unwrap()
+            .call(
+                "unica.code.search",
+                json!({}),
+                Duration::from_secs(2),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let pids = fs::read_to_string(&pid_file).unwrap();
+        let pids = pids.lines().collect::<Vec<_>>();
+        assert_eq!(pids.len(), 2, "{pids:?}");
+        assert_ne!(pids[0], pids[1]);
+        cleanup(&context);
+    }
+
+    fn compile_exit_after_call_fixture(context: &WorkspaceContext) -> PathBuf {
+        let source = context.cache_root.join("exit-after-call-fixture.rs");
+        let executable = context.cache_root.join(if cfg!(windows) {
+            "exit-after-call-fixture.exe"
+        } else {
+            "exit-after-call-fixture"
+        });
+        fs::create_dir_all(&context.cache_root).unwrap();
+        fs::write(
+            &source,
+            r#"use std::{env, fs::OpenOptions, io::{self, BufRead, Write}};
+fn main() {
+    let pid_file = env::args().nth(1).unwrap();
+    writeln!(OpenOptions::new().create(true).append(true).open(pid_file).unwrap(), "{}", std::process::id()).unwrap();
+    for (index, line) in io::stdin().lock().lines().enumerate() {
+        line.unwrap();
+        match index {
+            0 => println!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}"),
+            2 => { println!("{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"ok\"}}]}}}}"); io::stdout().flush().unwrap(); break; }
+            _ => {}
+        }
+        io::stdout().flush().unwrap();
+    }
+}"#,
+        )
+        .unwrap();
+        let status = Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        executable
     }
 
     fn compile_session_tree_fixture(context: &WorkspaceContext) -> PathBuf {
