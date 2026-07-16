@@ -33,6 +33,7 @@ pub struct ManagedOutput {
 
 pub struct ManagedChild {
     child: Child,
+    process_tree: ProcessTree,
     timeout: Option<Duration>,
     cancellation: CancellationToken,
 }
@@ -47,11 +48,17 @@ impl ManagedChild {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        prepare_process_tree(&mut process).map_err(process_error)?;
-        let child = process.spawn().map_err(process_error)?;
+        let process_tree = ProcessTree::prepare(&mut process).map_err(process_error)?;
+        let mut child = process.spawn().map_err(process_error)?;
+        if let Err(error) = process_tree.attach(&child) {
+            let _ = child.kill();
+            let _ = child.try_wait();
+            return Err(process_error(error));
+        }
 
         Ok(Self {
             child,
+            process_tree,
             timeout: command.timeout,
             cancellation: command.cancellation,
         })
@@ -114,7 +121,9 @@ impl ManagedChild {
     }
 
     pub fn terminate(&mut self) -> Result<(), String> {
-        self.child.kill().map_err(process_error)
+        self.process_tree
+            .terminate(&mut self.child)
+            .map_err(process_error)
     }
 
     fn finish_after_termination(
@@ -143,8 +152,140 @@ impl ManagedChild {
     }
 }
 
-fn prepare_process_tree(_command: &mut Command) -> io::Result<()> {
-    Ok(())
+#[cfg(unix)]
+struct ProcessTree;
+
+#[cfg(unix)]
+impl ProcessTree {
+    fn prepare(command: &mut Command) -> io::Result<Self> {
+        use std::os::unix::process::CommandExt;
+
+        // SAFETY: `setpgid` is async-signal-safe and the closure performs no allocation.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Ok(Self)
+    }
+
+    fn attach(&self, _child: &Child) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn terminate(&self, child: &mut Child) -> io::Result<()> {
+        let process_group = -(child.id() as i32);
+        // SAFETY: the negative PID targets only the process group created in `prepare`.
+        if unsafe { libc::kill(process_group, libc::SIGKILL) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+struct ProcessTree {
+    job: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: Windows kernel handles may be transferred and used from other threads.
+#[cfg(windows)]
+unsafe impl Send for ProcessTree {}
+
+// SAFETY: the Job Object APIs used here support concurrent access to the handle.
+#[cfg(windows)]
+unsafe impl Sync for ProcessTree {}
+
+#[cfg(windows)]
+impl ProcessTree {
+    fn prepare(_command: &mut Command) -> io::Result<Self> {
+        use std::mem::{size_of, zeroed};
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: null security attributes and name request an unnamed job with defaults.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: this Windows POD structure is valid when zero-initialized.
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: `limits` points to the structure and size required by the information class.
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            let error = io::Error::last_os_error();
+            // SAFETY: `job` is a live handle created above and is not used after closing.
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(job);
+            }
+            return Err(error);
+        }
+
+        Ok(Self { job })
+    }
+
+    fn attach(&self, child: &Child) -> io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        // SAFETY: both handles are live for the duration of the call.
+        if unsafe { AssignProcessToJobObject(self.job, child.as_raw_handle() as _) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn terminate(&self, _child: &mut Child) -> io::Result<()> {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        // SAFETY: `self.job` remains live until `Drop`.
+        if unsafe { TerminateJobObject(self.job, 1) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        // SAFETY: `self.job` is owned by this value and closed exactly once here.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.job);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+struct ProcessTree;
+
+#[cfg(not(any(unix, windows)))]
+impl ProcessTree {
+    fn prepare(_command: &mut Command) -> io::Result<Self> {
+        Ok(Self)
+    }
+
+    fn attach(&self, _child: &Child) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn terminate(&self, child: &mut Child) -> io::Result<()> {
+        child.kill()
+    }
 }
 
 fn process_error(error: io::Error) -> String {
@@ -196,10 +337,13 @@ mod tests {
     use crate::domain::cancellation::CancellationToken;
     use std::ffi::OsString;
     use std::io::Read;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     const HELPER_ENV: &str = "UNICA_MANAGED_CHILD_HELPER";
+    const HELPER_PID_FILE_ENV: &str = "UNICA_MANAGED_CHILD_PID_FILE";
 
     #[test]
     fn managed_child_test_helper() {
@@ -218,8 +362,126 @@ mod tests {
                 print!("stdin closed");
             }
             "sleep" => thread::sleep(Duration::from_secs(10)),
+            "process_tree_parent" => {
+                let pid_file = std::env::var_os(HELPER_PID_FILE_ENV).unwrap();
+                let mut child = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "infrastructure::managed_child::tests::managed_child_test_helper",
+                        "--nocapture",
+                    ])
+                    .env(HELPER_ENV, "process_tree_child")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap();
+                std::fs::write(
+                    pid_file,
+                    format!("{}\n{}\n", std::process::id(), child.id()),
+                )
+                .unwrap();
+                child.wait().unwrap();
+            }
+            "process_tree_child" => thread::sleep(Duration::from_secs(10)),
             other => panic!("unknown managed child helper mode: {other}"),
         }
+    }
+
+    #[cfg(windows)]
+    mod process_test_support {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+            PROCESS_TERMINATE,
+        };
+
+        pub fn is_alive(pid: u32) -> bool {
+            unsafe {
+                let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+                if process.is_null() {
+                    return false;
+                }
+                let alive = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+                CloseHandle(process);
+                alive
+            }
+        }
+
+        pub fn terminate(pid: u32) {
+            unsafe {
+                let process = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                if !process.is_null() {
+                    TerminateProcess(process, 1);
+                    CloseHandle(process);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    mod process_test_support {
+        pub fn is_alive(pid: u32) -> bool {
+            unsafe { libc::kill(pid as i32, 0) == 0 }
+        }
+
+        pub fn terminate(pid: u32) {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+    }
+
+    struct ProcessCleanupGuard(Vec<u32>);
+
+    impl ProcessCleanupGuard {
+        fn disarm(&mut self) {
+            self.0.clear();
+        }
+    }
+
+    impl Drop for ProcessCleanupGuard {
+        fn drop(&mut self) {
+            for &pid in &self.0 {
+                process_test_support::terminate(pid);
+            }
+        }
+    }
+
+    struct FileCleanupGuard(PathBuf);
+
+    impl Drop for FileCleanupGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn read_helper_pids(path: &Path, timeout: Duration) -> Vec<u32> {
+        let started = Instant::now();
+        while started.elapsed() < timeout {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                let pids = contents
+                    .lines()
+                    .filter_map(|line| line.parse().ok())
+                    .collect::<Vec<_>>();
+                if pids.len() == 2 {
+                    return pids;
+                }
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        panic!("helper did not record both process IDs within {timeout:?}");
+    }
+
+    fn wait_until_dead(pid: u32, timeout: Duration) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < timeout {
+            if !process_test_support::is_alive(pid) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        !process_test_support::is_alive(pid)
     }
 
     fn run_helper(
@@ -319,5 +581,59 @@ mod tests {
         assert!(output.cancelled);
         assert!(!output.timed_out);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn managed_child_kills_descendants() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "unica-managed-child-pids-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _pid_file_cleanup = FileCleanupGuard(pid_file.clone());
+        let cancellation = CancellationToken::new();
+        let mut managed = ManagedChild::spawn(ManagedCommand {
+            program: std::env::current_exe().unwrap(),
+            args: vec![
+                "--exact".to_string(),
+                "infrastructure::managed_child::tests::managed_child_test_helper".to_string(),
+                "--nocapture".to_string(),
+            ],
+            cwd: std::env::current_dir().unwrap(),
+            env: vec![
+                (
+                    OsString::from(HELPER_ENV),
+                    OsString::from("process_tree_parent"),
+                ),
+                (
+                    OsString::from(HELPER_PID_FILE_ENV),
+                    pid_file.clone().into_os_string(),
+                ),
+            ],
+            timeout: Some(Duration::from_secs(10)),
+            cancellation: cancellation.clone(),
+        })
+        .unwrap();
+        let pids = read_helper_pids(&pid_file, Duration::from_secs(2));
+        let mut cleanup = ProcessCleanupGuard(pids.clone());
+        let parent_pid = pids[0];
+        let child_pid = pids[1];
+
+        cancellation.cancel();
+        let output = managed.wait_for_output().unwrap();
+
+        assert!(output.cancelled);
+        assert!(wait_until_dead(parent_pid, Duration::from_secs(2)));
+        assert!(wait_until_dead(child_pid, Duration::from_secs(2)));
+        cleanup.disarm();
+    }
+
+    #[test]
+    fn managed_child_preserves_thread_safe_auto_traits() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ManagedChild>();
     }
 }
