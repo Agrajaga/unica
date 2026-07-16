@@ -27,9 +27,12 @@
 4. A cancelled request emits at most one response: JSON-RPC error `-32800` with
    message `request cancelled`. On EOF, already accepted workers get a 250 ms
    publication grace, then are cancelled and get up to 2 seconds to publish a
-   terminal response. The publication gate then closes; a non-cooperative late
-   worker cannot write after the stdio handler returns. Response-writer failure
-   also closes the gate and cancels all active requests.
+   terminal response. The publication-admission gate then closes without
+   waiting for generic writer I/O: no response not already admitted may begin
+   I/O after that linearization point. A publication already inside an arbitrary
+   blocking `Write` may complete after `run_stdio_with_handler` returns; the real
+   stdio process then exits and closes stdout. Response-writer failure also
+   closes admission and cancels all active requests.
 
 ## Mutating Dry Run
 
@@ -84,11 +87,13 @@ state and, in future slices, trigger lazy refresh if a required cache is stale.
    separate connection. A disconnected work socket also cancels its operation.
    An operation guard removes the ID on every completion path, so the next call
     does not require a service restart.
-10. A work request has one 120-second aggregate budget measured from the start
-    of connect through connect, write, flush, and read. Control requests use one
-    500 ms aggregate budget across the same phases. Socket reads poll every
-    100 ms so cancellation can be observed; cancellation takes precedence over
-    timeout, EOF, protocol, and successful process-exit races.
+10. Work and ordinary `Ping`, `Invalidate`, and `Shutdown` requests have one
+    120-second overall deadline starting before connect. Control kinds use a
+    500 ms connect cap; connect, write, flush, and read use the remaining
+    overall budget. Reads poll every 100 ms so cancellation can be observed;
+    cancellation takes precedence over timeout, EOF, protocol, and successful
+    process-exit races. A best-effort `Cancel` is different: it uses a separate
+    500 ms aggregate budget for connect, write, and flush and does not read a response.
 11. Shutdown marks the runtime unavailable, cancels all active operations,
     rejects new work, removes the service record it owns, and drains handlers
     within the configured grace period.

@@ -96,11 +96,12 @@ fn run_stdio_with_handler<R, W>(
         }
     }
 
-    let drained = registry.wait_for_workers(EOF_DRAIN_GRACE);
+    let drained = registry.wait_for_idle(EOF_DRAIN_GRACE);
     registry.cancel_all();
-    if !drained && !registry.wait_for_workers(EOF_CANCELLATION_GRACE) {
-        registry.close();
+    if !drained {
+        registry.wait_for_idle(EOF_CANCELLATION_GRACE);
     }
+    registry.close();
 }
 
 fn dispatch_tool_call<W: Write + Send + 'static>(
@@ -158,14 +159,20 @@ fn write_response<W: Write>(writer: &Arc<Mutex<W>>, response: Value) -> bool {
 #[derive(Clone, Default)]
 pub struct CancellationRegistry {
     state: Arc<Mutex<CancellationRegistryState>>,
-    workers: Arc<(Mutex<usize>, Condvar)>,
-    publication_closed: Arc<Mutex<bool>>,
+    activity: Arc<(Mutex<DispatcherActivity>, Condvar)>,
 }
 
 #[derive(Default)]
 struct CancellationRegistryState {
     requests: HashMap<String, CancellationToken>,
     failed: bool,
+}
+
+#[derive(Default)]
+struct DispatcherActivity {
+    handlers: usize,
+    publications: usize,
+    closed: bool,
 }
 
 impl CancellationRegistry {
@@ -221,39 +228,50 @@ impl CancellationRegistry {
     }
 
     fn worker_started(&self) -> Result<(), String> {
-        let mut workers = self
-            .workers
+        let mut activity = self
+            .activity
             .0
             .lock()
-            .map_err(|_| "dispatcher worker counter lock poisoned".to_string())?;
-        *workers += 1;
+            .map_err(|_| "dispatcher activity lock poisoned".to_string())?;
+        if activity.closed {
+            return Err("dispatcher unavailable: publication gate closed".to_string());
+        }
+        activity.handlers += 1;
         Ok(())
     }
 
     fn worker_finished(&self) {
-        let (workers, changed) = &*self.workers;
-        if let Ok(mut workers) = workers.lock() {
-            *workers = workers.saturating_sub(1);
+        let (activity, changed) = &*self.activity;
+        if let Ok(mut activity) = activity.lock() {
+            activity.handlers = activity.handlers.saturating_sub(1);
             changed.notify_all();
         }
     }
 
-    fn wait_for_workers(&self, timeout: Duration) -> bool {
-        let (workers, changed) = &*self.workers;
-        let Ok(mut workers) = workers.lock() else {
+    fn publication_finished(&self) {
+        let (activity, changed) = &*self.activity;
+        if let Ok(mut activity) = activity.lock() {
+            activity.publications = activity.publications.saturating_sub(1);
+            changed.notify_all();
+        }
+    }
+
+    fn wait_for_idle(&self, timeout: Duration) -> bool {
+        let (activity, changed) = &*self.activity;
+        let Ok(mut activity) = activity.lock() else {
             return false;
         };
         let deadline = Instant::now() + timeout;
-        while *workers != 0 {
+        while activity.handlers != 0 || activity.publications != 0 {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return false;
             }
-            let Ok((next, result)) = changed.wait_timeout(workers, remaining) else {
+            let Ok((next, result)) = changed.wait_timeout(activity, remaining) else {
                 return false;
             };
-            workers = next;
-            if result.timed_out() && *workers != 0 {
+            activity = next;
+            if result.timed_out() && (activity.handlers != 0 || activity.publications != 0) {
                 return false;
             }
         }
@@ -261,30 +279,34 @@ impl CancellationRegistry {
     }
 
     fn publish<W: Write>(&self, writer: &Arc<Mutex<W>>, response: Value) -> bool {
-        let Ok(mut closed) = self.publication_closed.lock() else {
-            return false;
-        };
-        if *closed {
-            return false;
+        {
+            let Ok(mut activity) = self.activity.0.lock() else {
+                return false;
+            };
+            if activity.closed {
+                return false;
+            }
+            activity.publications += 1;
         }
+        let _publication = PublicationCompletionGuard(self.clone());
         if write_response(writer, response) {
             return true;
         }
-        *closed = true;
-        drop(closed);
-        self.fail_state();
+        self.fail();
         false
     }
 
     fn close(&self) {
-        self.fail();
+        let (activity, changed) = &*self.activity;
+        if let Ok(mut activity) = activity.lock() {
+            activity.closed = true;
+            changed.notify_all();
+        }
+        self.fail_state();
     }
 
     fn fail(&self) {
-        if let Ok(mut closed) = self.publication_closed.lock() {
-            *closed = true;
-        }
-        self.fail_state();
+        self.close();
     }
 
     fn fail_state(&self) {
@@ -317,6 +339,14 @@ struct WorkerCompletionGuard(CancellationRegistry);
 impl Drop for WorkerCompletionGuard {
     fn drop(&mut self) {
         self.0.worker_finished();
+    }
+}
+
+struct PublicationCompletionGuard(CancellationRegistry);
+
+impl Drop for PublicationCompletionGuard {
+    fn drop(&mut self) {
+        self.0.publication_finished();
     }
 }
 
@@ -838,6 +868,52 @@ mod tests {
             output.responses().is_empty(),
             "late response escaped terminal gate"
         );
+    }
+
+    #[test]
+    fn mcp_dispatcher_close_does_not_wait_for_an_admitted_blocking_writer() {
+        let (sender, receiver) = mpsc::channel();
+        let writer = BlockingWriter::default();
+        let entered = Arc::clone(&writer.entered);
+        let release = Arc::clone(&writer.release);
+        let output = writer.clone();
+        let (done_sender, done_receiver) = mpsc::channel();
+        let dispatcher = thread::spawn(move || {
+            run_stdio_with_handler(
+                BufReader::new(ChannelReader::new(receiver)),
+                writer,
+                Arc::new(UnicaApplication::new()),
+                Arc::new(|_, _, _| Ok("admitted response".to_string())),
+            );
+            done_sender.send(()).unwrap();
+        });
+
+        send_message(
+            &sender,
+            json!({ "jsonrpc": "2.0", "id": "admitted", "method": "tools/call", "params": { "name": "unica.code.search", "arguments": {} } }),
+        );
+        let entered_deadline = Instant::now() + Duration::from_secs(1);
+        while !entered.load(Ordering::SeqCst) {
+            assert!(Instant::now() < entered_deadline, "writer was not admitted");
+            thread::yield_now();
+        }
+        drop(sender);
+
+        let returned_bounded = done_receiver.recv_timeout(Duration::from_secs(3)).is_ok();
+        release.store(true, Ordering::SeqCst);
+        dispatcher.join().unwrap();
+        assert!(
+            returned_bounded,
+            "terminal close waited for blocking writer I/O"
+        );
+
+        let responses = String::from_utf8(output.bytes.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(responses.len(), 1, "the one admitted write may complete");
+        assert_eq!(responses[0]["id"], "admitted");
     }
 
     #[test]

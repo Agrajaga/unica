@@ -218,7 +218,7 @@ class ProductContractTests(unittest.TestCase):
             errors,
         )
 
-    def test_runtime_docs_define_aggregate_workspace_service_budgets(self) -> None:
+    def test_runtime_docs_define_workspace_service_deadlines_exactly(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         runtime = (repo_root / "spec" / "architecture" / "arc42" / "06-runtime-view.md").read_text(
             encoding="utf-8"
@@ -231,11 +231,16 @@ class ProductContractTests(unittest.TestCase):
         )
 
         for text in (runtime, acceptance, adr):
-            self.assertIn("120-second aggregate budget", text)
-            self.assertIn("500 ms aggregate budget", text)
-            self.assertIn("connect, write, flush, and read", text)
-            self.assertIn("cancellation takes precedence", text)
-            self.assertIn("100 ms", text)
+            normalized = " ".join(text.split())
+            self.assertIn("120-second overall deadline", normalized)
+            self.assertIn("500 ms connect cap", normalized)
+            self.assertIn("remaining overall budget", normalized)
+            self.assertIn("best-effort `Cancel`", normalized)
+            self.assertIn("separate 500 ms aggregate budget", normalized)
+            self.assertIn("connect, write, flush, and read", normalized)
+            self.assertIn("does not read a response", normalized)
+            self.assertIn("cancellation takes precedence", normalized)
+            self.assertIn("100 ms", normalized)
 
     def test_tool_help_contracts_report_missing_rlm_server_transport_surface(self) -> None:
         module = load_contract_module()
