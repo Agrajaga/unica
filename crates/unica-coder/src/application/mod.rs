@@ -2772,6 +2772,52 @@ mod tests {
     }
 
     #[test]
+    fn meta_compile_catalog_comment_emits_single_object_comment() {
+        let root = temp_meta_compile_workspace("unica-meta-compile-catalog-comment");
+        let workspace = root.join("workspace");
+        let src = workspace.join("src");
+        let fixtures = workspace.join("fixtures");
+        std::fs::create_dir_all(&fixtures).unwrap();
+        let json_path = fixtures.join("catalog-comment.json");
+        std::fs::write(
+            &json_path,
+            r#"{
+  "type": "Catalog",
+  "name": "Issue67Catalog",
+  "synonym": "Issue67Catalog",
+  "comment": "TEST-COMMENT"
+}"#,
+        )
+        .unwrap();
+
+        let result = call_meta_compile(&workspace, &json_path);
+
+        assert!(result.ok, "{:?}", result.stderr);
+        let xml_path = src.join("Catalogs").join("Issue67Catalog.xml");
+        assert!(xml_path.is_file());
+        let xml = std::fs::read_to_string(&xml_path).unwrap();
+        assert_eq!(xml.matches("<Comment>TEST-COMMENT</Comment>").count(), 1);
+        let doc = roxmltree::Document::parse(xml.trim_start_matches('\u{feff}')).unwrap();
+        let catalog = doc
+            .root_element()
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "Catalog")
+            .unwrap();
+        let properties = catalog
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "Properties")
+            .unwrap();
+        let comments = properties
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "Comment")
+            .collect::<Vec<_>>();
+        assert_eq!(comments.len(), 1, "{xml}");
+        assert_eq!(comments[0].text(), Some("TEST-COMMENT"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn template_add_preserves_single_object_bom() {
         let root = temp_meta_compile_workspace("unica-template-add-single-bom");
         let workspace = root.join("workspace");
