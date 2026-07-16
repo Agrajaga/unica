@@ -821,6 +821,22 @@ impl RuntimeJobStore {
         Ok(true)
     }
 
+    fn snapshot_with_cancel_intent(
+        &self,
+        record: &RuntimeJobRecord,
+        wait_timed_out: bool,
+    ) -> JobResult<RuntimeJobSnapshot> {
+        let mut snapshot = record.snapshot(wait_timed_out);
+        if !record.phase.is_terminal() && self.has_cancel_marker(&record.id)? {
+            snapshot.phase = RuntimeJobPhase::CancelRequested;
+            if record.cancel_policy == CancelPolicy::Critical {
+                snapshot.cancel_deferred = true;
+                snapshot.unsafe_phase = Some(record.operation.clone());
+            }
+        }
+        Ok(snapshot)
+    }
+
     fn list(&self) -> RuntimeJobList {
         let entries = match fs::read_dir(self.jobs_root()) {
             Ok(entries) => entries,
@@ -865,8 +881,11 @@ impl RuntimeJobStore {
                 ));
                 continue;
             };
-            match self.read_record(id) {
-                Ok(record) => jobs.push(record.snapshot(false)),
+            match self
+                .read_record(id)
+                .and_then(|record| self.snapshot_with_cancel_intent(&record, false))
+            {
+                Ok(snapshot) => jobs.push(snapshot),
                 Err(error) => warnings.push(error),
             }
         }
@@ -933,7 +952,9 @@ impl RuntimeJobService {
         // A cancellation that arrived before the worker claimed the record is
         // safe to complete without starting the child process. A cancellation
         // that races after this read is observed by poll() through cancel.json.
-        if record.phase == RuntimeJobPhase::CancelRequested {
+        let cancelled_before_start =
+            self.store.has_cancel_marker(id)? && record.cancel_policy == CancelPolicy::Safe;
+        if record.phase == RuntimeJobPhase::CancelRequested || cancelled_before_start {
             record.cancelled = true;
             record.finished_at_ms = Some(now_millis());
             record.heartbeat_at_ms = Some(now_millis());
@@ -989,7 +1010,8 @@ impl RuntimeJobService {
     ) -> JobResult<RuntimeJobSnapshot> {
         let store = RuntimeJobStore::new(cache_root, DEFAULT_STALE_AFTER);
         let _ = store.recover_stale_active()?;
-        store.read_record(id).map(|record| record.snapshot(false))
+        let record = store.read_record(id)?;
+        store.snapshot_with_cancel_intent(&record, false)
     }
 
     pub(crate) fn poll(&self, id: &str) -> JobResult<RuntimeJobSnapshot> {
@@ -1143,21 +1165,16 @@ impl RuntimeJobService {
         id: &str,
     ) -> JobResult<RuntimeJobSnapshot> {
         let store = RuntimeJobStore::new(cache_root, DEFAULT_STALE_AFTER);
-        let mut record = store.read_record(id)?;
+        let record = store.read_record(id)?;
         if record.phase.is_terminal() {
             return Ok(record.snapshot(false));
         }
         store.write_cancel_marker(id)?;
-        if record.phase == RuntimeJobPhase::Queued || record.phase == RuntimeJobPhase::Running {
-            record.transition(RuntimeJobPhase::CancelRequested)?;
-        }
-        if record.cancel_policy == CancelPolicy::Critical {
-            record.cancel_deferred = true;
-            record.unsafe_phase = Some(record.operation.clone());
-        }
-        record.heartbeat_at_ms = Some(now_millis());
-        store.write_record(&record)?;
-        Ok(record.snapshot(false))
+        // The worker is the sole writer of lifecycle transitions in record.json.
+        // Re-read after publishing the marker so a concurrently committed terminal
+        // result always wins over this cancellation request.
+        let current = store.read_record(id)?;
+        store.snapshot_with_cancel_intent(&current, false)
     }
 
     pub(crate) fn wait_at(
@@ -1467,8 +1484,75 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> JobResult<()> {
         .map_err(|error| io_error("write temporary runtime job file", &error))?;
     file.sync_data()
         .map_err(|error| io_error("sync temporary runtime job file", &error))?;
-    fs::rename(&temporary, path)
+    let replace_result = replace_file_atomically(&temporary, path);
+    if let Err(error) = replace_result {
+        let cleanup = fs::remove_file(&temporary);
+        return match cleanup {
+            Ok(()) => Err(error),
+            Err(cleanup_error) if cleanup_error.kind() == io::ErrorKind::NotFound => Err(error),
+            Err(cleanup_error) => Err(redacted_error(&format!(
+                "{error}; remove failed runtime job staging file: {cleanup_error}"
+            ))),
+        };
+    }
+    sync_parent_directory(parent)
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(source: &Path, target: &Path) -> JobResult<()> {
+    fs::rename(source, target)
         .map_err(|error| io_error("atomically replace runtime job file", &error))
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(source: &Path, target: &Path) -> JobResult<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+    }
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both pointers reference NUL-terminated UTF-16 buffers for the call duration.
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(io_error(
+            "atomically replace runtime job file",
+            &io::Error::last_os_error(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> JobResult<()> {
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| io_error("sync runtime job directory", &error))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> JobResult<()> {
+    Ok(())
 }
 
 fn path_file_name(path: &Path) -> String {
@@ -1579,6 +1663,21 @@ mod tests {
         io::Cursor,
         sync::atomic::{AtomicU32, Ordering},
     };
+
+    #[test]
+    fn atomic_write_replaces_an_existing_runtime_job_record() {
+        let cache = TestCache::new();
+        let path = cache.path().join("record.json");
+        fs::create_dir_all(cache.path()).expect("create cache");
+
+        atomic_write(&path, br#"{"phase":"queued"}"#).expect("create record");
+        atomic_write(&path, br#"{"phase":"running"}"#).expect("replace record");
+
+        assert_eq!(
+            fs::read(&path).expect("read replaced record"),
+            br#"{"phase":"running"}"#
+        );
+    }
 
     #[test]
     fn long_success_survives_reconnect_from_a_new_service_instance() {
@@ -2028,6 +2127,43 @@ mod tests {
         assert!(deferred.cancel_deferred);
         assert_eq!(deferred.unsafe_phase.as_deref(), Some("build"));
         assert!(!deferred.cancelled);
+    }
+
+    #[test]
+    fn terminal_record_wins_over_a_preexisting_cancel_marker() {
+        let cache = TestCache::new();
+        let request = fake_request(RuntimeJobOperation::Build);
+        let queued = RuntimeJobService::enqueue(cache.path(), &request).expect("queue job");
+        let store = RuntimeJobStore::new(cache.path(), DEFAULT_STALE_AFTER);
+
+        store
+            .write_cancel_marker(&queued.id)
+            .expect("publish cancellation intent");
+        let mut terminal = store.read_record(&queued.id).expect("read queued record");
+        terminal
+            .transition(RuntimeJobPhase::Running)
+            .expect("start job");
+        terminal
+            .transition(RuntimeJobPhase::Succeeded)
+            .expect("finish job");
+        terminal.finished_at_ms = Some(now_millis());
+        store
+            .write_record(&terminal)
+            .expect("persist terminal result");
+        store
+            .release_active_lock_for(&queued.id)
+            .expect("release active lock");
+
+        let observed = RuntimeJobService::request_cancel_at(cache.path(), &queued.id)
+            .expect("terminal cancellation is a no-op");
+        assert_eq!(observed.phase, RuntimeJobPhase::Succeeded);
+        assert_eq!(
+            store
+                .read_record(&queued.id)
+                .expect("read terminal record")
+                .phase,
+            RuntimeJobPhase::Succeeded
+        );
     }
 
     #[test]
