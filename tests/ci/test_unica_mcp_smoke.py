@@ -16,18 +16,30 @@ class UnicaMcpSmokeTests(unittest.TestCase):
         env = os.environ.copy()
         if cache_dir is not None:
             env["UNICA_CACHE_DIR"] = str(cache_dir)
-        payload = "\n".join(json.dumps(message) for message in messages) + "\n"
-        result = subprocess.run(
+        process = subprocess.Popen(
             ["cargo", "run", "--quiet", "--bin", "unica", "--"],
-            input=payload,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            check=True,
             cwd=self.repo_root(),
             env=env,
         )
-        return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        for message in messages:
+            process.stdin.write(json.dumps(message) + "\n")
+        process.stdin.flush()
+
+        responses = [json.loads(process.stdout.readline()) for _ in messages]
+        process.stdin.close()
+        return_code = process.wait(timeout=30)
+        stderr = process.stderr.read()
+        process.stdout.close()
+        process.stderr.close()
+        self.assertEqual(return_code, 0, stderr)
+        return responses
 
     def test_initialize_lists_single_unica_server(self) -> None:
         responses = self.call_mcp(
@@ -98,7 +110,7 @@ class UnicaMcpSmokeTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["cache"]["mode"], "dry-run")
         self.assertIn("SourceSetChanged", payload["cache"]["events"])
-        command = " ".join(payload["command"])
+        command = " ".join(payload["command"]).replace("\\", "/")
         self.assertIn("bin/", command)
         self.assertIn("v8-runner", command)
         self.assertNotIn("run-v8-runner.sh", command)

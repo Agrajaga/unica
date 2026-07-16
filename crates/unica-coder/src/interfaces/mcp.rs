@@ -1,14 +1,51 @@
 use crate::application::{input_schema_for_tool, ToolSpec, UnicaApplication};
-use serde_json::{json, Value};
+use crate::domain::cancellation::CancellationToken;
+use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
 pub fn run_stdio() {
-    let app = UnicaApplication::new();
     let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    for line in stdin.lock().lines() {
+    run_stdio_with(
+        stdin.lock(),
+        io::stdout(),
+        Arc::new(UnicaApplication::new()),
+    );
+}
+
+pub fn run_stdio_with<R, W>(reader: R, writer: W, app: Arc<UnicaApplication>)
+where
+    R: BufRead,
+    W: Write + Send + 'static,
+{
+    let tool_app = Arc::clone(&app);
+    let handler: Arc<ToolCallHandler> = Arc::new(move |name, arguments, cancellation| {
+        call_tool_cancellable(&tool_app, name, arguments, cancellation)
+    });
+    run_stdio_with_handler(reader, writer, app, handler);
+}
+
+type ToolCallHandler = dyn Fn(&str, &Map<String, Value>, CancellationToken) -> Result<String, (i64, String)>
+    + Send
+    + Sync;
+
+fn run_stdio_with_handler<R, W>(
+    reader: R,
+    writer: W,
+    app: Arc<UnicaApplication>,
+    handler: Arc<ToolCallHandler>,
+) where
+    R: BufRead,
+    W: Write + Send + 'static,
+{
+    let registry = CancellationRegistry::default();
+    let writer = Arc::new(Mutex::new(writer));
+
+    for line in reader.lines() {
         let line = match line {
             Ok(line) if !line.trim().is_empty() => line,
             Ok(_) => continue,
@@ -18,21 +55,173 @@ pub fn run_stdio() {
             }
         };
 
-        let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle_message(&app, message),
-            Err(err) => Some(error_response(
-                Value::Null,
-                -32700,
-                &format!("parse error: {err}"),
-            )),
+        let message = match serde_json::from_str::<Value>(&line) {
+            Ok(message) => message,
+            Err(err) => {
+                if !write_response(
+                    &writer,
+                    error_response(Value::Null, -32700, &format!("parse error: {err}")),
+                ) {
+                    break;
+                }
+                continue;
+            }
         };
+        let method = message.get("method").and_then(Value::as_str).unwrap_or("");
 
-        if let Some(response) = response {
-            if writeln!(stdout, "{}", response).is_err() {
+        if method == "notifications/cancelled" {
+            if let Some(id) = message.pointer("/params/requestId") {
+                registry.cancel(id);
+            }
+            continue;
+        }
+
+        if method == "tools/call" {
+            dispatch_tool_call(
+                message,
+                Arc::clone(&handler),
+                registry.clone(),
+                Arc::clone(&writer),
+            );
+            continue;
+        }
+
+        if let Some(response) = handle_message(&app, message) {
+            if !write_response(&writer, response) {
                 break;
             }
-            let _ = stdout.flush();
         }
+    }
+
+    registry.cancel_all();
+}
+
+fn dispatch_tool_call<W: Write + Send + 'static>(
+    message: Value,
+    handler: Arc<ToolCallHandler>,
+    registry: CancellationRegistry,
+    writer: Arc<Mutex<W>>,
+) {
+    let id = message.get("id").cloned().unwrap_or(Value::Null);
+    let cancellation = match registry.register(&id) {
+        Ok(cancellation) => cancellation,
+        Err(message) => {
+            if !write_response(&writer, error_response(id, -32600, &message)) {
+                registry.cancel_all();
+            }
+            return;
+        }
+    };
+
+    thread::spawn(move || {
+        let _completion = RegistryCompletionGuard::new(registry.clone(), id.clone());
+        let response = match tool_call_params(&message) {
+            Ok((name, arguments)) => {
+                let result = handler(&name, &arguments, cancellation.clone());
+                if cancellation.is_cancelled() {
+                    error_response(id.clone(), -32800, "request cancelled")
+                } else {
+                    match result {
+                        Ok(result) => success_response(
+                            id.clone(),
+                            json!({ "content": [{ "type": "text", "text": result }] }),
+                        ),
+                        Err((code, message)) => error_response(id.clone(), code, &message),
+                    }
+                }
+            }
+            Err((code, message)) => error_response(id.clone(), code, &message),
+        };
+
+        if !write_response(&writer, response) {
+            registry.cancel_all();
+        }
+    });
+}
+
+fn write_response<W: Write>(writer: &Arc<Mutex<W>>, response: Value) -> bool {
+    let Ok(mut writer) = writer.lock() else {
+        return false;
+    };
+    writeln!(writer, "{response}").is_ok() && writer.flush().is_ok()
+}
+
+#[derive(Clone, Default)]
+pub struct CancellationRegistry {
+    requests: Arc<Mutex<HashMap<String, CancellationToken>>>,
+}
+
+impl CancellationRegistry {
+    pub fn register(&self, id: &Value) -> Result<CancellationToken, String> {
+        let key = request_id_key(id)?;
+        let mut requests = self
+            .requests
+            .lock()
+            .map_err(|_| "cancellation registry lock poisoned".to_string())?;
+        if requests.contains_key(&key) {
+            return Err(format!("duplicate request id: {id}"));
+        }
+        let cancellation = CancellationToken::new();
+        requests.insert(key, cancellation.clone());
+        Ok(cancellation)
+    }
+
+    pub fn cancel(&self, id: &Value) -> bool {
+        let Ok(key) = request_id_key(id) else {
+            return false;
+        };
+        let cancellation = self
+            .requests
+            .lock()
+            .ok()
+            .and_then(|requests| requests.get(&key).cloned());
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn complete(&self, id: &Value) {
+        let Ok(key) = request_id_key(id) else {
+            return;
+        };
+        if let Ok(mut requests) = self.requests.lock() {
+            requests.remove(&key);
+        }
+    }
+
+    pub fn cancel_all(&self) {
+        let cancellations = self
+            .requests
+            .lock()
+            .map(|requests| requests.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for cancellation in cancellations {
+            cancellation.cancel();
+        }
+    }
+}
+
+fn request_id_key(id: &Value) -> Result<String, String> {
+    serde_json::to_string(id).map_err(|err| format!("invalid request id: {err}"))
+}
+
+struct RegistryCompletionGuard {
+    registry: CancellationRegistry,
+    id: Value,
+}
+
+impl RegistryCompletionGuard {
+    fn new(registry: CancellationRegistry, id: Value) -> Self {
+        Self { registry, id }
+    }
+}
+
+impl Drop for RegistryCompletionGuard {
+    fn drop(&mut self) {
+        self.registry.complete(&self.id);
     }
 }
 
@@ -95,6 +284,11 @@ fn call_tool_from_message(
     app: &UnicaApplication,
     message: &Value,
 ) -> Result<String, (i64, String)> {
+    let (name, args) = tool_call_params(message)?;
+    call_tool(app, &name, &args)
+}
+
+fn tool_call_params(message: &Value) -> Result<(String, Map<String, Value>), (i64, String)> {
     let params = message
         .get("params")
         .ok_or((-32602, "missing params".to_string()))?;
@@ -107,8 +301,27 @@ fn call_tool_from_message(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    Ok((name.to_string(), args))
+}
 
-    let result = app.call_tool(name, &args).map_err(|msg| (-32000, msg))?;
+fn call_tool(
+    app: &UnicaApplication,
+    name: &str,
+    args: &Map<String, Value>,
+) -> Result<String, (i64, String)> {
+    let result = app.call_tool(name, args).map_err(|msg| (-32000, msg))?;
+    serde_json::to_string_pretty(&result).map_err(|err| (-32603, err.to_string()))
+}
+
+fn call_tool_cancellable(
+    app: &UnicaApplication,
+    name: &str,
+    args: &Map<String, Value>,
+    cancellation: CancellationToken,
+) -> Result<String, (i64, String)> {
+    let result = app
+        .call_tool_cancellable(name, args, cancellation)
+        .map_err(|msg| (-32000, msg))?;
     serde_json::to_string_pretty(&result).map_err(|err| (-32603, err.to_string()))
 }
 
@@ -130,6 +343,85 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::cancellation::CancellationToken;
+    use serde_json::Map;
+    use std::io::{BufReader, Read};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    struct ChannelReader {
+        receiver: mpsc::Receiver<Vec<u8>>,
+        pending: Vec<u8>,
+    }
+
+    impl ChannelReader {
+        fn new(receiver: mpsc::Receiver<Vec<u8>>) -> Self {
+            Self {
+                receiver,
+                pending: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for ChannelReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            while self.pending.is_empty() {
+                match self.receiver.recv() {
+                    Ok(bytes) => self.pending = bytes,
+                    Err(_) => return Ok(0),
+                }
+            }
+            let count = buffer.len().min(self.pending.len());
+            buffer[..count].copy_from_slice(&self.pending[..count]);
+            self.pending.drain(..count);
+            Ok(count)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SharedWriter {
+        fn responses(&self) -> Vec<Value> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        }
+
+        fn wait_for_responses(&self, count: usize) -> Vec<Value> {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let responses = self.responses();
+                if responses.len() >= count {
+                    return responses;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for {count} responses"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    fn send_message(sender: &mpsc::Sender<Vec<u8>>, message: Value) {
+        sender.send(format!("{message}\n").into_bytes()).unwrap();
+    }
 
     #[test]
     fn initialize_uses_single_public_server_name() {
@@ -191,5 +483,169 @@ mod tests {
                 tool["name"]
             );
         }
+    }
+
+    #[test]
+    fn mcp_dispatcher_keeps_ping_responsive_and_cancels_the_requested_call() {
+        let (sender, receiver) = mpsc::channel();
+        let writer = SharedWriter::default();
+        let output = writer.clone();
+        let cancellation_seen = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&cancellation_seen);
+        let handler = Arc::new(
+            move |_name: &str, _arguments: &Map<String, Value>, cancellation: CancellationToken| {
+                while !cancellation.is_cancelled() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                seen.store(true, Ordering::SeqCst);
+                Ok("unreachable success".to_string())
+            },
+        );
+        let dispatcher = thread::spawn(move || {
+            run_stdio_with_handler(
+                BufReader::new(ChannelReader::new(receiver)),
+                writer,
+                Arc::new(UnicaApplication::new()),
+                handler,
+            )
+        });
+
+        send_message(
+            &sender,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+        );
+        send_message(
+            &sender,
+            json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "unica.code.search", "arguments": {} } }),
+        );
+        send_message(
+            &sender,
+            json!({ "jsonrpc": "2.0", "id": 8, "method": "ping" }),
+        );
+
+        let first = output.wait_for_responses(2);
+        assert_eq!(first[0]["id"], 1);
+        assert_eq!(first[1]["id"], 8, "ping must not wait for tools/call");
+        assert!(!cancellation_seen.load(Ordering::SeqCst));
+
+        send_message(
+            &sender,
+            json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 7, "reason": "test" } }),
+        );
+        let responses = output.wait_for_responses(3);
+        assert_eq!(responses[2]["id"], 7);
+        assert_eq!(responses[2]["error"]["code"], -32800);
+        assert_eq!(responses[2]["error"]["message"], "request cancelled");
+        assert!(cancellation_seen.load(Ordering::SeqCst));
+
+        drop(sender);
+        dispatcher.join().unwrap();
+    }
+
+    #[test]
+    fn mcp_dispatcher_cancels_active_calls_on_eof() {
+        let (sender, receiver) = mpsc::channel();
+        let writer = SharedWriter::default();
+        let output = writer.clone();
+        let cancellation_seen = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&cancellation_seen);
+        let handler = Arc::new(
+            move |_name: &str, _arguments: &Map<String, Value>, cancellation: CancellationToken| {
+                while !cancellation.is_cancelled() {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                seen.store(true, Ordering::SeqCst);
+                Ok("unreachable success".to_string())
+            },
+        );
+        let dispatcher = thread::spawn(move || {
+            run_stdio_with_handler(
+                BufReader::new(ChannelReader::new(receiver)),
+                writer,
+                Arc::new(UnicaApplication::new()),
+                handler,
+            )
+        });
+
+        send_message(
+            &sender,
+            json!({ "jsonrpc": "2.0", "id": "work", "method": "tools/call", "params": { "name": "unica.code.search", "arguments": {} } }),
+        );
+        drop(sender);
+        dispatcher.join().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !cancellation_seen.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "active call did not observe EOF cancellation"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        let responses = output.responses();
+        assert!(
+            responses.len() <= 1,
+            "a request may emit at most one response"
+        );
+    }
+
+    #[test]
+    fn mcp_dispatcher_registry_keeps_numeric_and_string_ids_distinct() {
+        let registry = CancellationRegistry::default();
+        let numeric = registry.register(&json!(7)).unwrap();
+        let string = registry.register(&json!("7")).unwrap();
+
+        assert!(registry.cancel(&json!(7)));
+        assert!(numeric.is_cancelled());
+        assert!(!string.is_cancelled());
+    }
+
+    #[test]
+    fn mcp_dispatcher_worker_panic_releases_request_id() {
+        let (sender, receiver) = mpsc::channel();
+        let writer = SharedWriter::default();
+        let output = writer.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&calls);
+        let handler = Arc::new(
+            move |_name: &str,
+                  _arguments: &Map<String, Value>,
+                  _cancellation: CancellationToken| {
+                if observed_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("simulated tool panic");
+                }
+                Ok("second call completed".to_string())
+            },
+        );
+        let dispatcher = thread::spawn(move || {
+            run_stdio_with_handler(
+                BufReader::new(ChannelReader::new(receiver)),
+                writer,
+                Arc::new(UnicaApplication::new()),
+                handler,
+            )
+        });
+        let request = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "unica.code.search", "arguments": {} } });
+
+        send_message(&sender, request.clone());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while calls.load(Ordering::SeqCst) < 1 {
+            assert!(Instant::now() < deadline, "first worker did not start");
+            thread::sleep(Duration::from_millis(5));
+        }
+        thread::sleep(Duration::from_millis(20));
+        send_message(&sender, request);
+
+        let responses = output.wait_for_responses(1);
+        assert_eq!(responses[0]["id"], 7);
+        assert!(
+            responses[0].get("result").is_some(),
+            "request id remained registered after worker panic: {}",
+            responses[0]
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        drop(sender);
+        dispatcher.join().unwrap();
     }
 }
