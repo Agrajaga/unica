@@ -2,7 +2,9 @@ use crate::domain::cancellation::{CancellationToken, CANCELLED_PREFIX};
 use crate::domain::source_roots::resolve_source_root;
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
-use crate::infrastructure::managed_child::{ManagedChild, ManagedCommand};
+use crate::infrastructure::managed_child::{
+    ensure_truncation_diagnostics, ManagedChild, ManagedCommand, ManagedOutput,
+};
 use crate::infrastructure::plugin_runtime::{find_plugin_root, value_to_cli_string};
 use crate::infrastructure::workspace_index::{
     IndexReadiness, IndexRunner, WorkspaceIndexService, SYSTEM_INDEX_RUNNER,
@@ -2216,17 +2218,22 @@ impl ProcessRunner for SystemProcessRunner {
             timeout: command.timeout,
             cancellation: command.cancellation.clone(),
         })?;
-        let output = ProcessOutput {
-            status_success: output.status_success,
-            status: output.status,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            timed_out: output.timed_out,
-            cancelled: output.cancelled,
-        };
-        debug_assert!(!(output.timed_out && output.cancelled));
-        Ok(output)
+        Ok(map_managed_process_output(output))
     }
+}
+
+fn map_managed_process_output(mut output: ManagedOutput) -> ProcessOutput {
+    ensure_truncation_diagnostics(&mut output);
+    let output = ProcessOutput {
+        status_success: output.status_success,
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        timed_out: output.timed_out,
+        cancelled: output.cancelled,
+    };
+    debug_assert!(!(output.timed_out && output.cancelled));
+    output
 }
 
 impl BslMcpRunner for SystemBslMcpRunner {
@@ -5216,4 +5223,19 @@ source-set:
             Ok(self.response.clone())
         }
     }
+}
+#[test]
+fn managed_truncation_is_visible_at_process_adapter_boundary() {
+    let output = map_managed_process_output(ManagedOutput {
+        status_success: false,
+        status: "exit status: 0".into(),
+        stdout: "tail".into(),
+        stderr: "diagnostic tail".into(),
+        timed_out: false,
+        cancelled: false,
+        stdout_truncated: true,
+        stderr_truncated: true,
+    });
+    assert!(output.stderr.contains("stdout capture truncated"));
+    assert!(output.stderr.contains("earlier stderr diagnostics omitted"));
 }

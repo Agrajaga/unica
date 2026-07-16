@@ -35,6 +35,9 @@ const SERVICE_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const SERVICE_RESPONSE_LINE_LIMIT: usize = 8 * 1024 * 1024;
 const SERVICE_REQUEST_LINE_LIMIT: usize = 8 * 1024 * 1024;
 const SERVICE_MAX_CONNECTION_HANDLERS: usize = 64;
+const SERVICE_MAX_CONTROL_HANDLERS: usize = 8;
+const SERVICE_MAX_PENDING_CONTROL: usize = 64;
+const SERVICE_CONTROL_CLASSIFICATION_LIMIT: usize = 64 * 1024;
 const SERVICE_MAX_WORKERS: usize = 8;
 const SERVICE_REQUEST_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 const BSL_STDERR_TAIL_LIMIT: usize = 64 * 1024;
@@ -641,6 +644,8 @@ impl SystemServiceConnector {
                 "failed to flush workspace service control request: {error}"
             ));
         }
+        remaining_or_control_timeout(&deadline, clock)
+            .map_err(|error| format!("workspace service control request failed: {error}"))?;
         Ok(())
     }
 
@@ -1000,6 +1005,8 @@ struct WorkspaceServiceRuntime {
     operations: Mutex<HashMap<String, CancellationToken>>,
     shutting_down: AtomicBool,
     work_admission: Arc<AdmissionGate>,
+    general_admission: Arc<AdmissionGate>,
+    control_admission: Arc<AdmissionGate>,
 }
 
 type BslSessionStarter = dyn Fn(&WorkspaceContext, &Path, &CancellationToken) -> Result<BslMcpSession, String>
@@ -1028,6 +1035,8 @@ impl WorkspaceServiceRuntime {
             operations: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             work_admission: AdmissionGate::new(SERVICE_MAX_WORKERS),
+            general_admission: AdmissionGate::new(SERVICE_MAX_CONNECTION_HANDLERS),
+            control_admission: AdmissionGate::new(SERVICE_MAX_CONTROL_HANDLERS),
         }
     }
 
@@ -2132,6 +2141,51 @@ fn run_workspace_service(
     )
 }
 
+struct PendingControlConnection {
+    stream: TcpStream,
+    accepted_at: Instant,
+    bytes: Vec<u8>,
+}
+
+enum PendingControlPoll {
+    Pending,
+    Request(ServiceRequest),
+    Invalid(String),
+    Closed,
+}
+
+impl PendingControlConnection {
+    fn poll(&mut self) -> PendingControlPoll {
+        if self.accepted_at.elapsed() >= SERVICE_CONTROL_CONNECT_TIMEOUT {
+            return PendingControlPoll::Closed;
+        }
+        let mut chunk = [0_u8; 8192];
+        match self.stream.read(&mut chunk) {
+            Ok(0) => PendingControlPoll::Closed,
+            Ok(count) => {
+                self.bytes.extend_from_slice(&chunk[..count]);
+                if self.bytes.len() > SERVICE_CONTROL_CLASSIFICATION_LIMIT {
+                    return PendingControlPoll::Invalid(
+                        "workspace service overloaded: control classification line is too large"
+                            .into(),
+                    );
+                }
+                let Some(newline) = self.bytes.iter().position(|byte| *byte == b'\n') else {
+                    return PendingControlPoll::Pending;
+                };
+                match serde_json::from_slice::<ServiceRequest>(&self.bytes[..newline]) {
+                    Ok(request) => PendingControlPoll::Request(request),
+                    Err(error) => PendingControlPoll::Invalid(format!(
+                        "invalid workspace service request: {error}"
+                    )),
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => PendingControlPoll::Pending,
+            Err(_) => PendingControlPoll::Closed,
+        }
+    }
+}
+
 fn serve_workspace_service(
     listener: TcpListener,
     runtime: Arc<WorkspaceServiceRuntime>,
@@ -2143,7 +2197,7 @@ fn serve_workspace_service(
     let started = Instant::now();
     let mut last_access = Instant::now();
     let mut handlers: Vec<thread::JoinHandle<Result<(), String>>> = Vec::new();
-    let handler_admission = AdmissionGate::new(SERVICE_MAX_CONNECTION_HANDLERS);
+    let mut pending_control = Vec::<PendingControlConnection>::new();
     let mut result = Ok(());
     loop {
         let mut index = 0;
@@ -2154,6 +2208,58 @@ fn serve_workspace_service(
             } else {
                 index += 1;
             }
+        }
+        let mut index = 0;
+        while index < pending_control.len() {
+            match pending_control[index].poll() {
+                PendingControlPoll::Pending => index += 1,
+                outcome => {
+                    let pending = pending_control.swap_remove(index);
+                    match outcome {
+                        PendingControlPoll::Request(request) if request.kind.is_control() => {
+                            if let Some(permit) = runtime.control_admission.try_acquire() {
+                                let response_timeout = SERVICE_CONTROL_CONNECT_TIMEOUT
+                                    .saturating_sub(pending.accepted_at.elapsed());
+                                let handler_runtime = Arc::clone(&runtime);
+                                let handler_executor = Arc::clone(&executor);
+                                match thread::Builder::new().name("unica-workspace-control".into()).spawn(move || {
+                                    let _permit = permit;
+                                    pending.stream.set_nonblocking(false).map_err(|error| format!("failed to restore workspace control stream: {error}"))?;
+                                    pending.stream.set_write_timeout(Some(response_timeout)).map_err(|error| format!("failed to set workspace control response timeout: {error}"))?;
+                                    handle_workspace_service_request(pending.stream, handler_runtime, handler_executor, request)
+                                }) {
+                                    Ok(handler) => handlers.push(handler),
+                                    Err(error) => { result = Err(format!("workspace service control handler spawn failed: {error}")); break; }
+                                }
+                            } else {
+                                let _ = pending.stream.shutdown(std::net::Shutdown::Both);
+                            }
+                        }
+                        PendingControlPoll::Request(_) => {
+                            let _ = pending.stream.set_nonblocking(false);
+                            let _ = pending
+                                .stream
+                                .set_write_timeout(Some(Duration::from_millis(100)));
+                            let _ = write_service_response(pending.stream, &ServiceResponse::error("workspace service overloaded: general connection handlers are saturated"), true);
+                        }
+                        PendingControlPoll::Invalid(error) => {
+                            let _ = pending.stream.set_nonblocking(false);
+                            let _ = pending
+                                .stream
+                                .set_write_timeout(Some(Duration::from_millis(100)));
+                            let _ = write_service_response(
+                                pending.stream,
+                                &ServiceResponse::error(error),
+                                true,
+                            );
+                        }
+                        PendingControlPoll::Closed | PendingControlPoll::Pending => {}
+                    }
+                }
+            }
+        }
+        if result.is_err() {
+            break;
         }
         if runtime.shutting_down.load(Ordering::Acquire) {
             break;
@@ -2166,17 +2272,35 @@ fn serve_workspace_service(
             Ok((stream, _addr)) => {
                 last_access = Instant::now();
                 update_service_record_last_access(&runtime, now_secs());
-                let Some(handler_permit) = handler_admission.try_acquire() else {
-                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                let Some(handler_permit) = runtime.general_admission.try_acquire() else {
+                    if pending_control.len() >= SERVICE_MAX_PENDING_CONTROL {
+                        let evicted = pending_control.remove(0);
+                        let _ = evicted.stream.shutdown(std::net::Shutdown::Both);
+                    }
+                    if stream.set_nonblocking(true).is_ok() {
+                        pending_control.push(PendingControlConnection {
+                            stream,
+                            accepted_at: Instant::now(),
+                            bytes: Vec::new(),
+                        });
+                    }
                     continue;
                 };
+                let header_clock = SystemClock::new();
+                let header_deadline = Deadline::new(&header_clock, SERVICE_REQUEST_HEADER_TIMEOUT);
                 let handler_runtime = Arc::clone(&runtime);
                 let handler_executor = Arc::clone(&executor);
                 match thread::Builder::new()
                     .name("unica-workspace-connection".into())
                     .spawn(move || {
                         let _permit = handler_permit;
-                        handle_workspace_service_stream(stream, handler_runtime, handler_executor)
+                        handle_workspace_service_stream(
+                            stream,
+                            handler_runtime,
+                            handler_executor,
+                            header_clock,
+                            header_deadline,
+                        )
                     }) {
                     Ok(handler) => handlers.push(handler),
                     Err(error) => {
@@ -2196,6 +2320,9 @@ fn serve_workspace_service(
     }
 
     runtime.begin_shutdown();
+    for pending in pending_control.drain(..) {
+        let _ = pending.stream.shutdown(std::net::Shutdown::Both);
+    }
     let drain_deadline = Instant::now() + shutdown_grace;
     while !handlers.is_empty() && Instant::now() < drain_deadline {
         let mut index = 0;
@@ -2219,20 +2346,27 @@ fn handle_workspace_service_stream(
     stream: TcpStream,
     runtime: Arc<WorkspaceServiceRuntime>,
     executor: Arc<dyn WorkspaceServiceOperationExecutor>,
+    header_clock: SystemClock,
+    header_deadline: Deadline,
 ) -> Result<(), String> {
-    stream
-        .set_read_timeout(Some(SERVICE_REQUEST_HEADER_TIMEOUT))
-        .map_err(|err| format!("failed to set workspace service request read timeout: {err}"))?;
     stream
         .set_write_timeout(Some(SERVICE_REQUEST_TIMEOUT))
         .map_err(|err| format!("failed to set workspace service response write timeout: {err}"))?;
+    let header_stream = stream
+        .try_clone()
+        .map_err(|err| format!("failed to clone workspace service stream: {err}"))?;
     let mut reader = BufReader::new(
-        stream
+        header_stream
             .try_clone()
             .map_err(|err| format!("failed to clone workspace service stream: {err}"))?,
     );
-    let line = match read_bounded_service_line(&mut reader)
-        .map_err(|err| format!("failed to read workspace service request: {err}"))?
+    let line = match read_bounded_service_line_with_deadline(
+        &mut reader,
+        &header_deadline,
+        &header_clock,
+        |remaining| header_stream.set_read_timeout(Some(remaining)),
+    )
+    .map_err(|err| format!("failed to read workspace service request: {err}"))?
     {
         Some(BoundedServiceLine::Line(line)) => line,
         Some(BoundedServiceLine::TooLarge) => {
@@ -2250,6 +2384,15 @@ fn handle_workspace_service_stream(
             return Ok(());
         }
     };
+    handle_workspace_service_request(stream, runtime, executor, request)
+}
+
+fn handle_workspace_service_request(
+    stream: TcpStream,
+    runtime: Arc<WorkspaceServiceRuntime>,
+    executor: Arc<dyn WorkspaceServiceOperationExecutor>,
+    request: ServiceRequest,
+) -> Result<(), String> {
     if let Err(error) = runtime.authenticate(&request.token) {
         write_service_response(stream, &ServiceResponse::error(error), false)?;
         return Ok(());
@@ -2368,11 +2511,13 @@ fn handle_workspace_service_stream(
     Ok(())
 }
 
+#[derive(Debug)]
 enum BoundedServiceLine {
     Line(Vec<u8>),
     TooLarge,
 }
 
+#[cfg(test)]
 fn read_bounded_service_line<R: BufRead>(reader: &mut R) -> io::Result<Option<BoundedServiceLine>> {
     let mut line = Vec::new();
     let mut too_large = false;
@@ -2405,6 +2550,81 @@ fn read_bounded_service_line<R: BufRead>(reader: &mut R) -> io::Result<Option<Bo
             } else {
                 BoundedServiceLine::Line(line)
             }));
+        }
+    }
+}
+
+fn read_bounded_service_line_with_deadline<R, F>(
+    reader: &mut R,
+    deadline: &Deadline,
+    clock: &dyn ConnectorClock,
+    mut set_timeout: F,
+) -> io::Result<Option<BoundedServiceLine>>
+where
+    R: BufRead,
+    F: FnMut(Duration) -> io::Result<()>,
+{
+    let mut line = Vec::new();
+    loop {
+        let remaining = deadline.remaining(clock).ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::TimedOut,
+                "workspace service request header timed out",
+            )
+        })?;
+        set_timeout(remaining.min(Duration::from_millis(100)))?;
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                continue
+            }
+            Err(error) => return Err(error),
+        };
+        deadline.remaining(clock).ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::TimedOut,
+                "workspace service request header timed out",
+            )
+        })?;
+        if available.is_empty() {
+            return if line.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(BoundedServiceLine::Line(line)))
+            };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        let content_len = newline.unwrap_or(available.len());
+        if line.len().saturating_add(content_len) > SERVICE_REQUEST_LINE_LIMIT {
+            reader.consume(consumed);
+            if newline.is_some() {
+                return Ok(Some(BoundedServiceLine::TooLarge));
+            }
+            loop {
+                let remaining = deadline.remaining(clock).ok_or_else(|| {
+                    io::Error::new(
+                        ErrorKind::TimedOut,
+                        "workspace service request header timed out",
+                    )
+                })?;
+                set_timeout(remaining.min(Duration::from_millis(100)))?;
+                let available = reader.fill_buf()?;
+                if available.is_empty() {
+                    return Ok(Some(BoundedServiceLine::TooLarge));
+                }
+                let newline = available.iter().position(|byte| *byte == b'\n');
+                let consumed = newline.map_or(available.len(), |index| index + 1);
+                reader.consume(consumed);
+                if newline.is_some() {
+                    return Ok(Some(BoundedServiceLine::TooLarge));
+                }
+            }
+        }
+        line.extend_from_slice(&available[..content_len]);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(Some(BoundedServiceLine::Line(line)));
         }
     }
 }
@@ -2793,6 +3013,13 @@ mod tests {
     );
 
     fn workspace_control_test_server(name: &str) -> WorkspaceControlTestServer {
+        workspace_control_test_server_with_general_limit(name, SERVICE_MAX_CONNECTION_HANDLERS)
+    }
+
+    fn workspace_control_test_server_with_general_limit(
+        name: &str,
+        general_limit: usize,
+    ) -> WorkspaceControlTestServer {
         let context = test_context(name);
         let identity =
             WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src")).unwrap();
@@ -2801,7 +3028,9 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let record = test_record(&identity, port, env!("CARGO_PKG_VERSION"));
         write_record(&identity, record.clone());
-        let runtime = Arc::new(WorkspaceServiceRuntime::new(identity, &record));
+        let mut runtime = WorkspaceServiceRuntime::new(identity, &record);
+        runtime.general_admission = AdmissionGate::new(general_limit);
+        let runtime = Arc::new(runtime);
         let executor = Arc::new(BlockingWorkspaceExecutor::default());
         let server_runtime = Arc::clone(&runtime);
         let server_executor = Arc::clone(&executor);
@@ -2945,6 +3174,105 @@ mod tests {
         assert!(
             matches!(read_bounded_service_line(&mut reader).unwrap(), Some(BoundedServiceLine::Line(line)) if line == b"{}")
         );
+    }
+
+    #[test]
+    fn workspace_service_header_deadline_is_aggregate_across_drip_bytes() {
+        struct DripReader {
+            bytes: Vec<u8>,
+            offset: usize,
+            clock: ManualClock,
+        }
+        impl Read for DripReader {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.offset == self.bytes.len() {
+                    return Ok(0);
+                }
+                self.clock.advance(Duration::from_millis(1));
+                buf[0] = self.bytes[self.offset];
+                self.offset += 1;
+                Ok(1)
+            }
+        }
+        let clock = ManualClock::default();
+        let mut reader = BufReader::with_capacity(
+            1,
+            DripReader {
+                bytes: b"{}\n".to_vec(),
+                offset: 0,
+                clock: clock.clone(),
+            },
+        );
+        let deadline = Deadline::new(&clock, Duration::from_millis(2));
+        let error =
+            read_bounded_service_line_with_deadline(&mut reader, &deadline, &clock, |_| Ok(()))
+                .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn slow_general_headers_cannot_exhaust_control_capacity() {
+        const GENERAL_LIMIT: usize = 4;
+        let (context, record, runtime, _executor, server) =
+            workspace_control_test_server_with_general_limit(
+                "header-control-reserve",
+                GENERAL_LIMIT,
+            );
+        let mut slow = Vec::new();
+        for _ in 0..GENERAL_LIMIT {
+            let mut stream = TcpStream::connect(("127.0.0.1", record.port)).unwrap();
+            stream.write_all(b"{").unwrap();
+            slow.push(stream);
+            let expected = slow.len();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while runtime.general_admission.active.load(Ordering::Acquire) < expected {
+                assert!(
+                    Instant::now() < deadline,
+                    "general header permit {expected} was not admitted"
+                );
+                thread::yield_now();
+            }
+        }
+        let started = Instant::now();
+        let overloaded = send_test_request(
+            &record,
+            ServiceRequestKind::RlmReady {
+                operation_id: "header-overload".into(),
+                args: json!({}),
+            },
+        );
+        assert!(!overloaded.ok);
+        assert_eq!(
+            overloaded.error.as_deref(),
+            Some("workspace service overloaded: general connection handlers are saturated")
+        );
+        assert!(send_test_request(&record, ServiceRequestKind::Ping).ok);
+        assert!(
+            send_test_request(
+                &record,
+                ServiceRequestKind::Cancel {
+                    operation_id: "none".into()
+                }
+            )
+            .ok
+        );
+        assert!(send_test_request(&record, ServiceRequestKind::Shutdown).ok);
+        assert!(started.elapsed() < SERVICE_CONTROL_CONNECT_TIMEOUT);
+        drop(slow);
+        server.join().unwrap().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while runtime.general_admission.active.load(Ordering::Acquire) != 0
+            || runtime.control_admission.active.load(Ordering::Acquire) != 0
+        {
+            assert!(
+                Instant::now() < deadline,
+                "connection permits were not returned"
+            );
+            thread::yield_now();
+        }
+        let identity =
+            WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src")).unwrap();
+        assert!(!identity.record_path().exists());
     }
 
     #[test]
@@ -4057,6 +4385,7 @@ fn main() {
         expected_connect_timeout: Duration,
         connect_advance: Duration,
         first_write_advance: Duration,
+        flush_advance: Duration,
     }
 
     impl ConnectorIo for BudgetIo {
@@ -4067,6 +4396,7 @@ fn main() {
                 clock: self.clock.clone(),
                 write_timeouts: Arc::clone(&self.write_timeouts),
                 first_write_advance: self.first_write_advance,
+                flush_advance: self.flush_advance,
                 writes: 0,
             }))
         }
@@ -4076,6 +4406,7 @@ fn main() {
         clock: ManualClock,
         write_timeouts: Arc<Mutex<Vec<Duration>>>,
         first_write_advance: Duration,
+        flush_advance: Duration,
         writes: usize,
     }
 
@@ -4095,6 +4426,7 @@ fn main() {
         }
 
         fn flush(&mut self) -> io::Result<()> {
+            self.clock.advance(self.flush_advance);
             Ok(())
         }
     }
@@ -4336,6 +4668,7 @@ fn main() {
             expected_connect_timeout: SERVICE_CONTROL_CONNECT_TIMEOUT,
             connect_advance: Duration::from_millis(300),
             first_write_advance: Duration::from_millis(100),
+            flush_advance: Duration::ZERO,
         };
         SYSTEM_SERVICE_CONNECTOR
             .send_control_with(
@@ -4359,6 +4692,30 @@ fn main() {
     }
 
     #[test]
+    fn control_flush_success_cannot_cross_aggregate_500ms_budget() {
+        let clock = ManualClock::default();
+        let io = BudgetIo {
+            clock: clock.clone(),
+            write_timeouts: Arc::new(Mutex::new(Vec::new())),
+            expected_connect_timeout: SERVICE_CONTROL_CONNECT_TIMEOUT,
+            connect_advance: Duration::from_millis(300),
+            first_write_advance: Duration::from_millis(100),
+            flush_advance: Duration::from_millis(100),
+        };
+        let error = SYSTEM_SERVICE_CONNECTOR
+            .send_control_with(
+                &connector_test_record(),
+                ServiceRequestKind::Cancel {
+                    operation_id: "flush-deadline".into(),
+                },
+                &io,
+                &clock,
+            )
+            .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+    }
+
+    #[test]
     fn cancellable_connector_work_write_uses_budget_remaining_after_connect() {
         let clock = ManualClock::default();
         let write_timeouts = Arc::new(Mutex::new(Vec::new()));
@@ -4368,6 +4725,7 @@ fn main() {
             expected_connect_timeout: SERVICE_CONNECT_TIMEOUT,
             connect_advance: Duration::from_secs(3),
             first_write_advance: Duration::ZERO,
+            flush_advance: Duration::ZERO,
         };
         let cancellation = CancellationToken::new();
         let _ = SYSTEM_SERVICE_CONNECTOR.send_with(

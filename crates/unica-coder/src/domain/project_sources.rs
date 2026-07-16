@@ -81,7 +81,7 @@ pub fn discover_project_source_map(workspace_root: &Path) -> Result<ProjectSourc
                     Err(error) => (None, None, Some(format!("invalid_source_root: {error}"))),
                 }
             }
-            Err(error) => (None, None, Some(error)),
+            Err(error) => (None, None, Some(format!("invalid_source_root: {error}"))),
         };
 
     Ok(ProjectSourceMap {
@@ -595,6 +595,20 @@ source-set:
             Some(resolved.path.to_string_lossy().as_ref())
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selection_errors_use_the_stable_invalid_source_root_prefix() {
+        let ambiguous = temp_workspace("unica-source-map-ambiguous-prefix");
+        write(&ambiguous.join("v8project.yaml"), "source-set:\n  - name: app\n    type: CONFIGURATION\n    path: app\n  - name: tests\n    type: CONFIGURATION\n    path: tests\n");
+        let map = discover_project_source_map(&ambiguous).unwrap();
+        assert_eq!(map.source_selection_error.as_deref(), Some("invalid_source_root: sourceDir is required because configuration source sets are ambiguous: app, tests"));
+
+        let missing = temp_workspace("unica-source-map-missing-prefix");
+        let map = discover_project_source_map(&missing).unwrap();
+        assert_eq!(map.source_selection_error.as_deref(), Some("invalid_source_root: sourceDir is required because no configuration source set was found"));
+        fs::remove_dir_all(ambiguous).unwrap();
+        fs::remove_dir_all(missing).unwrap();
     }
 
     fn assert_source_set(

@@ -2,7 +2,9 @@ use crate::domain::cancellation::{cancelled_error, CancellationToken};
 use crate::domain::source_roots::resolve_source_root;
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
-use crate::infrastructure::managed_child::{ManagedChild, ManagedCommand, ManagedOutput};
+use crate::infrastructure::managed_child::{
+    ensure_truncation_diagnostics, ManagedChild, ManagedCommand, ManagedOutput,
+};
 use crate::infrastructure::plugin_runtime::find_plugin_root;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -759,7 +761,8 @@ fn run_index_command_with_heartbeat(
     Ok(map_managed_output(output, started.elapsed()))
 }
 
-fn map_managed_output(output: ManagedOutput, elapsed: Duration) -> IndexOutput {
+fn map_managed_output(mut output: ManagedOutput, elapsed: Duration) -> IndexOutput {
+    ensure_truncation_diagnostics(&mut output);
     IndexOutput {
         status_success: output.status_success && !output.cancelled && !output.timed_out,
         status: output.status,
@@ -1621,6 +1624,25 @@ source-set:
         assert!(!output.status_success);
         assert!(output.timed_out);
         assert!(!output.cancelled);
+    }
+
+    #[test]
+    fn managed_truncation_is_visible_at_index_boundary() {
+        let output = map_managed_output(
+            crate::infrastructure::managed_child::ManagedOutput {
+                status_success: false,
+                status: "exit status: 0".into(),
+                stdout: "tail".into(),
+                stderr: "diagnostic tail".into(),
+                timed_out: false,
+                cancelled: false,
+                stdout_truncated: true,
+                stderr_truncated: true,
+            },
+            Duration::from_millis(1),
+        );
+        assert!(output.stderr.contains("stdout capture truncated"));
+        assert!(output.stderr.contains("earlier stderr diagnostics omitted"));
     }
 
     #[test]

@@ -216,7 +216,7 @@ impl ManagedChild {
 
         let stdout = receive_output(stdout);
         let stderr = receive_output(stderr);
-        Ok(ManagedOutput {
+        let mut output = ManagedOutput {
             status_success: false,
             status: "termination pending".to_string(),
             stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
@@ -225,7 +225,9 @@ impl ManagedChild {
             cancelled,
             stdout_truncated: stdout.truncated,
             stderr_truncated: stderr.truncated,
-        })
+        };
+        ensure_truncation_diagnostics(&mut output);
+        Ok(output)
     }
 }
 
@@ -536,15 +538,8 @@ fn finish_output(
     cancelled: bool,
 ) -> ManagedOutput {
     let stdout = receive_output(stdout);
-    let mut stderr = receive_output(stderr);
-    if stdout.truncated {
-        retain_tail(
-            &mut stderr,
-            b"\n[unica: stdout capture truncated; result is not parseable]\n",
-            STDERR_CAPTURE_LIMIT,
-        );
-    }
-    ManagedOutput {
+    let stderr = receive_output(stderr);
+    let mut output = ManagedOutput {
         status_success: status.success() && !stdout.truncated && !cancelled && !timed_out,
         status: status.to_string(),
         stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
@@ -553,7 +548,32 @@ fn finish_output(
         cancelled,
         stdout_truncated: stdout.truncated,
         stderr_truncated: stderr.truncated,
+    };
+    ensure_truncation_diagnostics(&mut output);
+    output
+}
+
+pub(crate) fn ensure_truncation_diagnostics(output: &mut ManagedOutput) {
+    let mut captured = CapturedOutput {
+        bytes: output.stderr.as_bytes().to_vec(),
+        truncated: output.stderr_truncated,
+    };
+    if output.stdout_truncated && !output.stderr.contains("stdout capture truncated") {
+        retain_tail(
+            &mut captured,
+            b"\n[unica: stdout capture truncated; result is not parseable]\n",
+            STDERR_CAPTURE_LIMIT,
+        );
     }
+    if output.stderr_truncated && !output.stderr.contains("earlier stderr diagnostics omitted") {
+        retain_tail(
+            &mut captured,
+            b"\n[unica: stderr capture truncated; earlier stderr diagnostics omitted]\n",
+            STDERR_CAPTURE_LIMIT,
+        );
+    }
+    output.stderr = String::from_utf8_lossy(&captured.bytes).into_owned();
+    output.stderr_truncated = captured.truncated;
 }
 
 fn receive_output(receiver: Option<Receiver<CapturedOutput>>) -> CapturedOutput {
@@ -952,6 +972,11 @@ mod tests {
         );
         assert!(
             output.stderr.contains("stdout capture truncated"),
+            "{}",
+            output.stderr
+        );
+        assert!(
+            output.stderr.contains("earlier stderr diagnostics omitted"),
             "{}",
             output.stderr
         );
