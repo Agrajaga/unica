@@ -18,11 +18,13 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 const SERVICE_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_IDLE_SECS: u64 = 7200;
 const DEFAULT_MAX_AGE_SECS: u64 = 28800;
 const SERVICE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVICE_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const SERVICE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const SERVICE_SPAWN_LOCK_STALE_SECS: u64 = 30;
 
@@ -209,11 +211,13 @@ impl<'a> WorkspaceServiceManager<'a> {
             ServiceRequest {
                 token: record.token.clone(),
                 kind: ServiceRequestKind::BslMcp {
+                    operation_id: Uuid::new_v4().to_string(),
                     tool_name: tool_name.to_string(),
                     tool_args,
                     timeout_secs: timeout.as_secs().max(1),
                 },
             },
+            cancellation,
         )?;
         if !response.ok {
             return Err(response
@@ -250,9 +254,11 @@ impl<'a> WorkspaceServiceManager<'a> {
             ServiceRequest {
                 token: record.token.clone(),
                 kind: ServiceRequestKind::RlmReady {
+                    operation_id: Uuid::new_v4().to_string(),
                     args: Value::Object(args.clone()),
                 },
             },
+            cancellation,
         )?;
         if !response.ok {
             return Err(response
@@ -297,6 +303,7 @@ impl<'a> WorkspaceServiceManager<'a> {
                         events: event_names.clone(),
                     },
                 },
+                &CancellationToken::new(),
             );
         }
     }
@@ -307,7 +314,7 @@ impl<'a> WorkspaceServiceManager<'a> {
             kind: ServiceRequestKind::Ping,
         };
         self.connector
-            .send(record, request)
+            .send(record, request, &CancellationToken::new())
             .map(|response| response.ok)
             .unwrap_or(false)
     }
@@ -349,6 +356,7 @@ impl<'a> WorkspaceServiceManager<'a> {
                 token: record.token.clone(),
                 kind: ServiceRequestKind::Shutdown,
             },
+            &CancellationToken::new(),
         );
     }
 }
@@ -372,6 +380,7 @@ trait ServiceConnector {
         &self,
         record: &WorkspaceServiceRecord,
         request: ServiceRequest,
+        cancellation: &CancellationToken,
     ) -> Result<ServiceResponse, String>;
 }
 
@@ -392,11 +401,16 @@ impl ServiceConnector for SystemServiceConnector {
         &self,
         record: &WorkspaceServiceRecord,
         request: ServiceRequest,
+        cancellation: &CancellationToken,
     ) -> Result<ServiceResponse, String> {
-        let mut stream = TcpStream::connect(("127.0.0.1", record.port))
-            .map_err(|err| format!("failed to connect workspace service: {err}"))?;
+        let operation_id = request.kind.operation_id().map(str::to_owned);
+        let mut stream = TcpStream::connect_timeout(
+            &([127, 0, 0, 1], record.port).into(),
+            SERVICE_CONNECT_TIMEOUT,
+        )
+        .map_err(|err| format!("failed to connect workspace service: {err}"))?;
         stream
-            .set_read_timeout(Some(SERVICE_REQUEST_TIMEOUT))
+            .set_read_timeout(Some(Duration::from_millis(100)))
             .map_err(|err| format!("failed to set workspace service read timeout: {err}"))?;
         stream
             .set_write_timeout(Some(SERVICE_REQUEST_TIMEOUT))
@@ -409,11 +423,68 @@ impl ServiceConnector for SystemServiceConnector {
             .map_err(|err| format!("failed to write workspace service request: {err}"))?;
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|err| format!("failed to read workspace service response: {err}"))?;
-        serde_json::from_str(line.trim())
-            .map_err(|err| format!("invalid workspace service response: {err}"))
+        let started = Instant::now();
+        loop {
+            if cancellation.is_cancelled() {
+                if let Some(operation_id) = operation_id.as_deref() {
+                    let _ = self.send_control(
+                        record,
+                        ServiceRequestKind::Cancel {
+                            operation_id: operation_id.to_string(),
+                        },
+                    );
+                }
+                return Err(cancelled_error("workspace service request cancelled"));
+            }
+            if started.elapsed() >= SERVICE_REQUEST_TIMEOUT {
+                return Err(format!(
+                    "timeout: workspace service request exceeded {} seconds",
+                    SERVICE_REQUEST_TIMEOUT.as_secs()
+                ));
+            }
+            match reader.read_line(&mut line) {
+                Ok(0) => return Err("workspace service disconnected before responding".to_string()),
+                Ok(_) if line.ends_with('\n') => {
+                    return serde_json::from_str(line.trim())
+                        .map_err(|err| format!("invalid workspace service response: {err}"));
+                }
+                Ok(_) => continue,
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "failed to read workspace service response: {error}"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl SystemServiceConnector {
+    fn send_control(
+        &self,
+        record: &WorkspaceServiceRecord,
+        kind: ServiceRequestKind,
+    ) -> Result<(), String> {
+        let mut stream = TcpStream::connect_timeout(
+            &([127, 0, 0, 1], record.port).into(),
+            SERVICE_CONTROL_CONNECT_TIMEOUT,
+        )
+        .map_err(|err| format!("failed to connect workspace service control path: {err}"))?;
+        stream
+            .set_write_timeout(Some(SERVICE_CONTROL_CONNECT_TIMEOUT))
+            .map_err(|err| format!("failed to set workspace service control timeout: {err}"))?;
+        let request = ServiceRequest {
+            token: record.token.clone(),
+            kind,
+        };
+        let payload = serde_json::to_string(&request).map_err(|err| err.to_string())?;
+        stream
+            .write_all(payload.as_bytes())
+            .and_then(|_| stream.write_all(b"\n"))
+            .and_then(|_| stream.flush())
+            .map_err(|err| format!("failed to write workspace service control request: {err}"))
     }
 }
 
@@ -497,11 +568,20 @@ impl WorkspaceServiceState {
                 ..ServiceResponse::default()
             },
             ServiceRequestKind::BslMcp {
+                operation_id: _,
                 tool_name,
                 tool_args,
                 timeout_secs,
             } => self.handle_bsl_mcp(&tool_name, tool_args, timeout_secs),
-            ServiceRequestKind::RlmReady { args } => self.handle_rlm_ready(args),
+            ServiceRequestKind::RlmReady {
+                operation_id: _,
+                args,
+            } => self.handle_rlm_ready(args),
+            ServiceRequestKind::Cancel { .. } => ServiceResponse {
+                ok: true,
+                status: Some("cancel-requested".to_string()),
+                ..ServiceResponse::default()
+            },
             ServiceRequestKind::Invalidate { events } => {
                 if events.iter().any(|event| {
                     matches!(
@@ -593,22 +673,38 @@ struct ServiceRequest {
     kind: ServiceRequestKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "type")]
 enum ServiceRequestKind {
     Ping,
     BslMcp {
+        operation_id: String,
         tool_name: String,
         tool_args: Value,
         timeout_secs: u64,
     },
     RlmReady {
+        operation_id: String,
         args: Value,
+    },
+    Cancel {
+        operation_id: String,
     },
     Invalidate {
         events: Vec<String>,
     },
     Shutdown,
+}
+
+impl ServiceRequestKind {
+    fn operation_id(&self) -> Option<&str> {
+        match self {
+            Self::BslMcp { operation_id, .. } | Self::RlmReady { operation_id, .. } => {
+                Some(operation_id)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -952,6 +1048,7 @@ fn wait_for_record(identity: &WorkspaceServiceIdentity) -> Result<WorkspaceServi
                             token: record.token.clone(),
                             kind: ServiceRequestKind::Ping,
                         },
+                        &CancellationToken::new(),
                     )
                     .map(|response| response.ok)
                     .unwrap_or(false)
@@ -1235,6 +1332,80 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn cancellable_connector_sends_cancel_on_a_separate_connection() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (request_tx, request_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (work_stream, _) = listener.accept().unwrap();
+            let mut work_reader = BufReader::new(work_stream);
+            let mut work_line = String::new();
+            work_reader.read_line(&mut work_line).unwrap();
+            request_tx
+                .send(serde_json::from_str::<ServiceRequest>(work_line.trim()).unwrap())
+                .unwrap();
+
+            let (cancel_stream, _) = listener.accept().unwrap();
+            let mut cancel_line = String::new();
+            BufReader::new(cancel_stream)
+                .read_line(&mut cancel_line)
+                .unwrap();
+            request_tx
+                .send(serde_json::from_str::<ServiceRequest>(cancel_line.trim()).unwrap())
+                .unwrap();
+        });
+        let record = WorkspaceServiceRecord {
+            schema_version: SERVICE_SCHEMA_VERSION,
+            pid: std::process::id(),
+            port,
+            token: "secret".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            workspace_root: "workspace".to_string(),
+            source_root: "source".to_string(),
+            started_at: now_secs_for_test(),
+            last_access_at: now_secs_for_test(),
+        };
+        let operation_id = "operation-1".to_string();
+        let cancellation = CancellationToken::new();
+        let caller_token = cancellation.clone();
+        let caller = thread::spawn(move || {
+            SYSTEM_SERVICE_CONNECTOR.send(
+                &record,
+                ServiceRequest {
+                    token: "secret".to_string(),
+                    kind: ServiceRequestKind::BslMcp {
+                        operation_id: operation_id.clone(),
+                        tool_name: "search".to_string(),
+                        tool_args: json!({}),
+                        timeout_secs: 120,
+                    },
+                },
+                &caller_token,
+            )
+        });
+
+        let work = request_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let work_id = match work.kind {
+            ServiceRequestKind::BslMcp { operation_id, .. } => operation_id,
+            other => panic!("expected bsl work request, got {other:?}"),
+        };
+        let cancelled_at = Instant::now();
+        cancellation.cancel();
+        let cancel = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let error = caller.join().unwrap().unwrap_err();
+
+        assert_eq!(
+            cancel.kind,
+            ServiceRequestKind::Cancel {
+                operation_id: work_id
+            }
+        );
+        assert!(error.starts_with("cancelled:"));
+        assert!(cancelled_at.elapsed() < Duration::from_secs(2));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn cancellation_prefix_is_stable_for_pre_cancelled_manager_call() {
         let context = test_context("pre-cancelled-manager");
         let cancellation = CancellationToken::new();
@@ -1502,6 +1673,7 @@ mod tests {
             &self,
             _record: &WorkspaceServiceRecord,
             request: ServiceRequest,
+            _cancellation: &CancellationToken,
         ) -> Result<ServiceResponse, String> {
             if matches!(request.kind, ServiceRequestKind::Ping) {
                 *self.pings.borrow_mut() += 1;
