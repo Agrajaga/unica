@@ -548,6 +548,7 @@ mod tests {
         bytes: Arc<Mutex<Vec<u8>>>,
         entered: Arc<AtomicBool>,
         release: Arc<AtomicBool>,
+        completed: Arc<(Mutex<bool>, Condvar)>,
     }
 
     impl Write for BlockingWriter {
@@ -563,6 +564,25 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    impl BlockingWriter {
+        fn wait_for_completion(&self, timeout: Duration) -> bool {
+            let (completed, changed) = &*self.completed;
+            let completed = completed.lock().unwrap();
+            let (completed, _) = changed
+                .wait_timeout_while(completed, timeout, |completed| !*completed)
+                .unwrap();
+            *completed
+        }
+    }
+
+    impl Drop for BlockingWriter {
+        fn drop(&mut self) {
+            let (completed, changed) = &*self.completed;
+            *completed.lock().unwrap() = true;
+            changed.notify_all();
         }
     }
 
@@ -901,10 +921,15 @@ mod tests {
 
         let returned_bounded = done_receiver.recv_timeout(Duration::from_secs(3)).is_ok();
         release.store(true, Ordering::SeqCst);
+        let publication_completed = output.wait_for_completion(Duration::from_secs(1));
         dispatcher.join().unwrap();
         assert!(
             returned_bounded,
             "terminal close waited for blocking writer I/O"
+        );
+        assert!(
+            publication_completed,
+            "admitted publication did not finish after writer release"
         );
 
         let responses = String::from_utf8(output.bytes.lock().unwrap().clone())
