@@ -61,3 +61,35 @@ git diff --check                                  PASS
 
 - Until Task 4 makes the service listener concurrent, a cancel message can queue on the listener but cannot interrupt server-side work immediately. The client nevertheless returns promptly and the operation ID/control message contract is now available for Task 4.
 - The cancel send is intentionally best-effort and fire-and-forget so cancellation cannot become blocked waiting for a control response.
+
+## Reviewer follow-up
+
+All Task 3 review findings were addressed in a second TDD cycle.
+
+RED evidence:
+
+```text
+cargo test -p unica-coder cancellable_connector_deadline_is_aggregate -- --nocapture
+FAIL: ManualClock and Deadline were not defined
+
+cargo test -p unica-coder cancel_response_disconnect_is_non_fatal -- --nocapture
+FAIL: write_service_response was not defined
+```
+
+Changes:
+
+- Added injected connector I/O and monotonic-clock seams. Cancellation is checked before and after connect, write, flush, and read operations, and before transport errors win a race. Deterministic connect/write/read/EOF race tests require the exact `cancelled:` prefix.
+- A single 120-second deadline now starts before connect. Connect, every write, flush, and read receive only the remaining budget. Ping, Invalidate, Shutdown, and Cancel use the 500 ms control connect cap.
+- Cancel control delivery has one aggregate 500 ms deadline across connect, both writes, and flush. The manual-clock test proves that 300 ms spent connecting leaves 200 ms for the first write and 100 ms after another 100 ms is consumed.
+- A disconnected fire-and-forget Cancel response is non-fatal. The regression keeps the service record and proves the same state still answers Ping.
+- Added manager-level UUID v4 uniqueness coverage for both BSL and RLM paths, plus tagged-serde shape and roundtrip coverage for BslMcp, RlmReady, and Cancel.
+
+Final GREEN evidence:
+
+```text
+cargo test -p unica-coder workspace_services::tests -- --nocapture  18 passed
+cargo fmt --all -- --check                                    PASS
+cargo clippy -p unica-coder --all-targets -- -D warnings      PASS
+cargo test -p unica-coder                                     297 passed
+git diff --check                                              PASS
+```

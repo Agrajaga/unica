@@ -11,7 +11,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -396,6 +396,72 @@ trait ServiceSpawner {
 struct SystemServiceConnector;
 struct SystemServiceSpawner;
 
+trait ConnectorClock {
+    fn elapsed(&self) -> Duration;
+}
+
+struct SystemClock(Instant);
+
+impl SystemClock {
+    fn new() -> Self {
+        Self(Instant::now())
+    }
+}
+
+impl ConnectorClock for SystemClock {
+    fn elapsed(&self) -> Duration {
+        self.0.elapsed()
+    }
+}
+
+struct Deadline {
+    started: Duration,
+    budget: Duration,
+}
+
+impl Deadline {
+    fn new(clock: &dyn ConnectorClock, budget: Duration) -> Self {
+        Self {
+            started: clock.elapsed(),
+            budget,
+        }
+    }
+
+    fn remaining(&self, clock: &dyn ConnectorClock) -> Option<Duration> {
+        self.budget
+            .checked_sub(clock.elapsed().saturating_sub(self.started))
+            .filter(|remaining| !remaining.is_zero())
+    }
+}
+
+trait ConnectorStream: Read + Write {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+}
+
+impl ConnectorStream for TcpStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_write_timeout(self, timeout)
+    }
+}
+
+trait ConnectorIo {
+    fn connect(&self, port: u16, timeout: Duration) -> io::Result<Box<dyn ConnectorStream>>;
+}
+
+struct SystemConnectorIo;
+
+impl ConnectorIo for SystemConnectorIo {
+    fn connect(&self, port: u16, timeout: Duration) -> io::Result<Box<dyn ConnectorStream>> {
+        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), timeout)
+            .map(|stream| Box::new(stream) as Box<dyn ConnectorStream>)
+    }
+}
+
 impl ServiceConnector for SystemServiceConnector {
     fn send(
         &self,
@@ -403,47 +469,94 @@ impl ServiceConnector for SystemServiceConnector {
         request: ServiceRequest,
         cancellation: &CancellationToken,
     ) -> Result<ServiceResponse, String> {
+        let clock = SystemClock::new();
+        self.send_with(record, request, cancellation, &SystemConnectorIo, &clock)
+    }
+}
+
+impl SystemServiceConnector {
+    fn send_with(
+        &self,
+        record: &WorkspaceServiceRecord,
+        request: ServiceRequest,
+        cancellation: &CancellationToken,
+        io: &dyn ConnectorIo,
+        clock: &dyn ConnectorClock,
+    ) -> Result<ServiceResponse, String> {
+        let deadline = Deadline::new(clock, SERVICE_REQUEST_TIMEOUT);
         let operation_id = request.kind.operation_id().map(str::to_owned);
-        let mut stream = TcpStream::connect_timeout(
-            &([127, 0, 0, 1], record.port).into(),
-            SERVICE_CONNECT_TIMEOUT,
-        )
-        .map_err(|err| format!("failed to connect workspace service: {err}"))?;
-        stream
-            .set_read_timeout(Some(Duration::from_millis(100)))
-            .map_err(|err| format!("failed to set workspace service read timeout: {err}"))?;
-        stream
-            .set_write_timeout(Some(SERVICE_REQUEST_TIMEOUT))
-            .map_err(|err| format!("failed to set workspace service write timeout: {err}"))?;
+        cancellation_error(cancellation)?;
+        let connect_cap = if request.kind.is_control() {
+            SERVICE_CONTROL_CONNECT_TIMEOUT
+        } else {
+            SERVICE_CONNECT_TIMEOUT
+        };
+        let connect_timeout = remaining_or_timeout(&deadline, clock)?.min(connect_cap);
+        let mut stream = match io.connect(record.port, connect_timeout) {
+            Ok(stream) => stream,
+            Err(error) => {
+                cancellation_error(cancellation)?;
+                remaining_or_timeout(&deadline, clock)?;
+                return Err(format!("failed to connect workspace service: {error}"));
+            }
+        };
+        cancellation_error(cancellation)?;
+        if let Err(error) = stream.set_read_timeout(Some(Duration::from_millis(100))) {
+            cancellation_error(cancellation)?;
+            remaining_or_timeout(&deadline, clock)?;
+            return Err(format!(
+                "failed to set workspace service read timeout: {error}"
+            ));
+        }
         let payload = serde_json::to_string(&request).map_err(|err| err.to_string())?;
-        stream
-            .write_all(payload.as_bytes())
-            .and_then(|_| stream.write_all(b"\n"))
-            .and_then(|_| stream.flush())
-            .map_err(|err| format!("failed to write workspace service request: {err}"))?;
+        if let Err(error) = write_with_deadline(
+            stream.as_mut(),
+            payload.as_bytes(),
+            &deadline,
+            clock,
+            cancellation,
+        ) {
+            self.cancel_after_error(&error, operation_id.as_deref(), record, io, clock);
+            return Err(error);
+        }
+        if let Err(error) =
+            write_with_deadline(stream.as_mut(), b"\n", &deadline, clock, cancellation)
+        {
+            self.cancel_after_error(&error, operation_id.as_deref(), record, io, clock);
+            return Err(error);
+        }
+        if let Err(error) = flush_with_deadline(stream.as_mut(), &deadline, clock, cancellation) {
+            self.cancel_after_error(&error, operation_id.as_deref(), record, io, clock);
+            return Err(error);
+        }
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        let started = Instant::now();
         loop {
             if cancellation.is_cancelled() {
-                if let Some(operation_id) = operation_id.as_deref() {
-                    let _ = self.send_control(
-                        record,
-                        ServiceRequestKind::Cancel {
-                            operation_id: operation_id.to_string(),
-                        },
-                    );
-                }
+                self.send_cancel(operation_id.as_deref(), record, io, clock);
                 return Err(cancelled_error("workspace service request cancelled"));
             }
-            if started.elapsed() >= SERVICE_REQUEST_TIMEOUT {
+            let remaining = remaining_or_timeout(&deadline, clock)?;
+            if let Err(error) = reader
+                .get_ref()
+                .set_read_timeout(Some(remaining.min(Duration::from_millis(100))))
+            {
+                cancellation_error(cancellation)?;
+                remaining_or_timeout(&deadline, clock)?;
                 return Err(format!(
-                    "timeout: workspace service request exceeded {} seconds",
-                    SERVICE_REQUEST_TIMEOUT.as_secs()
+                    "failed to set workspace service read timeout: {error}"
                 ));
             }
-            match reader.read_line(&mut line) {
-                Ok(0) => return Err("workspace service disconnected before responding".to_string()),
+            let read = reader.read_line(&mut line);
+            if cancellation.is_cancelled() {
+                self.send_cancel(operation_id.as_deref(), record, io, clock);
+                return Err(cancelled_error("workspace service request cancelled"));
+            }
+            match read {
+                Ok(0) => {
+                    remaining_or_timeout(&deadline, clock)?;
+                    return Err("workspace service disconnected before responding".to_string());
+                }
                 Ok(_) if line.ends_with('\n') => {
                     return serde_json::from_str(line.trim())
                         .map_err(|err| format!("invalid workspace service response: {err}"));
@@ -452,6 +565,7 @@ impl ServiceConnector for SystemServiceConnector {
                 Err(error)
                     if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                 Err(error) => {
+                    remaining_or_timeout(&deadline, clock)?;
                     return Err(format!(
                         "failed to read workspace service response: {error}"
                     ));
@@ -459,33 +573,154 @@ impl ServiceConnector for SystemServiceConnector {
             }
         }
     }
-}
 
-impl SystemServiceConnector {
-    fn send_control(
+    fn send_control_with(
         &self,
         record: &WorkspaceServiceRecord,
         kind: ServiceRequestKind,
+        io: &dyn ConnectorIo,
+        clock: &dyn ConnectorClock,
     ) -> Result<(), String> {
-        let mut stream = TcpStream::connect_timeout(
-            &([127, 0, 0, 1], record.port).into(),
-            SERVICE_CONTROL_CONNECT_TIMEOUT,
-        )
-        .map_err(|err| format!("failed to connect workspace service control path: {err}"))?;
-        stream
-            .set_write_timeout(Some(SERVICE_CONTROL_CONNECT_TIMEOUT))
-            .map_err(|err| format!("failed to set workspace service control timeout: {err}"))?;
+        let deadline = Deadline::new(clock, SERVICE_CONTROL_CONNECT_TIMEOUT);
+        let connect_timeout = remaining_or_control_timeout(&deadline, clock)
+            .map_err(|error| format!("workspace service control request failed: {error}"))?;
+        let mut stream = io
+            .connect(record.port, connect_timeout)
+            .map_err(|err| format!("failed to connect workspace service control path: {err}"))?;
         let request = ServiceRequest {
             token: record.token.clone(),
             kind,
         };
         let payload = serde_json::to_string(&request).map_err(|err| err.to_string())?;
+        write_control_with_deadline(stream.as_mut(), payload.as_bytes(), &deadline, clock)
+            .map_err(|error| {
+                format!("failed to write workspace service control request: {error}")
+            })?;
+        write_control_with_deadline(stream.as_mut(), b"\n", &deadline, clock).map_err(|error| {
+            format!("failed to write workspace service control request: {error}")
+        })?;
+        let remaining = remaining_or_control_timeout(&deadline, clock)
+            .map_err(|error| format!("workspace service control request failed: {error}"))?;
         stream
-            .write_all(payload.as_bytes())
-            .and_then(|_| stream.write_all(b"\n"))
+            .set_write_timeout(Some(remaining))
             .and_then(|_| stream.flush())
-            .map_err(|err| format!("failed to write workspace service control request: {err}"))
+            .map_err(|error| format!("failed to flush workspace service control request: {error}"))
     }
+
+    fn cancel_after_error(
+        &self,
+        error: &str,
+        operation_id: Option<&str>,
+        record: &WorkspaceServiceRecord,
+        io: &dyn ConnectorIo,
+        clock: &dyn ConnectorClock,
+    ) {
+        if error.starts_with("cancelled:") {
+            self.send_cancel(operation_id, record, io, clock);
+        }
+    }
+
+    fn send_cancel(
+        &self,
+        operation_id: Option<&str>,
+        record: &WorkspaceServiceRecord,
+        io: &dyn ConnectorIo,
+        clock: &dyn ConnectorClock,
+    ) {
+        if let Some(operation_id) = operation_id {
+            let _ = self.send_control_with(
+                record,
+                ServiceRequestKind::Cancel {
+                    operation_id: operation_id.to_string(),
+                },
+                io,
+                clock,
+            );
+        }
+    }
+}
+
+fn remaining_or_timeout(
+    deadline: &Deadline,
+    clock: &dyn ConnectorClock,
+) -> Result<Duration, String> {
+    deadline.remaining(clock).ok_or_else(|| {
+        format!(
+            "timeout: workspace service request exceeded {} seconds",
+            SERVICE_REQUEST_TIMEOUT.as_secs()
+        )
+    })
+}
+
+fn remaining_or_control_timeout(
+    deadline: &Deadline,
+    clock: &dyn ConnectorClock,
+) -> io::Result<Duration> {
+    deadline.remaining(clock).ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::TimedOut,
+            "workspace service control request timed out",
+        )
+    })
+}
+
+fn write_with_deadline(
+    stream: &mut dyn ConnectorStream,
+    bytes: &[u8],
+    deadline: &Deadline,
+    clock: &dyn ConnectorClock,
+    cancellation: &CancellationToken,
+) -> Result<(), String> {
+    cancellation_error(cancellation)?;
+    let remaining = remaining_or_timeout(deadline, clock)?;
+    if let Err(error) = stream.set_write_timeout(Some(remaining)) {
+        cancellation_error(cancellation)?;
+        remaining_or_timeout(deadline, clock)?;
+        return Err(format!(
+            "failed to set workspace service write timeout: {error}"
+        ));
+    }
+    if let Err(error) = stream.write_all(bytes) {
+        cancellation_error(cancellation)?;
+        return Err(format!(
+            "failed to write workspace service request: {error}"
+        ));
+    }
+    cancellation_error(cancellation)
+}
+
+fn flush_with_deadline(
+    stream: &mut dyn ConnectorStream,
+    deadline: &Deadline,
+    clock: &dyn ConnectorClock,
+    cancellation: &CancellationToken,
+) -> Result<(), String> {
+    cancellation_error(cancellation)?;
+    let remaining = remaining_or_timeout(deadline, clock)?;
+    if let Err(error) = stream.set_write_timeout(Some(remaining)) {
+        cancellation_error(cancellation)?;
+        remaining_or_timeout(deadline, clock)?;
+        return Err(format!(
+            "failed to set workspace service write timeout: {error}"
+        ));
+    }
+    if let Err(error) = stream.flush() {
+        cancellation_error(cancellation)?;
+        return Err(format!(
+            "failed to flush workspace service request: {error}"
+        ));
+    }
+    cancellation_error(cancellation)
+}
+
+fn write_control_with_deadline(
+    stream: &mut dyn ConnectorStream,
+    bytes: &[u8],
+    deadline: &Deadline,
+    clock: &dyn ConnectorClock,
+) -> io::Result<()> {
+    stream.set_write_timeout(Some(remaining_or_control_timeout(deadline, clock)?))?;
+    stream.write_all(bytes)
 }
 
 impl ServiceSpawner for SystemServiceSpawner {
@@ -704,6 +939,13 @@ impl ServiceRequestKind {
             }
             _ => None,
         }
+    }
+
+    fn is_control(&self) -> bool {
+        matches!(
+            self,
+            Self::Ping | Self::Invalidate { .. } | Self::Shutdown | Self::Cancel { .. }
+        )
     }
 }
 
@@ -1213,7 +1455,7 @@ fn run_workspace_service(
     Ok(())
 }
 
-fn handle_stream(mut stream: TcpStream, state: &mut WorkspaceServiceState) -> Result<bool, String> {
+fn handle_stream(stream: TcpStream, state: &mut WorkspaceServiceState) -> Result<bool, String> {
     stream
         .set_read_timeout(Some(SERVICE_REQUEST_TIMEOUT))
         .map_err(|err| format!("failed to set workspace service request read timeout: {err}"))?;
@@ -1229,17 +1471,39 @@ fn handle_stream(mut stream: TcpStream, state: &mut WorkspaceServiceState) -> Re
     reader
         .read_line(&mut line)
         .map_err(|err| format!("failed to read workspace service request: {err}"))?;
-    let response = match serde_json::from_str::<ServiceRequest>(line.trim()) {
-        Ok(request) => state.handle_request(request),
-        Err(error) => ServiceResponse::error(format!("invalid workspace service request: {error}")),
+    let (response, best_effort_response) = match serde_json::from_str::<ServiceRequest>(line.trim())
+    {
+        Ok(request) => {
+            let best_effort = matches!(request.kind, ServiceRequestKind::Cancel { .. });
+            (state.handle_request(request), best_effort)
+        }
+        Err(error) => (
+            ServiceResponse::error(format!("invalid workspace service request: {error}")),
+            false,
+        ),
     };
+    write_service_response(stream, &response, best_effort_response)
+}
+
+fn write_service_response(
+    mut writer: impl Write,
+    response: &ServiceResponse,
+    best_effort: bool,
+) -> Result<bool, String> {
     let shutdown = response.shutdown;
     let payload = serde_json::to_string(&response).map_err(|err| err.to_string())?;
-    stream
+    let write_result = writer
         .write_all(payload.as_bytes())
-        .and_then(|_| stream.write_all(b"\n"))
-        .and_then(|_| stream.flush())
-        .map_err(|err| format!("failed to write workspace service response: {err}"))?;
+        .and_then(|_| writer.write_all(b"\n"))
+        .and_then(|_| writer.flush());
+    if let Err(error) = write_result {
+        if best_effort {
+            return Ok(false);
+        }
+        return Err(format!(
+            "failed to write workspace service response: {error}"
+        ));
+    }
     Ok(shutdown)
 }
 
@@ -1330,6 +1594,377 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(Clone, Default)]
+    struct ManualClock(Arc<Mutex<Duration>>);
+
+    impl ManualClock {
+        fn advance(&self, duration: Duration) {
+            *self.0.lock().unwrap() += duration;
+        }
+    }
+
+    impl ConnectorClock for ManualClock {
+        fn elapsed(&self) -> Duration {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum FailureStage {
+        Connect,
+        Write,
+        Read,
+        Eof,
+    }
+
+    struct RacingIo {
+        cancellation: CancellationToken,
+        stage: FailureStage,
+        connections: Mutex<u32>,
+        connect_timeouts: Mutex<Vec<Duration>>,
+    }
+
+    impl RacingIo {
+        fn new(cancellation: CancellationToken, stage: FailureStage) -> Self {
+            Self {
+                cancellation,
+                stage,
+                connections: Mutex::new(0),
+                connect_timeouts: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ConnectorIo for RacingIo {
+        fn connect(&self, _port: u16, timeout: Duration) -> io::Result<Box<dyn ConnectorStream>> {
+            self.connect_timeouts.lock().unwrap().push(timeout);
+            let mut connections = self.connections.lock().unwrap();
+            *connections += 1;
+            if *connections == 1 && matches!(self.stage, FailureStage::Connect) {
+                self.cancellation.cancel();
+                return Err(io::Error::new(ErrorKind::ConnectionRefused, "connect race"));
+            }
+            Ok(Box::new(RacingStream {
+                cancellation: self.cancellation.clone(),
+                stage: (*connections == 1).then_some(self.stage),
+                writes: 0,
+            }))
+        }
+    }
+
+    struct RacingStream {
+        cancellation: CancellationToken,
+        stage: Option<FailureStage>,
+        writes: usize,
+    }
+
+    struct BudgetIo {
+        clock: ManualClock,
+        write_timeouts: Arc<Mutex<Vec<Duration>>>,
+        expected_connect_timeout: Duration,
+        connect_advance: Duration,
+        first_write_advance: Duration,
+    }
+
+    impl ConnectorIo for BudgetIo {
+        fn connect(&self, _port: u16, timeout: Duration) -> io::Result<Box<dyn ConnectorStream>> {
+            assert_eq!(timeout, self.expected_connect_timeout);
+            self.clock.advance(self.connect_advance);
+            Ok(Box::new(BudgetStream {
+                clock: self.clock.clone(),
+                write_timeouts: Arc::clone(&self.write_timeouts),
+                first_write_advance: self.first_write_advance,
+                writes: 0,
+            }))
+        }
+    }
+
+    struct BudgetStream {
+        clock: ManualClock,
+        write_timeouts: Arc<Mutex<Vec<Duration>>>,
+        first_write_advance: Duration,
+        writes: usize,
+    }
+
+    impl Read for BudgetStream {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Write for BudgetStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            if self.writes == 1 {
+                self.clock.advance(self.first_write_advance);
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ConnectorStream for BudgetStream {
+        fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+            self.write_timeouts.lock().unwrap().push(timeout.unwrap());
+            Ok(())
+        }
+    }
+
+    impl Read for RacingStream {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            match self.stage {
+                Some(FailureStage::Read) => {
+                    self.cancellation.cancel();
+                    Err(io::Error::new(ErrorKind::ConnectionReset, "read race"))
+                }
+                Some(FailureStage::Eof) => {
+                    self.cancellation.cancel();
+                    Ok(0)
+                }
+                _ => Ok(0),
+            }
+        }
+    }
+
+    impl Write for RacingStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            if self.writes == 1 && matches!(self.stage, Some(FailureStage::Write)) {
+                self.cancellation.cancel();
+                return Err(io::Error::new(ErrorKind::BrokenPipe, "write race"));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ConnectorStream for RacingStream {
+        fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn connector_test_record() -> WorkspaceServiceRecord {
+        WorkspaceServiceRecord {
+            schema_version: SERVICE_SCHEMA_VERSION,
+            pid: std::process::id(),
+            port: 1,
+            token: "secret".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            workspace_root: "workspace".to_string(),
+            source_root: "source".to_string(),
+            started_at: now_secs_for_test(),
+            last_access_at: now_secs_for_test(),
+        }
+    }
+
+    fn connector_test_request(kind: ServiceRequestKind) -> ServiceRequest {
+        ServiceRequest {
+            token: "secret".to_string(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn cancellable_connector_deadline_is_aggregate() {
+        let clock = ManualClock::default();
+        let deadline = Deadline::new(&clock, Duration::from_millis(500));
+        clock.advance(Duration::from_millis(300));
+        assert_eq!(deadline.remaining(&clock), Some(Duration::from_millis(200)));
+        clock.advance(Duration::from_millis(200));
+        assert_eq!(deadline.remaining(&clock), None);
+    }
+
+    #[test]
+    fn cancellable_connector_cancel_control_uses_one_aggregate_500ms_budget() {
+        let clock = ManualClock::default();
+        let write_timeouts = Arc::new(Mutex::new(Vec::new()));
+        let io = BudgetIo {
+            clock: clock.clone(),
+            write_timeouts: Arc::clone(&write_timeouts),
+            expected_connect_timeout: SERVICE_CONTROL_CONNECT_TIMEOUT,
+            connect_advance: Duration::from_millis(300),
+            first_write_advance: Duration::from_millis(100),
+        };
+        SYSTEM_SERVICE_CONNECTOR
+            .send_control_with(
+                &connector_test_record(),
+                ServiceRequestKind::Cancel {
+                    operation_id: "budget-operation".to_string(),
+                },
+                &io,
+                &clock,
+            )
+            .unwrap();
+
+        assert_eq!(
+            write_timeouts.lock().unwrap().as_slice(),
+            &[
+                Duration::from_millis(200),
+                Duration::from_millis(100),
+                Duration::from_millis(100)
+            ]
+        );
+    }
+
+    #[test]
+    fn cancellable_connector_work_write_uses_budget_remaining_after_connect() {
+        let clock = ManualClock::default();
+        let write_timeouts = Arc::new(Mutex::new(Vec::new()));
+        let io = BudgetIo {
+            clock: clock.clone(),
+            write_timeouts: Arc::clone(&write_timeouts),
+            expected_connect_timeout: SERVICE_CONNECT_TIMEOUT,
+            connect_advance: Duration::from_secs(3),
+            first_write_advance: Duration::ZERO,
+        };
+        let cancellation = CancellationToken::new();
+        let _ = SYSTEM_SERVICE_CONNECTOR.send_with(
+            &connector_test_record(),
+            connector_test_request(ServiceRequestKind::BslMcp {
+                operation_id: "work-budget".to_string(),
+                tool_name: "search".to_string(),
+                tool_args: json!({}),
+                timeout_secs: 120,
+            }),
+            &cancellation,
+            &io,
+            &clock,
+        );
+
+        assert_eq!(
+            write_timeouts.lock().unwrap().first().copied(),
+            Some(Duration::from_secs(117))
+        );
+    }
+
+    #[test]
+    fn cancellable_connector_prioritizes_cancel_over_transport_races() {
+        for stage in [
+            FailureStage::Connect,
+            FailureStage::Write,
+            FailureStage::Read,
+            FailureStage::Eof,
+        ] {
+            let cancellation = CancellationToken::new();
+            let io = RacingIo::new(cancellation.clone(), stage);
+            let clock = ManualClock::default();
+            let error = SYSTEM_SERVICE_CONNECTOR
+                .send_with(
+                    &connector_test_record(),
+                    connector_test_request(ServiceRequestKind::BslMcp {
+                        operation_id: "race-operation".to_string(),
+                        tool_name: "search".to_string(),
+                        tool_args: json!({}),
+                        timeout_secs: 120,
+                    }),
+                    &cancellation,
+                    &io,
+                    &clock,
+                )
+                .unwrap_err();
+            assert!(error.starts_with("cancelled:"), "{error}");
+        }
+    }
+
+    #[test]
+    fn cancellable_connector_uses_short_connect_budget_for_every_control_kind() {
+        for kind in [
+            ServiceRequestKind::Ping,
+            ServiceRequestKind::Invalidate { events: vec![] },
+            ServiceRequestKind::Shutdown,
+        ] {
+            let cancellation = CancellationToken::new();
+            let io = RacingIo::new(cancellation.clone(), FailureStage::Eof);
+            let _ = SYSTEM_SERVICE_CONNECTOR.send_with(
+                &connector_test_record(),
+                connector_test_request(kind),
+                &cancellation,
+                &io,
+                &ManualClock::default(),
+            );
+            assert_eq!(
+                io.connect_timeouts.lock().unwrap().as_slice(),
+                &[SERVICE_CONTROL_CONNECT_TIMEOUT]
+            );
+        }
+    }
+
+    #[test]
+    fn cancellable_connector_protocol_roundtrips_work_and_cancel_shapes() {
+        let bsl = ServiceRequestKind::BslMcp {
+            operation_id: Uuid::new_v4().to_string(),
+            tool_name: "search".to_string(),
+            tool_args: json!({"query": "needle"}),
+            timeout_secs: 5,
+        };
+        let rlm = ServiceRequestKind::RlmReady {
+            operation_id: Uuid::new_v4().to_string(),
+            args: json!({"sourceDir": "src"}),
+        };
+        assert_ne!(bsl.operation_id(), rlm.operation_id());
+        for kind in [
+            bsl,
+            rlm,
+            ServiceRequestKind::Cancel {
+                operation_id: "cancel-id".to_string(),
+            },
+        ] {
+            let json = serde_json::to_value(&kind).unwrap();
+            assert!(json.get("type").is_some());
+            assert!(json.get("operation_id").is_some());
+            assert_eq!(
+                serde_json::from_value::<ServiceRequestKind>(json).unwrap(),
+                kind
+            );
+        }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(ErrorKind::BrokenPipe, "caller disconnected"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(ErrorKind::BrokenPipe, "caller disconnected"))
+        }
+    }
+
+    #[test]
+    fn cancel_response_disconnect_is_non_fatal_and_service_record_remains() {
+        let context = test_context("cancel-disconnect");
+        let identity =
+            WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src")).unwrap();
+        let record = test_record(&identity, 34567, env!("CARGO_PKG_VERSION"));
+        write_record(&identity, record);
+        let mut state = WorkspaceServiceState::new(identity.clone(), "secret".to_string());
+        let response = state.handle_request(connector_test_request(ServiceRequestKind::Cancel {
+            operation_id: "gone-caller".to_string(),
+        }));
+
+        assert!(!write_service_response(FailingWriter, &response, true).unwrap());
+        assert!(read_record(&identity).is_some());
+        let ping = state.handle_request(connector_test_request(ServiceRequestKind::Ping));
+        assert!(ping.ok);
+        cleanup(&context);
+    }
 
     #[test]
     fn cancellable_connector_sends_cancel_on_a_separate_connection() {
@@ -1608,6 +2243,48 @@ mod tests {
         cleanup(&context);
     }
 
+    #[test]
+    fn manager_generates_unique_uuid_operation_ids_for_bsl_and_rlm() {
+        let context = test_context("operation-ids");
+        let source_root = context.workspace_root.join("src");
+        let identity = WorkspaceServiceIdentity::new(&context, &source_root).unwrap();
+        write_record(
+            &identity,
+            test_record(&identity, 34567, env!("CARGO_PKG_VERSION")),
+        );
+        let connector = RecordingConnector {
+            ping_ok: true,
+            ..Default::default()
+        };
+        let spawner = RecordingSpawner::default();
+        let manager = WorkspaceServiceManager::with_io(&connector, &spawner);
+
+        manager
+            .call_bsl_mcp(
+                &context,
+                &source_root,
+                "search",
+                json!({}),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        manager
+            .rlm_readiness(&context, &source_root, &Map::new())
+            .unwrap();
+
+        let ids = connector
+            .requests
+            .borrow()
+            .iter()
+            .filter_map(ServiceRequestKind::operation_id)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        assert!(ids.iter().all(|id| Uuid::parse_str(id).is_ok()));
+        cleanup(&context);
+    }
+
     fn test_context(name: &str) -> WorkspaceContext {
         let root = std::env::temp_dir().join(format!(
             "unica-workspace-service-{name}-{}",
@@ -1666,6 +2343,7 @@ mod tests {
     struct RecordingConnector {
         ping_ok: bool,
         pings: std::cell::RefCell<u32>,
+        requests: std::cell::RefCell<Vec<ServiceRequestKind>>,
     }
 
     impl ServiceConnector for RecordingConnector {
@@ -1675,6 +2353,7 @@ mod tests {
             request: ServiceRequest,
             _cancellation: &CancellationToken,
         ) -> Result<ServiceResponse, String> {
+            self.requests.borrow_mut().push(request.kind.clone());
             if matches!(request.kind, ServiceRequestKind::Ping) {
                 *self.pings.borrow_mut() += 1;
             }
