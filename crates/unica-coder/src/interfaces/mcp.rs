@@ -3,10 +3,13 @@ use crate::domain::cancellation::CancellationToken;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
+const EOF_DRAIN_GRACE: Duration = Duration::from_millis(250);
+const EOF_CANCELLATION_GRACE: Duration = Duration::from_secs(2);
 
 pub fn run_stdio() {
     let stdin = io::stdin();
@@ -95,7 +98,11 @@ fn run_stdio_with_handler<R, W>(
         }
     }
 
+    let drained = registry.wait_for_workers(EOF_DRAIN_GRACE);
     registry.cancel_all();
+    if !drained {
+        registry.wait_for_workers(EOF_CANCELLATION_GRACE);
+    }
 }
 
 fn dispatch_tool_call<W: Write + Send + 'static>(
@@ -114,8 +121,16 @@ fn dispatch_tool_call<W: Write + Send + 'static>(
             return false;
         }
     };
+    if let Err(message) = registry.worker_started() {
+        registry.finish(&id);
+        if !write_response(&writer, error_response(id, -32603, &message)) {
+            registry.fail();
+        }
+        return false;
+    }
 
     thread::spawn(move || {
+        let _worker = WorkerCompletionGuard(registry.clone());
         let mut completion = RegistryCompletionGuard::new(registry.clone(), id.clone());
         let result = match tool_call_params(&message) {
             Ok((name, arguments)) => handler(&name, &arguments, cancellation.clone()),
@@ -151,6 +166,7 @@ fn write_response<W: Write>(writer: &Arc<Mutex<W>>, response: Value) -> bool {
 #[derive(Clone, Default)]
 pub struct CancellationRegistry {
     state: Arc<Mutex<CancellationRegistryState>>,
+    workers: Arc<(Mutex<usize>, Condvar)>,
 }
 
 #[derive(Default)]
@@ -211,6 +227,46 @@ impl CancellationRegistry {
         }
     }
 
+    fn worker_started(&self) -> Result<(), String> {
+        let mut workers = self
+            .workers
+            .0
+            .lock()
+            .map_err(|_| "dispatcher worker counter lock poisoned".to_string())?;
+        *workers += 1;
+        Ok(())
+    }
+
+    fn worker_finished(&self) {
+        let (workers, changed) = &*self.workers;
+        if let Ok(mut workers) = workers.lock() {
+            *workers = workers.saturating_sub(1);
+            changed.notify_all();
+        }
+    }
+
+    fn wait_for_workers(&self, timeout: Duration) -> bool {
+        let (workers, changed) = &*self.workers;
+        let Ok(mut workers) = workers.lock() else {
+            return false;
+        };
+        let deadline = Instant::now() + timeout;
+        while *workers != 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let Ok((next, result)) = changed.wait_timeout(workers, remaining) else {
+                return false;
+            };
+            workers = next;
+            if result.timed_out() && *workers != 0 {
+                return false;
+            }
+        }
+        true
+    }
+
     fn fail(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.failed = true;
@@ -234,6 +290,14 @@ struct RegistryCompletionGuard {
     registry: CancellationRegistry,
     id: Value,
     finished: bool,
+}
+
+struct WorkerCompletionGuard(CancellationRegistry);
+
+impl Drop for WorkerCompletionGuard {
+    fn drop(&mut self) {
+        self.0.worker_finished();
+    }
 }
 
 impl RegistryCompletionGuard {
@@ -661,6 +725,44 @@ mod tests {
         assert!(
             responses.len() <= 1,
             "a request may emit at most one response"
+        );
+    }
+
+    #[test]
+    fn mcp_dispatcher_drains_a_finishing_call_before_eof_cancellation() {
+        let (sender, receiver) = mpsc::channel();
+        let writer = SharedWriter::default();
+        let output = writer.clone();
+        let handler = Arc::new(
+            move |_name: &str,
+                  _arguments: &Map<String, Value>,
+                  _cancellation: CancellationToken| {
+                thread::sleep(Duration::from_millis(50));
+                Ok("completed before EOF grace expired".to_string())
+            },
+        );
+        let dispatcher = thread::spawn(move || {
+            run_stdio_with_handler(
+                BufReader::new(ChannelReader::new(receiver)),
+                writer,
+                Arc::new(UnicaApplication::new()),
+                handler,
+            )
+        });
+
+        send_message(
+            &sender,
+            json!({ "jsonrpc": "2.0", "id": "finite", "method": "tools/call", "params": { "name": "unica.code.search", "arguments": {} } }),
+        );
+        drop(sender);
+        dispatcher.join().unwrap();
+
+        let responses = output.responses();
+        assert_eq!(responses.len(), 1, "accepted call must publish before exit");
+        assert_eq!(responses[0]["id"], "finite");
+        assert_eq!(
+            responses[0]["result"]["content"][0]["text"],
+            "completed before EOF grace expired"
         );
     }
 
