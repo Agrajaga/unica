@@ -62,6 +62,7 @@ fn run_stdio_with_handler<R, W>(
                     &writer,
                     error_response(Value::Null, -32700, &format!("parse error: {err}")),
                 ) {
+                    registry.fail();
                     break;
                 }
                 continue;
@@ -88,6 +89,7 @@ fn run_stdio_with_handler<R, W>(
 
         if let Some(response) = handle_message(&app, message) {
             if !write_response(&writer, response) {
+                registry.fail();
                 break;
             }
         }
@@ -107,34 +109,33 @@ fn dispatch_tool_call<W: Write + Send + 'static>(
         Ok(cancellation) => cancellation,
         Err(message) => {
             if !write_response(&writer, error_response(id, -32600, &message)) {
-                registry.cancel_all();
+                registry.fail();
             }
             return;
         }
     };
 
     thread::spawn(move || {
-        let _completion = RegistryCompletionGuard::new(registry.clone(), id.clone());
-        let response = match tool_call_params(&message) {
-            Ok((name, arguments)) => {
-                let result = handler(&name, &arguments, cancellation.clone());
-                if cancellation.is_cancelled() {
-                    error_response(id.clone(), -32800, "request cancelled")
-                } else {
-                    match result {
-                        Ok(result) => success_response(
-                            id.clone(),
-                            json!({ "content": [{ "type": "text", "text": result }] }),
-                        ),
-                        Err((code, message)) => error_response(id.clone(), code, &message),
-                    }
-                }
+        let mut completion = RegistryCompletionGuard::new(registry.clone(), id.clone());
+        let result = match tool_call_params(&message) {
+            Ok((name, arguments)) => handler(&name, &arguments, cancellation.clone()),
+            Err(error) => Err(error),
+        };
+        let cancelled = completion.finish();
+        let response = if cancelled {
+            error_response(id.clone(), -32800, "request cancelled")
+        } else {
+            match result {
+                Ok(result) => success_response(
+                    id.clone(),
+                    json!({ "content": [{ "type": "text", "text": result }] }),
+                ),
+                Err((code, message)) => error_response(id.clone(), code, &message),
             }
-            Err((code, message)) => error_response(id.clone(), code, &message),
         };
 
         if !write_response(&writer, response) {
-            registry.cancel_all();
+            registry.fail();
         }
     });
 }
@@ -148,21 +149,30 @@ fn write_response<W: Write>(writer: &Arc<Mutex<W>>, response: Value) -> bool {
 
 #[derive(Clone, Default)]
 pub struct CancellationRegistry {
-    requests: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    state: Arc<Mutex<CancellationRegistryState>>,
+}
+
+#[derive(Default)]
+struct CancellationRegistryState {
+    requests: HashMap<String, CancellationToken>,
+    failed: bool,
 }
 
 impl CancellationRegistry {
     pub fn register(&self, id: &Value) -> Result<CancellationToken, String> {
         let key = request_id_key(id)?;
-        let mut requests = self
-            .requests
+        let mut state = self
+            .state
             .lock()
             .map_err(|_| "cancellation registry lock poisoned".to_string())?;
-        if requests.contains_key(&key) {
+        if state.failed {
+            return Err("dispatcher unavailable: response writer failed".to_string());
+        }
+        if state.requests.contains_key(&key) {
             return Err(format!("duplicate request id: {id}"));
         }
         let cancellation = CancellationToken::new();
-        requests.insert(key, cancellation.clone());
+        state.requests.insert(key, cancellation.clone());
         Ok(cancellation)
     }
 
@@ -170,12 +180,10 @@ impl CancellationRegistry {
         let Ok(key) = request_id_key(id) else {
             return false;
         };
-        let cancellation = self
-            .requests
-            .lock()
-            .ok()
-            .and_then(|requests| requests.get(&key).cloned());
-        if let Some(cancellation) = cancellation {
+        let Ok(state) = self.state.lock() else {
+            return false;
+        };
+        if let Some(cancellation) = state.requests.get(&key) {
             cancellation.cancel();
             true
         } else {
@@ -183,24 +191,37 @@ impl CancellationRegistry {
         }
     }
 
-    pub fn complete(&self, id: &Value) {
+    pub fn finish(&self, id: &Value) -> bool {
         let Ok(key) = request_id_key(id) else {
-            return;
+            return false;
         };
-        if let Ok(mut requests) = self.requests.lock() {
-            requests.remove(&key);
-        }
+        self.state
+            .lock()
+            .ok()
+            .and_then(|mut state| state.requests.remove(&key))
+            .is_some_and(|cancellation| cancellation.is_cancelled())
     }
 
     pub fn cancel_all(&self) {
-        let cancellations = self
-            .requests
-            .lock()
-            .map(|requests| requests.values().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for cancellation in cancellations {
-            cancellation.cancel();
+        if let Ok(state) = self.state.lock() {
+            for cancellation in state.requests.values() {
+                cancellation.cancel();
+            }
         }
+    }
+
+    fn fail(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.failed = true;
+            for cancellation in state.requests.values() {
+                cancellation.cancel();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_failed(&self) -> bool {
+        self.state.lock().map(|state| state.failed).unwrap_or(true)
     }
 }
 
@@ -211,17 +232,30 @@ fn request_id_key(id: &Value) -> Result<String, String> {
 struct RegistryCompletionGuard {
     registry: CancellationRegistry,
     id: Value,
+    finished: bool,
 }
 
 impl RegistryCompletionGuard {
     fn new(registry: CancellationRegistry, id: Value) -> Self {
-        Self { registry, id }
+        Self {
+            registry,
+            id,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self) -> bool {
+        let cancelled = self.registry.finish(&self.id);
+        self.finished = true;
+        cancelled
     }
 }
 
 impl Drop for RegistryCompletionGuard {
     fn drop(&mut self) {
-        self.registry.complete(&self.id);
+        if !self.finished {
+            self.registry.finish(&self.id);
+        }
     }
 }
 
@@ -387,6 +421,46 @@ mod tests {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(buffer);
             Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct BlockingWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        entered: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    }
+
+    impl Write for BlockingWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if !self.entered.swap(true, Ordering::SeqCst) {
+                while !self.release.load(Ordering::SeqCst) {
+                    thread::yield_now();
+                }
+            }
+            self.bytes.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FailingWriter(Arc<AtomicBool>);
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            self.0.store(true, Ordering::SeqCst);
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test writer failed",
+            ))
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -647,5 +721,106 @@ mod tests {
 
         drop(sender);
         dispatcher.join().unwrap();
+    }
+
+    #[test]
+    fn mcp_dispatcher_late_cancellation_cannot_change_a_fixed_result() {
+        let registry = CancellationRegistry::default();
+        let id = json!(7);
+        let cancellation = registry.register(&id).unwrap();
+
+        assert!(!registry.finish(&id));
+        assert!(!registry.cancel(&id));
+        assert!(!cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn mcp_dispatcher_reuses_id_while_completed_response_is_waiting_to_publish() {
+        let registry = CancellationRegistry::default();
+        let writer = BlockingWriter::default();
+        let entered = Arc::clone(&writer.entered);
+        let release = Arc::clone(&writer.release);
+        let writer = Arc::new(Mutex::new(writer));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&calls);
+        let handler: Arc<ToolCallHandler> = Arc::new(move |_, _, _| {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("done".to_string())
+        });
+        let request = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "unica.code.search", "arguments": {} } });
+
+        dispatch_tool_call(
+            request.clone(),
+            Arc::clone(&handler),
+            registry.clone(),
+            Arc::clone(&writer),
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !entered.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "first response did not reach writer"
+            );
+            thread::yield_now();
+        }
+
+        let second_dispatch = thread::spawn(move || {
+            dispatch_tool_call(request, handler, registry, writer);
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while calls.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let observed = calls.load(Ordering::SeqCst);
+        release.store(true, Ordering::SeqCst);
+        second_dispatch.join().unwrap();
+
+        assert_eq!(
+            observed, 2,
+            "completed request id remained registered until response publication"
+        );
+    }
+
+    #[test]
+    fn mcp_dispatcher_writer_failure_rejects_later_work_without_side_effects() {
+        let registry = CancellationRegistry::default();
+        let writer = FailingWriter::default();
+        let write_failed = Arc::clone(&writer.0);
+        let writer = Arc::new(Mutex::new(writer));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&calls);
+        let handler: Arc<ToolCallHandler> = Arc::new(move |_, _, _| {
+            observed_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("done".to_string())
+        });
+
+        dispatch_tool_call(
+            json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "unica.code.search", "arguments": {} } }),
+            Arc::clone(&handler),
+            registry.clone(),
+            Arc::clone(&writer),
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !write_failed.load(Ordering::SeqCst) || !registry.is_failed() {
+            assert!(
+                Instant::now() < deadline,
+                "writer failure did not become terminal"
+            );
+            thread::yield_now();
+        }
+
+        dispatch_tool_call(
+            json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": { "name": "unica.code.search", "arguments": {} } }),
+            handler,
+            registry,
+            writer,
+        );
+        thread::sleep(Duration::from_millis(20));
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "work started after terminal writer failure"
+        );
     }
 }

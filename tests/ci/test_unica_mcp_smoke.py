@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -28,18 +31,50 @@ class UnicaMcpSmokeTests(unittest.TestCase):
         assert process.stdin is not None
         assert process.stdout is not None
         assert process.stderr is not None
-        for message in messages:
-            process.stdin.write(json.dumps(message) + "\n")
-        process.stdin.flush()
+        deadline = time.monotonic() + 30
+        lines: queue.Queue[str] = queue.Queue()
 
-        responses = [json.loads(process.stdout.readline()) for _ in messages]
-        process.stdin.close()
-        return_code = process.wait(timeout=30)
-        stderr = process.stderr.read()
-        process.stdout.close()
-        process.stderr.close()
-        self.assertEqual(return_code, 0, stderr)
-        return responses
+        def read_stdout() -> None:
+            while True:
+                line = process.stdout.readline()
+                lines.put(line)
+                if not line:
+                    return
+
+        reader = threading.Thread(target=read_stdout, daemon=True)
+        reader.start()
+        try:
+            for message in messages:
+                process.stdin.write(json.dumps(message) + "\n")
+            process.stdin.flush()
+
+            expected_responses = sum("id" in message for message in messages)
+            responses = []
+            for _ in range(expected_responses):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.fail("timed out waiting for MCP response")
+                try:
+                    line = lines.get(timeout=remaining)
+                except queue.Empty:
+                    self.fail("timed out waiting for MCP response")
+                if not line:
+                    self.fail("MCP process exited before all responses arrived")
+                responses.append(json.loads(line))
+
+            process.stdin.close()
+            return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+            stderr = process.stderr.read()
+            self.assertEqual(return_code, 0, stderr)
+            return responses
+        finally:
+            if not process.stdin.closed:
+                process.stdin.close()
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            process.stdout.close()
+            process.stderr.close()
 
     def test_initialize_lists_single_unica_server(self) -> None:
         responses = self.call_mcp(
@@ -57,6 +92,17 @@ class UnicaMcpSmokeTests(unittest.TestCase):
         self.assertIn("unica.build.load", tools)
         self.assertIn("unica.runtime.execute", tools)
         self.assertIn("unica.standards.explain", tools)
+
+    def test_notifications_do_not_count_as_responses(self) -> None:
+        responses = self.call_mcp(
+            [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+            ]
+        )
+
+        self.assertEqual([response["id"] for response in responses], [1, 2])
 
     def test_mutating_dry_run_reports_cache_impact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
