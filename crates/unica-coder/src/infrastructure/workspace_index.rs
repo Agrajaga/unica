@@ -1591,6 +1591,8 @@ source-set:
                 stderr: String::new(),
                 timed_out: false,
                 cancelled: true,
+                stdout_truncated: false,
+                stderr_truncated: false,
             },
             Duration::from_millis(1),
         );
@@ -1610,6 +1612,8 @@ source-set:
                 stderr: String::new(),
                 timed_out: true,
                 cancelled: false,
+                stdout_truncated: false,
+                stderr_truncated: false,
             },
             Duration::from_millis(1),
         );

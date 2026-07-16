@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const TERMINATION_WAIT_LIMIT: Duration = Duration::from_millis(500);
 const READER_WAIT_LIMIT: Duration = Duration::from_millis(500);
+pub(crate) const STDOUT_CAPTURE_LIMIT: usize = 1024 * 1024;
+pub(crate) const STDERR_CAPTURE_LIMIT: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ManagedCommand {
@@ -29,6 +31,8 @@ pub struct ManagedOutput {
     pub stderr: String,
     pub timed_out: bool,
     pub cancelled: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
 
 pub struct ManagedChild {
@@ -65,7 +69,7 @@ impl ManagedChild {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let process_tree = ProcessTree::prepare(&mut process).map_err(process_error)?;
+        let mut process_tree = ProcessTree::prepare(&mut process).map_err(process_error)?;
         let mut child = process.spawn().map_err(process_error)?;
         if let Err(error) = process_tree.attach(&child) {
             let _ = process_tree.terminate(&mut child);
@@ -101,6 +105,7 @@ impl ManagedChild {
             ChildState::Reaped | ChildState::Terminating => Ok(false),
             ChildState::Running => match self.child.try_wait().map_err(process_error)? {
                 Some(_) => {
+                    self.process_tree.cleanup_after_leader_exit(&mut self.child);
                     self.state = ChildState::Reaped;
                     Ok(false)
                 }
@@ -130,16 +135,12 @@ impl ManagedChild {
         F: FnMut(),
     {
         drop(self.take_stdin());
-        let stdout = start_reader(self.take_stdout());
-        let stderr = start_reader(self.take_stderr());
+        let stdout = start_reader(self.take_stdout(), STDOUT_CAPTURE_LIMIT);
+        let stderr = start_reader(self.take_stderr(), STDERR_CAPTURE_LIMIT);
         let started = Instant::now();
         let mut last_callback = Instant::now();
 
         loop {
-            if let Some(status) = self.child.try_wait().map_err(process_error)? {
-                self.state = ChildState::Reaped;
-                return Ok(finish_output(status, stdout, stderr, false, false));
-            }
             if self.cancellation.is_cancelled() {
                 self.terminate()?;
                 return self.finish_after_termination(stdout, stderr, false, true);
@@ -147,6 +148,11 @@ impl ManagedChild {
             if self.timeout.is_some_and(|limit| started.elapsed() >= limit) {
                 self.terminate()?;
                 return self.finish_after_termination(stdout, stderr, true, false);
+            }
+            if let Some(status) = self.child.try_wait().map_err(process_error)? {
+                self.process_tree.cleanup_after_leader_exit(&mut self.child);
+                self.state = ChildState::Reaped;
+                return Ok(finish_output(status, stdout, stderr, false, false));
             }
 
             thread::sleep(PROCESS_POLL_INTERVAL);
@@ -159,10 +165,12 @@ impl ManagedChild {
 
     pub fn terminate(&mut self) -> Result<(), String> {
         if self.state == ChildState::Reaped {
+            self.process_tree.cleanup_after_leader_exit(&mut self.child);
             return Ok(());
         }
         if self.state == ChildState::Running {
             if self.child.try_wait().map_err(process_error)?.is_some() {
+                self.process_tree.cleanup_after_leader_exit(&mut self.child);
                 self.state = ChildState::Reaped;
                 return Ok(());
             }
@@ -192,8 +200,8 @@ impl ManagedChild {
 
     fn finish_after_termination(
         &mut self,
-        stdout: Option<Receiver<Vec<u8>>>,
-        stderr: Option<Receiver<Vec<u8>>>,
+        stdout: Option<Receiver<CapturedOutput>>,
+        stderr: Option<Receiver<CapturedOutput>>,
         timed_out: bool,
         cancelled: bool,
     ) -> Result<ManagedOutput, String> {
@@ -206,13 +214,17 @@ impl ManagedChild {
             thread::sleep(PROCESS_POLL_INTERVAL);
         }
 
+        let stdout = receive_output(stdout);
+        let stderr = receive_output(stderr);
         Ok(ManagedOutput {
             status_success: false,
             status: "termination pending".to_string(),
-            stdout: receive_output(stdout),
-            stderr: receive_output(stderr),
+            stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
             timed_out,
             cancelled,
+            stdout_truncated: stdout.truncated,
+            stderr_truncated: stderr.truncated,
         })
     }
 }
@@ -224,7 +236,10 @@ impl Drop for ManagedChild {
 }
 
 #[cfg(unix)]
-struct ProcessTree;
+struct ProcessTree {
+    process_group: Option<i32>,
+    kill_sent: bool,
+}
 
 #[cfg(unix)]
 impl ProcessTree {
@@ -240,20 +255,58 @@ impl ProcessTree {
                 Ok(())
             });
         }
-        Ok(Self)
+        Ok(Self {
+            process_group: None,
+            kill_sent: false,
+        })
     }
 
-    fn attach(&self, _child: &Child) -> io::Result<()> {
+    fn attach(&mut self, child: &Child) -> io::Result<()> {
+        self.process_group = Some(child.id() as i32);
+        self.kill_sent = false;
         Ok(())
     }
 
-    fn terminate(&self, child: &mut Child) -> io::Result<()> {
-        let process_group = -(child.id() as i32);
+    fn terminate(&mut self, _child: &mut Child) -> io::Result<()> {
+        let Some(pgid) = self.process_group else {
+            return Ok(());
+        };
+        if self.kill_sent {
+            return Ok(());
+        }
+        let process_group = -pgid;
         // SAFETY: the negative PID targets only the process group created in `prepare`.
         if unsafe { libc::kill(process_group, libc::SIGKILL) } == -1 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                self.process_group = None;
+                return Ok(());
+            }
+            return Err(error);
         }
+        self.kill_sent = true;
         Ok(())
+    }
+
+    fn cleanup_after_leader_exit(&mut self, child: &mut Child) {
+        let deadline = Instant::now() + TERMINATION_WAIT_LIMIT;
+        let _ = self.terminate(child);
+        while let Some(pgid) = self.process_group {
+            if Instant::now() >= deadline {
+                // SIGKILL was already delivered to the owned group. Forget the numeric PGID
+                // rather than risk targeting an unrelated group after identifier reuse.
+                self.process_group = None;
+                break;
+            }
+            // SAFETY: signal 0 only probes the group and cannot affect a recycled process.
+            if unsafe { libc::kill(-pgid, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                self.process_group = None;
+                break;
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+        }
     }
 }
 
@@ -313,7 +366,7 @@ impl ProcessTree {
         Ok(Self { job })
     }
 
-    fn attach(&self, child: &Child) -> io::Result<()> {
+    fn attach(&mut self, child: &Child) -> io::Result<()> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
         use windows_sys::Win32::System::Threading::ResumeThread;
@@ -336,7 +389,7 @@ impl ProcessTree {
         Ok(())
     }
 
-    fn terminate(&self, _child: &mut Child) -> io::Result<()> {
+    fn terminate(&mut self, _child: &mut Child) -> io::Result<()> {
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
 
         // SAFETY: `self.job` remains live until `Drop`.
@@ -344,6 +397,10 @@ impl ProcessTree {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    fn cleanup_after_leader_exit(&mut self, child: &mut Child) {
+        let _ = self.terminate(child);
     }
 }
 
@@ -427,12 +484,16 @@ impl ProcessTree {
         Ok(Self)
     }
 
-    fn attach(&self, _child: &Child) -> io::Result<()> {
+    fn attach(&mut self, _child: &Child) -> io::Result<()> {
         Ok(())
     }
 
-    fn terminate(&self, child: &mut Child) -> io::Result<()> {
+    fn terminate(&mut self, child: &mut Child) -> io::Result<()> {
         child.kill()
+    }
+
+    fn cleanup_after_leader_exit(&mut self, child: &mut Child) {
+        let _ = self.terminate(child);
     }
 }
 
@@ -440,16 +501,28 @@ fn process_error(error: io::Error) -> String {
     format!("process_failed: {error}")
 }
 
-fn start_reader<R>(pipe: Option<R>) -> Option<Receiver<Vec<u8>>>
+#[derive(Default)]
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn start_reader<R>(pipe: Option<R>, limit: usize) -> Option<Receiver<CapturedOutput>>
 where
     R: Read + Send + 'static,
 {
     pipe.map(|mut pipe| {
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = pipe.read_to_end(&mut bytes);
-            let _ = sender.send(bytes);
+            let mut captured = CapturedOutput::default();
+            let mut chunk = [0_u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => retain_tail(&mut captured, &chunk[..count], limit),
+                }
+            }
+            let _ = sender.send(captured);
         });
         receiver
     })
@@ -457,26 +530,57 @@ where
 
 fn finish_output(
     status: ExitStatus,
-    stdout: Option<Receiver<Vec<u8>>>,
-    stderr: Option<Receiver<Vec<u8>>>,
+    stdout: Option<Receiver<CapturedOutput>>,
+    stderr: Option<Receiver<CapturedOutput>>,
     timed_out: bool,
     cancelled: bool,
 ) -> ManagedOutput {
+    let stdout = receive_output(stdout);
+    let mut stderr = receive_output(stderr);
+    if stdout.truncated {
+        retain_tail(
+            &mut stderr,
+            b"\n[unica: stdout capture truncated; result is not parseable]\n",
+            STDERR_CAPTURE_LIMIT,
+        );
+    }
     ManagedOutput {
-        status_success: status.success(),
+        status_success: status.success() && !stdout.truncated && !cancelled && !timed_out,
         status: status.to_string(),
-        stdout: receive_output(stdout),
-        stderr: receive_output(stderr),
+        stdout: String::from_utf8_lossy(&stdout.bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr.bytes).into_owned(),
         timed_out,
         cancelled,
+        stdout_truncated: stdout.truncated,
+        stderr_truncated: stderr.truncated,
     }
 }
 
-fn receive_output(receiver: Option<Receiver<Vec<u8>>>) -> String {
-    let bytes = receiver
+fn receive_output(receiver: Option<Receiver<CapturedOutput>>) -> CapturedOutput {
+    receiver
         .and_then(|receiver| receiver.recv_timeout(READER_WAIT_LIMIT).ok())
-        .unwrap_or_default();
-    String::from_utf8_lossy(&bytes).into_owned()
+        .unwrap_or_default()
+}
+
+fn retain_tail(captured: &mut CapturedOutput, chunk: &[u8], limit: usize) {
+    if chunk.len() >= limit {
+        captured.bytes.clear();
+        captured
+            .bytes
+            .extend_from_slice(&chunk[chunk.len() - limit..]);
+        captured.truncated = true;
+        return;
+    }
+    let overflow = captured
+        .bytes
+        .len()
+        .saturating_add(chunk.len())
+        .saturating_sub(limit);
+    if overflow > 0 {
+        captured.bytes.drain(..overflow);
+        captured.truncated = true;
+    }
+    captured.bytes.extend_from_slice(chunk);
 }
 
 #[cfg(test)]
@@ -498,6 +602,7 @@ mod tests {
     const HELPER_PID_FILE_ENV: &str = "UNICA_MANAGED_CHILD_PID_FILE";
 
     #[test]
+    #[allow(clippy::zombie_processes)] // Fixture intentionally exits while its descendant remains alive.
     fn managed_child_test_helper() {
         let Ok(mode) = std::env::var(HELPER_ENV) else {
             return;
@@ -536,6 +641,36 @@ mod tests {
                 child.wait().unwrap();
             }
             "process_tree_child" => thread::sleep(Duration::from_secs(10)),
+            "process_tree_detached_leader" => {
+                let pid_file = std::env::var_os(HELPER_PID_FILE_ENV).unwrap();
+                let child = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "infrastructure::managed_child::tests::managed_child_test_helper",
+                        "--nocapture",
+                    ])
+                    .env(HELPER_ENV, "process_tree_child")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap();
+                std::fs::write(
+                    pid_file,
+                    format!("{}\n{}\n", std::process::id(), child.id()),
+                )
+                .unwrap();
+            }
+            "noisy" => {
+                let chunk = vec![b'o'; 64 * 1024];
+                for _ in 0..40 {
+                    std::io::Write::write_all(&mut std::io::stdout(), &chunk).unwrap();
+                }
+                let err = vec![b'e'; 64 * 1024];
+                for _ in 0..12 {
+                    std::io::Write::write_all(&mut std::io::stderr(), &err).unwrap();
+                }
+            }
             "write_marker" => {
                 let marker = std::env::var_os(HELPER_PID_FILE_ENV).unwrap();
                 std::fs::write(marker, b"started").unwrap();
@@ -796,6 +931,77 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_wins_over_already_successful_exit() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let output = run_helper("success", Duration::from_secs(2), cancellation).unwrap();
+        assert!(output.cancelled);
+        assert!(!output.status_success);
+    }
+
+    #[test]
+    fn managed_child_bounds_noisy_output_without_deadlock() {
+        let output = run_helper("noisy", Duration::from_secs(5), CancellationToken::new()).unwrap();
+        assert!(output.stdout_truncated);
+        assert!(output.stderr_truncated);
+        assert!(output.stdout.len() <= super::STDOUT_CAPTURE_LIMIT);
+        assert!(output.stderr.len() <= super::STDERR_CAPTURE_LIMIT);
+        assert!(
+            !output.status_success,
+            "partial stdout must not be treated as parseable success"
+        );
+        assert!(
+            output.stderr.contains("stdout capture truncated"),
+            "{}",
+            output.stderr
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reaped_leader_does_not_release_living_process_group_descendant() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "unica-managed-child-detached-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _file = FileCleanupGuard(pid_file.clone());
+        let mut managed = ManagedChild::spawn(ManagedCommand {
+            program: std::env::current_exe().unwrap(),
+            args: vec![
+                "--exact".into(),
+                "infrastructure::managed_child::tests::managed_child_test_helper".into(),
+                "--nocapture".into(),
+            ],
+            cwd: std::env::current_dir().unwrap(),
+            env: vec![
+                (
+                    OsString::from(HELPER_ENV),
+                    OsString::from("process_tree_detached_leader"),
+                ),
+                (
+                    OsString::from(HELPER_PID_FILE_ENV),
+                    pid_file.clone().into_os_string(),
+                ),
+            ],
+            timeout: None,
+            cancellation: CancellationToken::new(),
+        })
+        .unwrap();
+        let pids = read_helper_pids(&pid_file, Duration::from_secs(2));
+        let mut cleanup = ProcessCleanupGuard(pids.clone());
+        let descendant = pids[1];
+        let started = Instant::now();
+        while managed.is_running().unwrap() && started.elapsed() < Duration::from_secs(2) {}
+        drop(managed);
+        assert!(wait_until_dead(descendant, Duration::from_secs(2)));
+        cleanup.disarm();
+    }
+
+    #[test]
     fn managed_child_termination_is_idempotent_and_reaps_direct_child() {
         let mut managed = ManagedChild::spawn(ManagedCommand {
             program: std::env::current_exe().unwrap(),
@@ -940,7 +1146,7 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let process_tree = ProcessTree::prepare(&mut command).unwrap();
+        let mut process_tree = ProcessTree::prepare(&mut command).unwrap();
         let child = ChildCleanupGuard(Some(command.spawn().unwrap()));
 
         thread::sleep(Duration::from_millis(500));
