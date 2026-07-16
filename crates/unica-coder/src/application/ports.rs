@@ -53,7 +53,10 @@ impl ApplicationPorts for DefaultApplicationPorts {
         cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String> {
         if cancellation.is_cancelled() {
-            return Ok(cancelled_outcome(spec.name));
+            return Ok(AdapterOutcome::cancelled(format!(
+                "{} stopped before adapter execution",
+                spec.name
+            )));
         }
         match spec.handler {
             ToolHandler::NativeOperation { operation, .. } => NativeOperationAdapter::invoke(
@@ -140,11 +143,4 @@ impl ApplicationPorts for DefaultApplicationPorts {
     fn notify_invalidation(&self, context: &WorkspaceContext, events: &[DomainEvent]) {
         WorkspaceServiceManager::new().notify_invalidation(context, events);
     }
-}
-
-fn cancelled_outcome(tool_name: &str) -> AdapterOutcome {
-    let mut outcome = AdapterOutcome::ok(format!("{tool_name} cancelled before adapter execution"));
-    outcome.ok = false;
-    outcome.errors.push(format!("{tool_name} cancelled"));
-    outcome
 }

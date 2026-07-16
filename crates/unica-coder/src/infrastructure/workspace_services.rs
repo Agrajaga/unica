@@ -1,4 +1,4 @@
-use crate::domain::cancellation::CancellationToken;
+use crate::domain::cancellation::{cancelled_error, CancellationToken};
 use crate::domain::events::DomainEvent;
 use crate::domain::source_roots::normalize_path_identity;
 use crate::domain::workspace::WorkspaceContext;
@@ -355,7 +355,7 @@ impl<'a> WorkspaceServiceManager<'a> {
 
 fn cancellation_error(cancellation: &CancellationToken) -> Result<(), String> {
     if cancellation.is_cancelled() {
-        Err("workspace service operation cancelled".to_string())
+        Err(cancelled_error("workspace service operation stopped"))
     } else {
         Ok(())
     }
@@ -1233,6 +1233,24 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn cancellation_prefix_is_stable_for_pre_cancelled_manager_call() {
+        let context = test_context("pre-cancelled-manager");
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = WorkspaceServiceManager::new()
+            .ensure_service_cancellable(
+                &context,
+                &context.workspace_root.join("src"),
+                &cancellation,
+            )
+            .unwrap_err();
+
+        assert!(error.starts_with("cancelled:"));
+        cleanup(&context);
+    }
 
     #[test]
     fn service_identity_reuses_same_workspace_source_root_and_separates_other_roots() {

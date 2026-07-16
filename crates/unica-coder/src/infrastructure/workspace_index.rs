@@ -1,4 +1,4 @@
-use crate::domain::cancellation::CancellationToken;
+use crate::domain::cancellation::{cancelled_error, CancellationToken};
 use crate::domain::source_roots::resolve_source_root;
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
@@ -164,7 +164,7 @@ impl<'a> WorkspaceIndexService<'a> {
         }
         if cancellation.is_cancelled() {
             return IndexStartReport {
-                warnings: vec!["rlm index operation cancelled".to_string()],
+                warnings: vec![cancelled_error("rlm index operation stopped before work")],
             };
         }
 
@@ -259,7 +259,9 @@ impl<'a> WorkspaceIndexService<'a> {
         cancellation: &CancellationToken,
     ) -> IndexReadiness {
         if cancellation.is_cancelled() {
-            return IndexReadiness::Unavailable("rlm index operation cancelled".to_string());
+            return IndexReadiness::Unavailable(cancelled_error(
+                "rlm index operation stopped before work",
+            ));
         }
         let source_root =
             match resolve_source_root(context, args.get("sourceDir").and_then(Value::as_str)) {
@@ -689,7 +691,7 @@ fn run_background_job(mut job: IndexBackgroundJob) {
             let metrics =
                 BslIndexRunMetrics::from_output(&job.action, started_at, finished_at, &output);
             let message = if output.cancelled {
-                format!("rlm index {} cancelled", job.action)
+                cancelled_error(format!("rlm index {} stopped", job.action))
             } else if output.timed_out {
                 format!("rlm index {} timed out", job.action)
             } else {
@@ -768,6 +770,9 @@ fn map_managed_output(output: ManagedOutput, elapsed: Duration) -> IndexOutput {
 }
 
 fn readiness_from_info(output: &IndexOutput) -> IndexReadiness {
+    if output.cancelled {
+        return IndexReadiness::Unavailable(cancelled_error("rlm index info stopped"));
+    }
     if !output.status_success {
         return IndexReadiness::Unavailable(output.stderr.trim().to_string());
     }
@@ -1145,6 +1150,45 @@ mod tests {
         assert!(runner.commands.borrow().is_empty());
         assert!(!status_path(&context).exists());
         cleanup(&context);
+    }
+
+    #[test]
+    fn cancellation_prefix_is_stable_for_pre_cancelled_index_requests() {
+        let context = test_context("pre-cancelled-prefix");
+        let runner = RecordingIndexRunner::default();
+        let service = WorkspaceIndexService::with_runner(&runner);
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let report =
+            service.start_for_workspace_cancellable(&context, &Map::new(), false, &cancellation);
+        let readiness = service.ready_index_cancellable(&context, &Map::new(), &cancellation);
+
+        assert!(report.warnings[0].starts_with("cancelled:"));
+        assert!(matches!(
+            readiness,
+            IndexReadiness::Unavailable(error) if error.starts_with("cancelled:")
+        ));
+        assert!(runner.commands.borrow().is_empty());
+        cleanup(&context);
+    }
+
+    #[test]
+    fn cancellation_prefix_is_stable_for_cancelled_index_output() {
+        let readiness = readiness_from_info(&IndexOutput {
+            status_success: false,
+            status: "cancelled".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled: true,
+            duration_ms: 0,
+        });
+
+        assert!(matches!(
+            readiness,
+            IndexReadiness::Unavailable(error) if error.starts_with("cancelled:")
+        ));
     }
 
     #[test]
@@ -1608,10 +1652,10 @@ source-set:
         let current_status: BslIndexStatus =
             serde_json::from_str(&fs::read_to_string(&status).unwrap()).unwrap();
         assert_eq!(current_status.status, "failed");
-        assert_eq!(
-            current_status.message.as_deref(),
-            Some("rlm index build cancelled")
-        );
+        assert!(current_status
+            .message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("cancelled:")));
         assert!(current_status.last_run.is_some());
         let current_lock = read_lock_path(&lock).expect("cancelled job should leave a marker");
         assert_eq!(current_lock.state, "released");

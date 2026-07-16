@@ -1,4 +1,4 @@
-use crate::domain::cancellation::CancellationToken;
+use crate::domain::cancellation::{CancellationToken, CANCELLED_PREFIX};
 use crate::domain::source_roots::resolve_source_root;
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
@@ -160,7 +160,9 @@ impl<'a> CliAdapter<'a> {
         cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String> {
         if cancellation.is_cancelled() {
-            return Ok(cancelled_outcome(tool_name));
+            return Ok(AdapterOutcome::cancelled(format!(
+                "{tool_name} cancelled before adapter work"
+            )));
         }
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root for internal adapter lookup".to_string()
@@ -207,6 +209,14 @@ impl<'a> CliAdapter<'a> {
             timeout: process_timeout,
             cancellation: cancellation.clone(),
         })?;
+        if output.cancelled {
+            return Ok(cancelled_process_outcome(
+                tool_name,
+                output.stdout,
+                output.stderr,
+                Some(command),
+            ));
+        }
         let ok = output.status_success;
         Ok(AdapterOutcome {
             ok,
@@ -289,7 +299,9 @@ impl<'a> RuntimeAdapter<'a> {
         cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String> {
         if cancellation.is_cancelled() {
-            return Ok(cancelled_outcome(tool_name));
+            return Ok(AdapterOutcome::cancelled(format!(
+                "{tool_name} cancelled before adapter work"
+            )));
         }
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root for internal adapter lookup".to_string()
@@ -352,6 +364,14 @@ impl<'a> RuntimeAdapter<'a> {
         let ok = output.status_success;
         let stdout = redact_sensitive_text(&output.stdout);
         let stderr = redact_sensitive_text(&output.stderr);
+        if output.cancelled {
+            return Ok(cancelled_process_outcome(
+                tool_name,
+                stdout,
+                stderr,
+                Some(command),
+            ));
+        }
         Ok(AdapterOutcome {
             ok,
             summary: if ok {
@@ -441,7 +461,9 @@ impl<'a> CodeSearchAdapter<'a> {
         cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String> {
         if cancellation.is_cancelled() {
-            return Ok(cancelled_outcome(tool_name));
+            return Ok(AdapterOutcome::cancelled(format!(
+                "{tool_name} cancelled before adapter work"
+            )));
         }
         if dry_run {
             return Ok(AdapterOutcome {
@@ -476,6 +498,16 @@ impl<'a> CodeSearchAdapter<'a> {
             .map(|section| section.section.clone())
             .collect::<Vec<_>>()
             .join("\n\n");
+        if let Some(error) = warnings
+            .iter()
+            .find(|error| error.starts_with(CANCELLED_PREFIX))
+        {
+            let mut outcome = AdapterOutcome::cancelled(
+                error.strip_prefix(CANCELLED_PREFIX).unwrap_or(error).trim(),
+            );
+            outcome.stdout = Some(stdout);
+            return Ok(outcome);
+        }
         Ok(AdapterOutcome {
             ok,
             summary: if ok {
@@ -590,10 +622,16 @@ fn format_section(name: &str, text: &str) -> String {
     }
 }
 
-fn cancelled_outcome(tool_name: &str) -> AdapterOutcome {
-    let mut outcome = AdapterOutcome::ok(format!("{tool_name} cancelled before adapter work"));
-    outcome.ok = false;
-    outcome.errors.push(format!("{tool_name} cancelled"));
+fn cancelled_process_outcome(
+    tool_name: &str,
+    stdout: String,
+    stderr: String,
+    command: Option<Vec<String>>,
+) -> AdapterOutcome {
+    let mut outcome = AdapterOutcome::cancelled(format!("{tool_name} process stopped"));
+    outcome.stdout = Some(stdout);
+    outcome.stderr = Some(stderr);
+    outcome.command = command;
     outcome
 }
 
@@ -612,20 +650,30 @@ fn successful_backend(
 
 fn unavailable_backend(name: &'static str, reason: impl Into<String>) -> SearchBackendResult {
     let reason = reason.into();
+    let diagnostics = if reason.starts_with(CANCELLED_PREFIX) {
+        vec![reason.clone()]
+    } else {
+        vec![format!("{name} unavailable: {reason}")]
+    };
     SearchBackendResult {
         section: format_section(name, &format!("unavailable: {reason}")),
         ok: false,
-        diagnostics: vec![format!("{name} unavailable: {reason}")],
+        diagnostics,
         artifacts: Vec::new(),
     }
 }
 
 fn failed_backend(name: &'static str, reason: impl Into<String>) -> SearchBackendResult {
     let reason = reason.into();
+    let diagnostics = if reason.starts_with(CANCELLED_PREFIX) {
+        vec![reason.clone()]
+    } else {
+        vec![format!("{name} failed: {reason}")]
+    };
     SearchBackendResult {
         section: format_section(name, &format!("failed: {reason}")),
         ok: false,
-        diagnostics: vec![format!("{name} failed: {reason}")],
+        diagnostics,
         artifacts: Vec::new(),
     }
 }
@@ -810,7 +858,9 @@ impl<'a> CodeNavigationAdapter<'a> {
         cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String> {
         if cancellation.is_cancelled() {
-            return Ok(cancelled_outcome(tool_name));
+            return Ok(AdapterOutcome::cancelled(format!(
+                "{tool_name} cancelled before adapter work"
+            )));
         }
         if dry_run {
             return Ok(AdapterOutcome {
@@ -942,6 +992,15 @@ impl<'a> CodeNavigationAdapter<'a> {
             timeout: Some(DEFAULT_PROCESS_TIMEOUT),
             cancellation: cancellation.clone(),
         })?;
+        if output.cancelled {
+            let body = grep_body(&output.stdout, mode, limit);
+            return Ok(cancelled_process_outcome(
+                tool_name,
+                format_section("git-grep", &body),
+                output.stderr,
+                Some(std::iter::once("git".to_string()).chain(git_args).collect()),
+            ));
+        }
         let body = grep_body(&output.stdout, mode, limit);
         let no_matches = body.is_empty()
             && !output.status_success
@@ -1092,7 +1151,9 @@ impl<'a> BslAnalyzerMcpAdapter<'a> {
         cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String> {
         if cancellation.is_cancelled() {
-            return Ok(cancelled_outcome(tool_name));
+            return Ok(AdapterOutcome::cancelled(format!(
+                "{tool_name} cancelled before adapter work"
+            )));
         }
         if tool_name == "unica.code.diagnostics" && diagnostics_mode(args) == "analyze" {
             let cli_args = diagnostics_analyze_args(args);
@@ -1776,11 +1837,20 @@ fn metadata_profile_unavailable_outcome(
 }
 
 fn index_unavailable_outcome(tool_name: &str, readiness: IndexReadiness) -> AdapterOutcome {
+    let warning = readiness_warning(readiness);
+    if warning.starts_with(CANCELLED_PREFIX) {
+        return AdapterOutcome::cancelled(
+            warning
+                .strip_prefix(CANCELLED_PREFIX)
+                .unwrap_or(&warning)
+                .trim(),
+        );
+    }
     AdapterOutcome {
         ok: true,
         summary: format!("{tool_name} could not read RLM index"),
         changes: Vec::new(),
-        warnings: vec![readiness_warning(readiness)],
+        warnings: vec![warning],
         errors: Vec::new(),
         artifacts: Vec::new(),
         stdout: None,
@@ -1794,6 +1864,11 @@ fn readiness_warning(readiness: IndexReadiness) -> String {
         IndexReadiness::Ready { .. } => "rlm index ready".to_string(),
         IndexReadiness::Missing => "rlm index unavailable: index is missing".to_string(),
         IndexReadiness::Stale | IndexReadiness::Building => "rlm index building".to_string(),
+        IndexReadiness::Failed(error) | IndexReadiness::Unavailable(error)
+            if error.starts_with(CANCELLED_PREFIX) =>
+        {
+            error
+        }
         IndexReadiness::Failed(error) | IndexReadiness::Unavailable(error) => {
             format!("rlm index unavailable: {error}")
         }
@@ -4211,6 +4286,171 @@ source-set:
             .warnings
             .iter()
             .any(|warning| warning.contains("exit status: 2")));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn cancellation_prefix_is_stable_for_pre_cancelled_adapter_call() {
+        let context = temp_context("cli-pre-cancelled");
+        let runner = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: false,
+            },
+        };
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let outcome = CliAdapter::with_runner("v8-runner", &["build"], "build/runtime", &runner)
+            .invoke_cancellable(
+                "unica.build.load",
+                &Map::new(),
+                &context,
+                false,
+                true,
+                &cancellation,
+            )
+            .unwrap();
+
+        assert!(outcome.errors[0].starts_with("cancelled:"));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn cancellation_prefix_is_stable_for_cancelled_cli_output() {
+        let context = temp_context("cli-cancelled-output");
+        let runner = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: false,
+                status: "cancelled".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: true,
+            },
+        };
+
+        let outcome = CliAdapter::with_runner("v8-runner", &["build"], "build/runtime", &runner)
+            .invoke("unica.build.load", &Map::new(), &context, false, true)
+            .unwrap();
+
+        assert!(outcome.errors[0].starts_with("cancelled:"));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn cancellation_prefix_is_stable_for_cancelled_runtime_output() {
+        let context = temp_context("runtime-cancelled-output");
+        let runner = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: false,
+                status: "cancelled".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: true,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("build"));
+
+        let outcome = RuntimeAdapter::with_runner(&runner)
+            .invoke("unica.runtime.execute", &args, &context, false, true)
+            .unwrap();
+
+        assert!(outcome.errors[0].starts_with("cancelled:"));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn cancellation_prefix_is_stable_for_cancelled_git_grep_output() {
+        let context = temp_context("grep-cancelled-output");
+        let index = FakeIndexRunner::default();
+        let grep = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: false,
+                status: "cancelled".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: true,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("SmokeProcedure"));
+
+        let outcome = CodeNavigationAdapter::with_runners(&index, &grep)
+            .invoke("unica.code.grep", &args, &context, false)
+            .unwrap();
+
+        assert!(outcome.errors[0].starts_with("cancelled:"));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn cancellation_prefix_is_stable_when_code_search_backend_is_cancelled() {
+        let context = temp_context("search-cancelled-output");
+        let index = FakeIndexRunner::default();
+        let grep = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: false,
+                status: "cancelled".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: true,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("SmokeProcedure"));
+
+        let outcome = CodeSearchAdapter::with_runners(&grep, &index)
+            .invoke("unica.code.search", &args, &context, false)
+            .unwrap();
+
+        assert!(!outcome.ok);
+        assert!(outcome.errors[0].starts_with("cancelled:"));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn cancellation_prefix_is_stable_when_navigation_index_is_cancelled() {
+        let context = temp_context("navigation-index-cancelled");
+        let index = FakeIndexRunner {
+            outputs: RefCell::new(vec![IndexOutput {
+                status_success: false,
+                status: "cancelled".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: true,
+                duration_ms: 0,
+            }]),
+            ..Default::default()
+        };
+        let grep = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: false,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("name".to_string(), json!("SmokeProcedure"));
+
+        let outcome = CodeNavigationAdapter::with_runners(&index, &grep)
+            .invoke("unica.code.definition", &args, &context, false)
+            .unwrap();
+
+        assert!(!outcome.ok);
+        assert!(outcome.errors[0].starts_with("cancelled:"));
         cleanup_context(&context);
     }
 

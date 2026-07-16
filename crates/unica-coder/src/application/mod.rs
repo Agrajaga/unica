@@ -2363,12 +2363,10 @@ mod tests {
                 cancellation: &CancellationToken,
             ) -> Result<AdapterOutcome, String> {
                 *self.observed_cancelled.lock().unwrap() = Some(cancellation.is_cancelled());
-                let mut outcome = AdapterOutcome::ok("cancelled before adapter work");
                 if cancellation.is_cancelled() {
-                    outcome.ok = false;
-                    outcome.errors.push("operation cancelled".to_string());
+                    return Ok(AdapterOutcome::cancelled("recording port stopped"));
                 }
-                Ok(outcome)
+                Ok(AdapterOutcome::ok("recording port completed"))
             }
 
             fn cache_report(
@@ -2404,10 +2402,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(*ports.observed_cancelled.lock().unwrap(), Some(true));
-        assert!(result
-            .errors
-            .iter()
-            .any(|error| error.contains("cancelled")));
+        assert!(result.errors[0].starts_with("cancelled:"));
+    }
+
+    #[test]
+    fn call_tool_cancellable_default_ports_uses_stable_cancellation_prefix() {
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let result = UnicaApplication::new()
+            .call_tool_cancellable("unica.project.status", &Map::new(), token)
+            .unwrap();
+
+        assert!(!result.ok);
+        assert!(result.errors[0].starts_with("cancelled:"));
     }
 
     #[test]
