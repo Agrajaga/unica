@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const EOF_DRAIN_GRACE: Duration = Duration::from_millis(250);
 const EOF_CANCELLATION_GRACE: Duration = Duration::from_secs(2);
+const MCP_INPUT_LINE_LIMIT: usize = 8 * 1024 * 1024;
+const MCP_MAX_TOOL_WORKERS: usize = 32;
 
 pub fn run_stdio() {
     let stdin = io::stdin();
@@ -37,7 +39,7 @@ type ToolCallHandler = dyn Fn(&str, &Map<String, Value>, CancellationToken) -> R
     + Sync;
 
 fn run_stdio_with_handler<R, W>(
-    reader: R,
+    mut reader: R,
     writer: W,
     app: Arc<UnicaApplication>,
     handler: Arc<ToolCallHandler>,
@@ -48,17 +50,31 @@ fn run_stdio_with_handler<R, W>(
     let registry = CancellationRegistry::default();
     let writer = Arc::new(Mutex::new(writer));
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(line) if !line.trim().is_empty() => line,
-            Ok(_) => continue,
+    loop {
+        let line = match read_bounded_line(&mut reader, MCP_INPUT_LINE_LIMIT) {
+            Ok(Some(BoundedLine::Line(line))) if !line.iter().all(u8::is_ascii_whitespace) => line,
+            Ok(Some(BoundedLine::Line(_))) => continue,
+            Ok(Some(BoundedLine::TooLarge)) => {
+                if !registry.publish(
+                    &writer,
+                    error_response(
+                        Value::Null,
+                        -32700,
+                        "parse error: input line exceeds 8388608 bytes",
+                    ),
+                ) {
+                    break;
+                }
+                continue;
+            }
+            Ok(None) => break,
             Err(err) => {
                 let _ = writeln!(io::stderr(), "failed to read stdin: {err}");
                 break;
             }
         };
 
-        let message = match serde_json::from_str::<Value>(&line) {
+        let message = match serde_json::from_slice::<Value>(&line) {
             Ok(message) => message,
             Err(err) => {
                 if !registry.publish(
@@ -104,6 +120,47 @@ fn run_stdio_with_handler<R, W>(
     registry.close();
 }
 
+enum BoundedLine {
+    Line(Vec<u8>),
+    TooLarge,
+}
+
+fn read_bounded_line<R: BufRead>(reader: &mut R, limit: usize) -> io::Result<Option<BoundedLine>> {
+    let mut line = Vec::new();
+    let mut too_large = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return if line.is_empty() && !too_large {
+                Ok(None)
+            } else if too_large {
+                Ok(Some(BoundedLine::TooLarge))
+            } else {
+                Ok(Some(BoundedLine::Line(line)))
+            };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        let content_len = newline.unwrap_or(available.len());
+        if !too_large {
+            if line.len().saturating_add(content_len) > limit {
+                too_large = true;
+                line.clear();
+            } else {
+                line.extend_from_slice(&available[..content_len]);
+            }
+        }
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(Some(if too_large {
+                BoundedLine::TooLarge
+            } else {
+                BoundedLine::Line(line)
+            }));
+        }
+    }
+}
+
 fn dispatch_tool_call<W: Write + Send + 'static>(
     message: Value,
     handler: Arc<ToolCallHandler>,
@@ -124,28 +181,46 @@ fn dispatch_tool_call<W: Write + Send + 'static>(
         return false;
     }
 
-    thread::spawn(move || {
-        let _worker = WorkerCompletionGuard(registry.clone());
-        let mut completion = RegistryCompletionGuard::new(registry.clone(), id.clone());
-        let result = match tool_call_params(&message) {
-            Ok((name, arguments)) => handler(&name, &arguments, cancellation.clone()),
-            Err(error) => Err(error),
-        };
-        let cancelled = completion.finish();
-        let response = if cancelled {
-            error_response(id.clone(), -32800, "request cancelled")
-        } else {
-            match result {
-                Ok(result) => success_response(
-                    id.clone(),
-                    json!({ "content": [{ "type": "text", "text": result }] }),
-                ),
-                Err((code, message)) => error_response(id.clone(), code, &message),
-            }
-        };
+    let failure_id = id.clone();
+    let failure_registry = registry.clone();
+    let failure_writer = Arc::clone(&writer);
+    let spawn = thread::Builder::new()
+        .name("unica-mcp-tool".into())
+        .spawn(move || {
+            let _worker = WorkerCompletionGuard(registry.clone());
+            let mut completion = RegistryCompletionGuard::new(registry.clone(), id.clone());
+            let result = match tool_call_params(&message) {
+                Ok((name, arguments)) => handler(&name, &arguments, cancellation.clone()),
+                Err(error) => Err(error),
+            };
+            let cancelled = completion.finish();
+            let response = if cancelled {
+                error_response(id.clone(), -32800, "request cancelled")
+            } else {
+                match result {
+                    Ok(result) => success_response(
+                        id.clone(),
+                        json!({ "content": [{ "type": "text", "text": result }] }),
+                    ),
+                    Err((code, message)) => error_response(id.clone(), code, &message),
+                }
+            };
 
-        registry.publish(&writer, response);
-    });
+            registry.publish(&writer, response);
+        });
+    if let Err(error) = spawn {
+        failure_registry.worker_finished();
+        failure_registry.finish(&failure_id);
+        failure_registry.publish(
+            &failure_writer,
+            error_response(
+                failure_id,
+                -32603,
+                &format!("dispatcher unavailable: failed to spawn tool worker: {error}"),
+            ),
+        );
+        return false;
+    }
     true
 }
 
@@ -235,6 +310,9 @@ impl CancellationRegistry {
             .map_err(|_| "dispatcher activity lock poisoned".to_string())?;
         if activity.closed {
             return Err("dispatcher unavailable: publication gate closed".to_string());
+        }
+        if activity.handlers >= MCP_MAX_TOOL_WORKERS {
+            return Err(format!("dispatcher overloaded: at most {MCP_MAX_TOOL_WORKERS} concurrent tools/call requests are allowed"));
         }
         activity.handlers += 1;
         Ok(())
@@ -638,6 +716,68 @@ mod tests {
         let request = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" });
         let response = handle_message(&app, request).unwrap();
         assert_eq!(response["result"]["serverInfo"]["name"], "unica");
+    }
+
+    #[test]
+    fn mcp_rejects_oversized_jsonl_without_allocating_the_line() {
+        let mut input = vec![b'x'; MCP_INPUT_LINE_LIMIT + 1];
+        input.push(b'\n');
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n");
+        let writer = SharedWriter::default();
+        let output = writer.clone();
+        run_stdio_with(
+            BufReader::new(std::io::Cursor::new(input)),
+            writer,
+            Arc::new(UnicaApplication::new()),
+        );
+        let responses = output.responses();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["error"]["code"], -32700);
+        assert_eq!(responses[1]["id"], 2);
+    }
+
+    #[test]
+    fn mcp_worker_admission_is_bounded_and_reusable() {
+        let registry = CancellationRegistry::default();
+        for _ in 0..MCP_MAX_TOOL_WORKERS {
+            registry.worker_started().unwrap();
+        }
+        assert!(registry
+            .worker_started()
+            .unwrap_err()
+            .contains("overloaded"));
+        registry.worker_finished();
+        registry.worker_started().unwrap();
+        for _ in 0..MCP_MAX_TOOL_WORKERS {
+            registry.worker_finished();
+        }
+    }
+
+    #[test]
+    fn mcp_overload_has_deterministic_json_rpc_error() {
+        let registry = CancellationRegistry::default();
+        for _ in 0..MCP_MAX_TOOL_WORKERS {
+            registry.worker_started().unwrap();
+        }
+        let writer = SharedWriter::default();
+        let output = writer.clone();
+        let dispatched = dispatch_tool_call(
+            json!({"id":"overload","params":{"name":"unica.code.search","arguments":{}}}),
+            Arc::new(|_, _, _| Ok("must not run".into())),
+            registry.clone(),
+            Arc::new(Mutex::new(writer)),
+        );
+        assert!(!dispatched);
+        let responses = output.responses();
+        assert_eq!(responses[0]["id"], "overload");
+        assert_eq!(responses[0]["error"]["code"], -32603);
+        assert!(responses[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("overloaded"));
+        for _ in 0..MCP_MAX_TOOL_WORKERS {
+            registry.worker_finished();
+        }
     }
 
     #[test]
