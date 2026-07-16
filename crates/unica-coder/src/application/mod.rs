@@ -925,6 +925,34 @@ fn configuration_tools() -> Vec<ToolSpec> {
             },
         },
         ToolSpec {
+            name: "unica.epf.init",
+            description:
+                "Create a make-ready external data processor scaffold in a Designer/platform-XML external source-set, optionally with a managed form.",
+            mutating: true,
+            cache_access: cache_access_for(
+                "epf-init",
+                Some(DomainEventKind::SourceSetChanged),
+            ),
+            handler: ToolHandler::NativeOperation {
+                operation: "epf-init",
+                event: Some(DomainEventKind::SourceSetChanged),
+            },
+        },
+        ToolSpec {
+            name: "unica.erf.init",
+            description:
+                "Create a make-ready external report scaffold in a Designer/platform-XML external source-set, optionally with a managed form.",
+            mutating: true,
+            cache_access: cache_access_for(
+                "erf-init",
+                Some(DomainEventKind::SourceSetChanged),
+            ),
+            handler: ToolHandler::NativeOperation {
+                operation: "erf-init",
+                event: Some(DomainEventKind::SourceSetChanged),
+            },
+        },
+        ToolSpec {
             name: "unica.cfe.patch_method",
             description: "Generate a CFE method interceptor.",
             mutating: true,
@@ -1345,6 +1373,8 @@ mod tests {
         assert!(names.contains(&"unica.mxl.compile"));
         assert!(names.contains(&"unica.role.validate"));
         assert!(names.contains(&"unica.support.edit"));
+        assert!(names.contains(&"unica.epf.init"));
+        assert!(names.contains(&"unica.erf.init"));
         assert!(names.contains(&"unica.build.load"));
         assert!(names.contains(&"unica.runtime.execute"));
         assert!(names.contains(&"unica.code.definition"));
@@ -1939,6 +1969,173 @@ mod tests {
         args.insert("Value".to_string(), Value::String(value.to_string()));
         args.insert("NoValidate".to_string(), Value::Bool(true));
         args
+    }
+
+    #[test]
+    fn cf_edit_definition_file_rejects_invalid_child_object_before_sidecar_writes() {
+        let mut violations = Vec::new();
+
+        for (sidecar_operation, sidecar_value, sidecar_name, child_operation, child_value, error) in [
+            (
+                "set-panels",
+                json!({"top": ["open"]}),
+                "ClientApplicationInterface.xml",
+                "add-childObject",
+                "SyntheticMetadata.Unknown",
+                "Unknown type 'SyntheticMetadata'",
+            ),
+            (
+                "set-panels",
+                json!({"top": ["open"]}),
+                "ClientApplicationInterface.xml",
+                "remove-childObject",
+                "SyntheticMetadata.Unknown",
+                "Unknown type 'SyntheticMetadata'",
+            ),
+            (
+                "set-home-page",
+                json!({"template": "OneColumn", "left": ["CommonForm.Demo"]}),
+                "HomePageWorkArea.xml",
+                "add-childObject",
+                "SyntheticMetadata.Unknown",
+                "Unknown type 'SyntheticMetadata'",
+            ),
+            (
+                "set-home-page",
+                json!({"template": "OneColumn", "left": ["CommonForm.Demo"]}),
+                "HomePageWorkArea.xml",
+                "remove-childObject",
+                "SyntheticMetadata.Unknown",
+                "Unknown type 'SyntheticMetadata'",
+            ),
+            (
+                "set-panels",
+                json!({"top": ["open"]}),
+                "ClientApplicationInterface.xml",
+                "add-childObject",
+                "Catalog.",
+                "Invalid format 'Catalog.', expected 'Type.Name'",
+            ),
+            (
+                "set-panels",
+                json!({"top": ["open"]}),
+                "ClientApplicationInterface.xml",
+                "remove-childObject",
+                "Catalog.",
+                "Invalid format 'Catalog.', expected 'Type.Name'",
+            ),
+        ] {
+            let (root, workspace, _) = support_test_workspace(
+                &format!("unica-cf-edit-unknown-kind-atomic-{sidecar_operation}-{child_operation}"),
+                String::new(),
+            );
+            let config_path = workspace.join("src/Configuration.xml");
+            let definition_path =
+                workspace.join(format!("{sidecar_operation}-{child_operation}.json"));
+            std::fs::write(
+                &definition_path,
+                serde_json::to_string(&json!([
+                    {"operation": sidecar_operation, "value": sidecar_value},
+                    {"operation": child_operation, "value": child_value}
+                ]))
+                .unwrap(),
+            )
+            .unwrap();
+            let config_before = std::fs::read(&config_path).unwrap();
+            let definition_before = std::fs::read(&definition_path).unwrap();
+            let sidecar_path = workspace.join("src/Ext").join(sidecar_name);
+            let sidecar_before = b"sidecar content before failed batch";
+            std::fs::write(&sidecar_path, sidecar_before).unwrap();
+
+            let mut args = Map::new();
+            args.insert(
+                "cwd".to_string(),
+                Value::String(workspace.display().to_string()),
+            );
+            args.insert("dryRun".to_string(), Value::Bool(false));
+            args.insert("ConfigPath".to_string(), Value::String("src".to_string()));
+            args.insert(
+                "DefinitionFile".to_string(),
+                Value::String(definition_path.display().to_string()),
+            );
+            args.insert("NoValidate".to_string(), Value::Bool(true));
+
+            let result = UnicaApplication::new()
+                .call_tool("unica.cf.edit", &args)
+                .unwrap();
+
+            let case = format!("{sidecar_operation} -> {child_operation} {child_value}");
+            if result.ok {
+                violations.push(format!("{case}: batch unexpectedly succeeded"));
+            }
+            if !result.errors.join("\n").contains(error) {
+                violations.push(format!("{case}: wrong error: {result:?}"));
+            }
+            if std::fs::read(&config_path).unwrap() != config_before {
+                violations.push(format!("{case}: Configuration.xml changed"));
+            }
+            if std::fs::read(&definition_path).unwrap() != definition_before {
+                violations.push(format!("{case}: definition file changed"));
+            }
+            if std::fs::read(&sidecar_path).unwrap() != sidecar_before {
+                violations.push(format!(
+                    "{case}: failed batch changed {}",
+                    sidecar_path.display()
+                ));
+            }
+
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        assert!(
+            violations.is_empty(),
+            "failed batches must leave all affected files byte-identical: {violations:#?}"
+        );
+    }
+
+    #[test]
+    fn cf_edit_definition_file_keeps_valid_ordered_child_object_batch() {
+        let (root, workspace, _) =
+            support_test_workspace("unica-cf-edit-known-kind-batch", String::new());
+        let definition_path = workspace.join("ordered-batch.json");
+        std::fs::write(
+            &definition_path,
+            serde_json::to_string(&json!([
+                {"operation": "set-panels", "value": {"top": ["open"]}},
+                {"operation": "remove-childObject", "value": "Catalog.Items"},
+                {"operation": "add-childObject", "value": "Catalog.Items"}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut args = Map::new();
+        args.insert(
+            "cwd".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        args.insert("dryRun".to_string(), Value::Bool(false));
+        args.insert("ConfigPath".to_string(), Value::String("src".to_string()));
+        args.insert(
+            "DefinitionFile".to_string(),
+            Value::String(definition_path.display().to_string()),
+        );
+        args.insert("NoValidate".to_string(), Value::Bool(true));
+
+        let result = UnicaApplication::new()
+            .call_tool("unica.cf.edit", &args)
+            .unwrap();
+
+        assert!(result.ok, "{result:?}");
+        assert!(workspace
+            .join("src/Ext/ClientApplicationInterface.xml")
+            .is_file());
+        assert!(
+            std::fs::read_to_string(workspace.join("src/Configuration.xml"))
+                .unwrap()
+                .contains("<Catalog>Items</Catalog>")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn cf_edit_issue55_config_xml(child_indent: &str) -> String {
@@ -3164,6 +3361,52 @@ mod tests {
         assert!(
             !config_text.contains("<Report>MetaCompileFormatReport</Report>\n\t\t</ChildObjects>")
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn meta_compile_catalog_comment_emits_single_object_comment() {
+        let root = temp_meta_compile_workspace("unica-meta-compile-catalog-comment");
+        let workspace = root.join("workspace");
+        let src = workspace.join("src");
+        let fixtures = workspace.join("fixtures");
+        std::fs::create_dir_all(&fixtures).unwrap();
+        let json_path = fixtures.join("catalog-comment.json");
+        std::fs::write(
+            &json_path,
+            r#"{
+  "type": "Catalog",
+  "name": "Issue67Catalog",
+  "synonym": "Issue67Catalog",
+  "comment": "TEST-COMMENT"
+}"#,
+        )
+        .unwrap();
+
+        let result = call_meta_compile(&workspace, &json_path);
+
+        assert!(result.ok, "{:?}", result.stderr);
+        let xml_path = src.join("Catalogs").join("Issue67Catalog.xml");
+        assert!(xml_path.is_file());
+        let xml = std::fs::read_to_string(&xml_path).unwrap();
+        assert_eq!(xml.matches("<Comment>TEST-COMMENT</Comment>").count(), 1);
+        let doc = roxmltree::Document::parse(xml.trim_start_matches('\u{feff}')).unwrap();
+        let catalog = doc
+            .root_element()
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "Catalog")
+            .unwrap();
+        let properties = catalog
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "Properties")
+            .unwrap();
+        let comments = properties
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "Comment")
+            .collect::<Vec<_>>();
+        assert_eq!(comments.len(), 1, "{xml}");
+        assert_eq!(comments[0].text(), Some("TEST-COMMENT"));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -5332,6 +5575,211 @@ mod tests {
         assert!(result.cache.events.is_empty(), "{result:?}");
         assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
         assert!(!src.join("CommonModules/PreviewSupportGuard.xml").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_init_preview_is_path_guarded_and_source_set_typed() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-external-init-contract-{}",
+            std::process::id()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            concat!(
+                "format: DESIGNER\n",
+                "source-set:\n",
+                "  - name: processors\n",
+                "    type: EXTERNAL_DATA_PROCESSORS\n",
+                "    path: epf\n",
+                "  - name: reports\n",
+                "    type: EXTERNAL_REPORTS\n",
+                "    path: erf\n",
+                "  - name: russian-processors\n",
+                "    type: EXTERNAL_DATA_PROCESSORS\n",
+                "    path: епф\n",
+            ),
+        )
+        .unwrap();
+
+        let mut args = Map::new();
+        args.insert(
+            "cwd".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        args.insert("dryRun".to_string(), Value::Bool(true));
+        args.insert("Name".to_string(), Value::String("Preview".to_string()));
+        args.insert("OutputDir".to_string(), Value::String("epf".to_string()));
+
+        let preview = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap();
+        assert!(preview.ok, "{:?}", preview.errors);
+        assert_eq!(preview.artifacts.len(), 2);
+        assert!(!workspace.join("epf").exists());
+
+        args.insert("OutputDir".to_string(), Value::String("EPF".to_string()));
+        let error = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap_err();
+        assert!(error.contains("exact source-set root"), "{error}");
+        assert!(!workspace.join("EPF").exists());
+
+        args.insert("OutputDir".to_string(), Value::String("ЕПФ".to_string()));
+        let error = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap_err();
+        assert!(error.contains("exact source-set root"), "{error}");
+        assert!(!workspace.join("ЕПФ").exists());
+
+        args.insert(
+            "OutputDir".to_string(),
+            Value::String("epf/nested".to_string()),
+        );
+        let error = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap_err();
+        assert!(error.contains("source-set root"), "{error}");
+        assert!(!workspace.join("epf").exists());
+
+        args.insert("OutputDir".to_string(), Value::String("erf".to_string()));
+        let error = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap_err();
+        assert!(error.contains("source-set `reports`"), "{error}");
+        assert!(error.contains("ExternalReport"), "{error}");
+        assert!(!workspace.join("erf").exists());
+
+        args.insert(
+            "OutputDir".to_string(),
+            Value::String("../outside".to_string()),
+        );
+        let error = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap_err();
+        assert!(error.contains("outside workspace root"), "{error}");
+        assert!(!root.join("outside").exists());
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(workspace.join("erf"), workspace.join("epf-link")).unwrap();
+            args.insert(
+                "OutputDir".to_string(),
+                Value::String("epf-link".to_string()),
+            );
+            let error = UnicaApplication::new()
+                .call_tool("unica.epf.init", &args)
+                .unwrap_err();
+            assert!(error.contains("must not traverse symlink"), "{error}");
+        }
+
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            concat!(
+                "format: DESIGNER\n",
+                "source-set:\n",
+                "  - name: configuration\n",
+                "    type: CONFIGURATION\n",
+                "    path: .\n",
+            ),
+        )
+        .unwrap();
+        args.insert(
+            "OutputDir".to_string(),
+            Value::String("external/epf".to_string()),
+        );
+        let preview = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap();
+        assert!(preview.ok, "{:?}", preview.errors);
+        assert_eq!(preview.artifacts.len(), 2);
+        assert!(!workspace.join("external").exists());
+
+        args.insert("OutputDir".to_string(), Value::String(".".to_string()));
+        let error = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap_err();
+        assert!(error.contains("source-set `configuration`"), "{error}");
+        assert!(error.contains("Configuration"), "{error}");
+
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            concat!(
+                "format: DESIGNER\n",
+                "source-set:\n",
+                "  - name: configuration\n",
+                "    type: CONFIGURATION\n",
+                "    path: src\n",
+            ),
+        )
+        .unwrap();
+        args.insert("OutputDir".to_string(), Value::String("SRC".to_string()));
+        let error = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap_err();
+        assert!(error.contains("exact source-set root"), "{error}");
+        assert!(!workspace.join("SRC").exists());
+
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            concat!(
+                "format: EDT\n",
+                "source-set:\n",
+                "  - name: processors\n",
+                "    type: EXTERNAL_DATA_PROCESSORS\n",
+                "    path: epf\n",
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(workspace.join("epf")).unwrap();
+        std::fs::write(
+            workspace.join("epf/Existing.xml"),
+            "<MetaDataObject><ExternalDataProcessor/></MetaDataObject>",
+        )
+        .unwrap();
+        args.insert("OutputDir".to_string(), Value::String("epf".to_string()));
+        let error = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap_err();
+        assert!(error.contains("format=DESIGNER"), "{error}");
+        assert!(!workspace.join("epf/Preview.xml").exists());
+
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            concat!(
+                "format: designer\n",
+                "source-set:\n",
+                "  - name: processors\n",
+                "    type: EXTERNAL_DATA_PROCESSORS\n",
+                "    path: epf\n",
+            ),
+        )
+        .unwrap();
+        let error = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap_err();
+        assert!(error.contains("exact `DESIGNER`"), "{error}");
+        assert!(!workspace.join("epf/Preview.xml").exists());
+
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            concat!(
+                "format: true\n",
+                "source-set:\n",
+                "  - name: processors\n",
+                "    type: EXTERNAL_DATA_PROCESSORS\n",
+                "    path: epf\n",
+            ),
+        )
+        .unwrap();
+        let error = UnicaApplication::new()
+            .call_tool("unica.epf.init", &args)
+            .unwrap_err();
+        assert!(error.contains("field `format` must be a string"), "{error}");
+        assert!(!workspace.join("epf/Preview.xml").exists());
+
         let _ = std::fs::remove_dir_all(root);
     }
 }
