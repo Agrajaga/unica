@@ -172,7 +172,9 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_path_identity, resolve_source_root};
+    #[cfg(windows)]
+    use super::normalize_path_identity;
+    use super::resolve_source_root;
     use crate::domain::workspace::WorkspaceContext;
     use std::fs;
     use std::path::{Path, PathBuf};
