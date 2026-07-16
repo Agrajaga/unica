@@ -98,6 +98,11 @@ class UnicaMcpSmokeTests(unittest.TestCase):
             [
                 {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
                 {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": "already-complete", "reason": "smoke"},
+                },
                 {"jsonrpc": "2.0", "id": 2, "method": "ping"},
             ]
         )
