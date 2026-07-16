@@ -93,3 +93,29 @@ cargo clippy -p unica-coder --all-targets -- -D warnings      PASS
 cargo test -p unica-coder                                     297 passed
 git diff --check                                              PASS
 ```
+
+## Second reviewer follow-up
+
+RED evidence:
+
+```text
+cargo test -p unica-coder cancellable_connector_reads_fragmented_response -- --nocapture
+FAIL: read_service_response and SERVICE_RESPONSE_LINE_LIMIT were not defined
+```
+
+Changes:
+
+- Replaced `BufReader::read_line` polling with one bounded 8 KiB `Read::read` per iteration and an explicitly capped 8 MiB response line. Cancellation and deadline are checked after every read result, including timeout and EOF. Only bytes through the first newline are parsed; trailing bytes are ignored because the protocol permits one response per connection.
+- Added deterministic fragmented-response, endless-partial cancellation/deadline, and oversized-line tests. Newline scanning examines only newly appended bytes, so the limit cannot be abused for quadratic rescanning.
+- Replaced `write_all` with explicit partial-write loops for work and control requests. Every partial write recalculates the remaining deadline and socket timeout; `WriteZero` is controlled; error priority is cancellation, then exact `timeout:`, then transport error. Flush follows the same priority.
+- Tightened wire tests to exact tags `bsl-mcp`, `rlm-ready`, and `cancel`. Manager-generated BSL/RLM IDs are unique UUID v4 values; the separate cancel-connection test preserves the same operation ID.
+
+Final verification after these changes:
+
+```text
+cargo test -p unica-coder workspace_services::tests -- --nocapture  25 passed
+cargo fmt --all -- --check                                    PASS
+cargo clippy -p unica-coder --all-targets -- -D warnings      PASS
+cargo test -p unica-coder                                     304 passed
+git diff --check                                              PASS
+```

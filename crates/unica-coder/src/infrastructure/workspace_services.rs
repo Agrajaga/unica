@@ -26,6 +26,7 @@ const DEFAULT_MAX_AGE_SECS: u64 = 28800;
 const SERVICE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVICE_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const SERVICE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const SERVICE_RESPONSE_LINE_LIMIT: usize = 8 * 1024 * 1024;
 const SERVICE_SPAWN_LOCK_STALE_SECS: u64 = 30;
 
 static SYSTEM_SERVICE_CONNECTOR: SystemServiceConnector = SystemServiceConnector;
@@ -529,49 +530,11 @@ impl SystemServiceConnector {
             self.cancel_after_error(&error, operation_id.as_deref(), record, io, clock);
             return Err(error);
         }
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        loop {
-            if cancellation.is_cancelled() {
-                self.send_cancel(operation_id.as_deref(), record, io, clock);
-                return Err(cancelled_error("workspace service request cancelled"));
-            }
-            let remaining = remaining_or_timeout(&deadline, clock)?;
-            if let Err(error) = reader
-                .get_ref()
-                .set_read_timeout(Some(remaining.min(Duration::from_millis(100))))
-            {
-                cancellation_error(cancellation)?;
-                remaining_or_timeout(&deadline, clock)?;
-                return Err(format!(
-                    "failed to set workspace service read timeout: {error}"
-                ));
-            }
-            let read = reader.read_line(&mut line);
-            if cancellation.is_cancelled() {
-                self.send_cancel(operation_id.as_deref(), record, io, clock);
-                return Err(cancelled_error("workspace service request cancelled"));
-            }
-            match read {
-                Ok(0) => {
-                    remaining_or_timeout(&deadline, clock)?;
-                    return Err("workspace service disconnected before responding".to_string());
-                }
-                Ok(_) if line.ends_with('\n') => {
-                    return serde_json::from_str(line.trim())
-                        .map_err(|err| format!("invalid workspace service response: {err}"));
-                }
-                Ok(_) => continue,
-                Err(error)
-                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-                Err(error) => {
-                    remaining_or_timeout(&deadline, clock)?;
-                    return Err(format!(
-                        "failed to read workspace service response: {error}"
-                    ));
-                }
-            }
+        let result = read_service_response(stream.as_mut(), &deadline, clock, cancellation);
+        if let Err(error) = &result {
+            self.cancel_after_error(error, operation_id.as_deref(), record, io, clock);
         }
+        result
     }
 
     fn send_control_with(
@@ -601,10 +564,23 @@ impl SystemServiceConnector {
         })?;
         let remaining = remaining_or_control_timeout(&deadline, clock)
             .map_err(|error| format!("workspace service control request failed: {error}"))?;
-        stream
-            .set_write_timeout(Some(remaining))
-            .and_then(|_| stream.flush())
-            .map_err(|error| format!("failed to flush workspace service control request: {error}"))
+        if let Err(error) = stream.set_write_timeout(Some(remaining)) {
+            remaining_or_control_timeout(&deadline, clock).map_err(|timeout| {
+                format!("workspace service control request failed: {timeout}")
+            })?;
+            return Err(format!(
+                "failed to set workspace service control timeout: {error}"
+            ));
+        }
+        if let Err(error) = stream.flush() {
+            remaining_or_control_timeout(&deadline, clock).map_err(|timeout| {
+                format!("workspace service control request failed: {timeout}")
+            })?;
+            return Err(format!(
+                "failed to flush workspace service control request: {error}"
+            ));
+        }
+        Ok(())
     }
 
     fn cancel_after_error(
@@ -640,6 +616,66 @@ impl SystemServiceConnector {
     }
 }
 
+fn read_service_response(
+    stream: &mut dyn ConnectorStream,
+    deadline: &Deadline,
+    clock: &dyn ConnectorClock,
+    cancellation: &CancellationToken,
+) -> Result<ServiceResponse, String> {
+    let mut response = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        cancellation_error(cancellation)?;
+        let remaining = remaining_or_timeout(deadline, clock)?;
+        if let Err(error) = stream.set_read_timeout(Some(remaining.min(Duration::from_millis(100))))
+        {
+            cancellation_error(cancellation)?;
+            remaining_or_timeout(deadline, clock)?;
+            return Err(format!(
+                "failed to set workspace service read timeout: {error}"
+            ));
+        }
+        let read = stream.read(&mut chunk);
+        cancellation_error(cancellation)?;
+        remaining_or_timeout(deadline, clock)?;
+        match read {
+            Ok(0) => {
+                return Err("workspace service disconnected before responding".to_string());
+            }
+            Ok(count) => {
+                let previous_len = response.len();
+                response.extend_from_slice(&chunk[..count]);
+                if let Some(newline) = response[previous_len..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map(|offset| previous_len + offset)
+                {
+                    if newline > SERVICE_RESPONSE_LINE_LIMIT {
+                        return Err(response_line_too_large());
+                    }
+                    return serde_json::from_slice(&response[..newline])
+                        .map_err(|error| format!("invalid workspace service response: {error}"));
+                }
+                if response.len() > SERVICE_RESPONSE_LINE_LIMIT {
+                    return Err(response_line_too_large());
+                }
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to read workspace service response: {error}"
+                ));
+            }
+        }
+    }
+}
+
+fn response_line_too_large() -> String {
+    format!(
+        "invalid workspace service response: response line exceeds {SERVICE_RESPONSE_LINE_LIMIT} bytes"
+    )
+}
+
 fn remaining_or_timeout(
     deadline: &Deadline,
     clock: &dyn ConnectorClock,
@@ -671,22 +707,37 @@ fn write_with_deadline(
     clock: &dyn ConnectorClock,
     cancellation: &CancellationToken,
 ) -> Result<(), String> {
-    cancellation_error(cancellation)?;
-    let remaining = remaining_or_timeout(deadline, clock)?;
-    if let Err(error) = stream.set_write_timeout(Some(remaining)) {
+    let mut written = 0;
+    while written < bytes.len() {
         cancellation_error(cancellation)?;
-        remaining_or_timeout(deadline, clock)?;
-        return Err(format!(
-            "failed to set workspace service write timeout: {error}"
-        ));
-    }
-    if let Err(error) = stream.write_all(bytes) {
+        let remaining = remaining_or_timeout(deadline, clock)?;
+        if let Err(error) = stream.set_write_timeout(Some(remaining)) {
+            cancellation_error(cancellation)?;
+            remaining_or_timeout(deadline, clock)?;
+            return Err(format!(
+                "failed to set workspace service write timeout: {error}"
+            ));
+        }
+        let result = stream.write(&bytes[written..]);
         cancellation_error(cancellation)?;
-        return Err(format!(
-            "failed to write workspace service request: {error}"
-        ));
+        match result {
+            Ok(0) => {
+                remaining_or_timeout(deadline, clock)?;
+                return Err(format!(
+                    "failed to write workspace service request: {}",
+                    io::Error::from(ErrorKind::WriteZero)
+                ));
+            }
+            Ok(count) => written += count,
+            Err(error) => {
+                remaining_or_timeout(deadline, clock)?;
+                return Err(format!(
+                    "failed to write workspace service request: {error}"
+                ));
+            }
+        }
     }
-    cancellation_error(cancellation)
+    Ok(())
 }
 
 fn flush_with_deadline(
@@ -706,6 +757,7 @@ fn flush_with_deadline(
     }
     if let Err(error) = stream.flush() {
         cancellation_error(cancellation)?;
+        remaining_or_timeout(deadline, clock)?;
         return Err(format!(
             "failed to flush workspace service request: {error}"
         ));
@@ -719,8 +771,22 @@ fn write_control_with_deadline(
     deadline: &Deadline,
     clock: &dyn ConnectorClock,
 ) -> io::Result<()> {
-    stream.set_write_timeout(Some(remaining_or_control_timeout(deadline, clock)?))?;
-    stream.write_all(bytes)
+    let mut written = 0;
+    while written < bytes.len() {
+        stream.set_write_timeout(Some(remaining_or_control_timeout(deadline, clock)?))?;
+        match stream.write(&bytes[written..]) {
+            Ok(0) => {
+                remaining_or_control_timeout(deadline, clock)?;
+                return Err(io::Error::from(ErrorKind::WriteZero));
+            }
+            Ok(count) => written += count,
+            Err(error) => {
+                remaining_or_control_timeout(deadline, clock)?;
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
 }
 
 impl ServiceSpawner for SystemServiceSpawner {
@@ -1718,6 +1784,115 @@ mod tests {
         }
     }
 
+    struct ChunkStream {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+        chunk_offset: usize,
+        clock: ManualClock,
+        advance_per_read: Duration,
+        cancel_after_reads: Option<(CancellationToken, usize)>,
+        reads: usize,
+    }
+
+    impl Read for ChunkStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.clock.advance(self.advance_per_read);
+            self.reads += 1;
+            if let Some((token, target)) = &self.cancel_after_reads {
+                if self.reads == *target {
+                    token.cancel();
+                }
+            }
+            let Some(chunk) = self.chunks.front() else {
+                return Err(io::Error::new(ErrorKind::TimedOut, "poll"));
+            };
+            let remaining = &chunk[self.chunk_offset..];
+            let count = remaining.len().min(buf.len());
+            buf[..count].copy_from_slice(&remaining[..count]);
+            self.chunk_offset += count;
+            if self.chunk_offset == chunk.len() {
+                self.chunks.pop_front();
+                self.chunk_offset = 0;
+            }
+            Ok(count)
+        }
+    }
+
+    impl Write for ChunkStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ConnectorStream for ChunkStream {
+        fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    enum PartialWriteFailure {
+        None,
+        TimeoutAfterBudget,
+        CancelAfterBudget,
+    }
+
+    struct PartialWriteStream {
+        clock: ManualClock,
+        cancellation: CancellationToken,
+        max_write: usize,
+        advance_per_write: Duration,
+        failure: PartialWriteFailure,
+        writes: Vec<u8>,
+        timeouts: Mutex<Vec<Duration>>,
+    }
+
+    impl Read for PartialWriteStream {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Write for PartialWriteStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.clock.advance(self.advance_per_write);
+            match self.failure {
+                PartialWriteFailure::TimeoutAfterBudget => {
+                    return Err(io::Error::new(ErrorKind::TimedOut, "write timeout"));
+                }
+                PartialWriteFailure::CancelAfterBudget => {
+                    self.cancellation.cancel();
+                    return Err(io::Error::new(ErrorKind::BrokenPipe, "write cancelled"));
+                }
+                PartialWriteFailure::None => {}
+            }
+            let count = self.max_write.min(buf.len());
+            self.writes.extend_from_slice(&buf[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ConnectorStream for PartialWriteStream {
+        fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+            self.timeouts.lock().unwrap().push(timeout.unwrap());
+            Ok(())
+        }
+    }
+
     impl Read for RacingStream {
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
             match self.stage {
@@ -1854,6 +2029,147 @@ mod tests {
     }
 
     #[test]
+    fn cancellable_connector_reads_fragmented_response_and_ignores_bytes_after_newline() {
+        let clock = ManualClock::default();
+        let deadline = Deadline::new(&clock, Duration::from_secs(1));
+        let mut stream = ChunkStream {
+            chunks: [b"{\"ok\":".to_vec(), b"true}\nignored".to_vec()].into(),
+            chunk_offset: 0,
+            clock: clock.clone(),
+            advance_per_read: Duration::from_millis(1),
+            cancel_after_reads: None,
+            reads: 0,
+        };
+        let response =
+            read_service_response(&mut stream, &deadline, &clock, &CancellationToken::new())
+                .unwrap();
+        assert!(response.ok);
+    }
+
+    #[test]
+    fn cancellable_connector_partial_response_cannot_bypass_deadline() {
+        let clock = ManualClock::default();
+        let deadline = Deadline::new(&clock, Duration::from_millis(3));
+        let mut stream = ChunkStream {
+            chunks: [b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()].into(),
+            chunk_offset: 0,
+            clock: clock.clone(),
+            advance_per_read: Duration::from_millis(1),
+            cancel_after_reads: None,
+            reads: 0,
+        };
+        let error =
+            read_service_response(&mut stream, &deadline, &clock, &CancellationToken::new())
+                .unwrap_err();
+        assert!(error.starts_with("timeout:"), "{error}");
+    }
+
+    #[test]
+    fn cancellable_connector_partial_response_cannot_bypass_cancellation() {
+        let clock = ManualClock::default();
+        let cancellation = CancellationToken::new();
+        let deadline = Deadline::new(&clock, Duration::from_secs(1));
+        let mut stream = ChunkStream {
+            chunks: [b"partial".to_vec(), b"still-partial".to_vec()].into(),
+            chunk_offset: 0,
+            clock: clock.clone(),
+            advance_per_read: Duration::ZERO,
+            cancel_after_reads: Some((cancellation.clone(), 2)),
+            reads: 0,
+        };
+        let error =
+            read_service_response(&mut stream, &deadline, &clock, &cancellation).unwrap_err();
+        assert!(error.starts_with("cancelled:"), "{error}");
+    }
+
+    #[test]
+    fn cancellable_connector_rejects_oversized_response_line() {
+        let clock = ManualClock::default();
+        let deadline = Deadline::new(&clock, Duration::from_secs(1));
+        let mut stream = ChunkStream {
+            chunks: [vec![b'x'; SERVICE_RESPONSE_LINE_LIMIT + 1]].into(),
+            chunk_offset: 0,
+            clock: clock.clone(),
+            advance_per_read: Duration::ZERO,
+            cancel_after_reads: None,
+            reads: 0,
+        };
+        let error =
+            read_service_response(&mut stream, &deadline, &clock, &CancellationToken::new())
+                .unwrap_err();
+        assert!(error.contains("response line exceeds"), "{error}");
+    }
+
+    #[test]
+    fn cancellable_connector_partial_writes_recompute_remaining_budget() {
+        let clock = ManualClock::default();
+        let cancellation = CancellationToken::new();
+        let deadline = Deadline::new(&clock, Duration::from_millis(100));
+        let mut stream = PartialWriteStream {
+            clock: clock.clone(),
+            cancellation: cancellation.clone(),
+            max_write: 2,
+            advance_per_write: Duration::from_millis(10),
+            failure: PartialWriteFailure::None,
+            writes: Vec::new(),
+            timeouts: Mutex::new(Vec::new()),
+        };
+        write_with_deadline(&mut stream, b"abcdef", &deadline, &clock, &cancellation).unwrap();
+        assert_eq!(stream.writes, b"abcdef");
+        assert_eq!(
+            *stream.timeouts.lock().unwrap(),
+            vec![
+                Duration::from_millis(100),
+                Duration::from_millis(90),
+                Duration::from_millis(80)
+            ]
+        );
+    }
+
+    #[test]
+    fn cancellable_connector_write_error_uses_timeout_unless_cancelled() {
+        for (failure, expected) in [
+            (PartialWriteFailure::TimeoutAfterBudget, "timeout:"),
+            (PartialWriteFailure::CancelAfterBudget, "cancelled:"),
+        ] {
+            let clock = ManualClock::default();
+            let cancellation = CancellationToken::new();
+            let deadline = Deadline::new(&clock, Duration::from_millis(10));
+            let mut stream = PartialWriteStream {
+                clock: clock.clone(),
+                cancellation: cancellation.clone(),
+                max_write: 1,
+                advance_per_write: Duration::from_millis(10),
+                failure,
+                writes: Vec::new(),
+                timeouts: Mutex::new(Vec::new()),
+            };
+            let error = write_with_deadline(&mut stream, b"x", &deadline, &clock, &cancellation)
+                .unwrap_err();
+            assert!(error.starts_with(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn cancellable_connector_rejects_write_zero() {
+        let clock = ManualClock::default();
+        let cancellation = CancellationToken::new();
+        let deadline = Deadline::new(&clock, Duration::from_secs(1));
+        let mut stream = PartialWriteStream {
+            clock: clock.clone(),
+            cancellation: cancellation.clone(),
+            max_write: 0,
+            advance_per_write: Duration::ZERO,
+            failure: PartialWriteFailure::None,
+            writes: Vec::new(),
+            timeouts: Mutex::new(Vec::new()),
+        };
+        let error =
+            write_with_deadline(&mut stream, b"x", &deadline, &clock, &cancellation).unwrap_err();
+        assert!(error.contains("failed to write workspace service request"));
+    }
+
+    #[test]
     fn cancellable_connector_prioritizes_cancel_over_transport_races() {
         for stage in [
             FailureStage::Connect,
@@ -1918,15 +2234,18 @@ mod tests {
             args: json!({"sourceDir": "src"}),
         };
         assert_ne!(bsl.operation_id(), rlm.operation_id());
-        for kind in [
-            bsl,
-            rlm,
-            ServiceRequestKind::Cancel {
-                operation_id: "cancel-id".to_string(),
-            },
+        for (kind, expected_tag) in [
+            (bsl, "bsl-mcp"),
+            (rlm, "rlm-ready"),
+            (
+                ServiceRequestKind::Cancel {
+                    operation_id: "cancel-id".to_string(),
+                },
+                "cancel",
+            ),
         ] {
             let json = serde_json::to_value(&kind).unwrap();
-            assert!(json.get("type").is_some());
+            assert_eq!(json.get("type").and_then(Value::as_str), Some(expected_tag));
             assert!(json.get("operation_id").is_some());
             assert_eq!(
                 serde_json::from_value::<ServiceRequestKind>(json).unwrap(),
@@ -2281,7 +2600,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ids.len(), 2);
         assert_ne!(ids[0], ids[1]);
-        assert!(ids.iter().all(|id| Uuid::parse_str(id).is_ok()));
+        assert!(ids
+            .iter()
+            .map(|id| Uuid::parse_str(id).unwrap())
+            .all(|id| id.get_version_num() == 4));
         cleanup(&context);
     }
 
