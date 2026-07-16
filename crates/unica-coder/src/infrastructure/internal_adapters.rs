@@ -49,6 +49,7 @@ pub struct BslMcpCommand {
     pub timeout: Duration,
     pub tool_name: &'static str,
     pub tool_args: Value,
+    pub cancellation: CancellationToken,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +131,7 @@ impl<'a> CliAdapter<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn invoke(
         &self,
         tool_name: &str,
@@ -138,6 +140,28 @@ impl<'a> CliAdapter<'a> {
         dry_run: bool,
         mutating: bool,
     ) -> Result<AdapterOutcome, String> {
+        self.invoke_cancellable(
+            tool_name,
+            args,
+            context,
+            dry_run,
+            mutating,
+            &CancellationToken::new(),
+        )
+    }
+
+    pub fn invoke_cancellable(
+        &self,
+        tool_name: &str,
+        args: &Map<String, Value>,
+        context: &WorkspaceContext,
+        dry_run: bool,
+        mutating: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<AdapterOutcome, String> {
+        if cancellation.is_cancelled() {
+            return Ok(cancelled_outcome(tool_name));
+        }
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root for internal adapter lookup".to_string()
         })?;
@@ -181,7 +205,7 @@ impl<'a> CliAdapter<'a> {
             args: process_args,
             cwd: context.cwd.clone(),
             timeout: process_timeout,
-            cancellation: CancellationToken::new(),
+            cancellation: cancellation.clone(),
         })?;
         let ok = output.status_success;
         Ok(AdapterOutcome {
@@ -236,6 +260,7 @@ impl<'a> RuntimeAdapter<'a> {
         Self { runner }
     }
 
+    #[allow(dead_code)]
     pub fn invoke(
         &self,
         tool_name: &str,
@@ -244,6 +269,28 @@ impl<'a> RuntimeAdapter<'a> {
         dry_run: bool,
         mutating: bool,
     ) -> Result<AdapterOutcome, String> {
+        self.invoke_cancellable(
+            tool_name,
+            args,
+            context,
+            dry_run,
+            mutating,
+            &CancellationToken::new(),
+        )
+    }
+
+    pub fn invoke_cancellable(
+        &self,
+        tool_name: &str,
+        args: &Map<String, Value>,
+        context: &WorkspaceContext,
+        dry_run: bool,
+        mutating: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<AdapterOutcome, String> {
+        if cancellation.is_cancelled() {
+            return Ok(cancelled_outcome(tool_name));
+        }
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root for internal adapter lookup".to_string()
         })?;
@@ -279,7 +326,7 @@ impl<'a> RuntimeAdapter<'a> {
             args: execution_args,
             cwd: context.cwd.clone(),
             timeout: process_timeout,
-            cancellation: CancellationToken::new(),
+            cancellation: cancellation.clone(),
         };
         let output = match self.runner.run(&process_command) {
             Ok(output) => output,
@@ -374,6 +421,7 @@ impl<'a> CodeSearchAdapter<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn invoke(
         &self,
         tool_name: &str,
@@ -381,6 +429,20 @@ impl<'a> CodeSearchAdapter<'a> {
         context: &WorkspaceContext,
         dry_run: bool,
     ) -> Result<AdapterOutcome, String> {
+        self.invoke_cancellable(tool_name, args, context, dry_run, &CancellationToken::new())
+    }
+
+    pub fn invoke_cancellable(
+        &self,
+        tool_name: &str,
+        args: &Map<String, Value>,
+        context: &WorkspaceContext,
+        dry_run: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<AdapterOutcome, String> {
+        if cancellation.is_cancelled() {
+            return Ok(cancelled_outcome(tool_name));
+        }
         if dry_run {
             return Ok(AdapterOutcome {
                 ok: true,
@@ -396,8 +458,8 @@ impl<'a> CodeSearchAdapter<'a> {
         }
 
         let sections = [
-            self.rlm_search(context, args),
-            self.git_grep_search(tool_name, args, context),
+            self.rlm_search(context, args, cancellation),
+            self.git_grep_search(tool_name, args, context, cancellation),
         ];
         let ok = sections.iter().any(|section| section.ok);
         let warnings = sections
@@ -435,8 +497,9 @@ impl<'a> CodeSearchAdapter<'a> {
         &self,
         context: &WorkspaceContext,
         args: &Map<String, Value>,
+        cancellation: &CancellationToken,
     ) -> SearchBackendResult {
-        match self.rlm_readiness(context, args) {
+        match self.rlm_readiness(context, args, cancellation) {
             IndexReadiness::Ready { db_path } => match search_rlm_index(&db_path, args) {
                 Ok(Some(rlm_stdout)) => {
                     successful_backend("rlm", rlm_stdout, vec![db_path.display().to_string()])
@@ -453,13 +516,14 @@ impl<'a> CodeSearchAdapter<'a> {
         tool_name: &str,
         args: &Map<String, Value>,
         context: &WorkspaceContext,
+        cancellation: &CancellationToken,
     ) -> SearchBackendResult {
         let grep_adapter = CodeNavigationAdapter {
             index_runner: self.index_runner,
             grep_runner: self.grep_runner,
             use_workspace_service: self.use_workspace_service,
         };
-        match grep_adapter.grep(tool_name, args, context) {
+        match grep_adapter.grep(tool_name, args, context, cancellation) {
             Ok(grep) if grep.ok => {
                 let body = grep
                     .stdout
@@ -487,16 +551,26 @@ impl<'a> CodeSearchAdapter<'a> {
         &self,
         context: &WorkspaceContext,
         args: &Map<String, Value>,
+        cancellation: &CancellationToken,
     ) -> IndexReadiness {
         if self.use_workspace_service {
             match resolve_source_dir(context, args).and_then(|source_dir| {
-                WorkspaceServiceManager::new().rlm_readiness(context, &source_dir, args)
+                WorkspaceServiceManager::new().rlm_readiness_cancellable(
+                    context,
+                    &source_dir,
+                    args,
+                    cancellation,
+                )
             }) {
                 Ok(readiness) => readiness,
                 Err(error) => IndexReadiness::Unavailable(error),
             }
         } else {
-            WorkspaceIndexService::with_runner(self.index_runner).ready_index(context, args)
+            WorkspaceIndexService::with_runner(self.index_runner).ready_index_cancellable(
+                context,
+                args,
+                cancellation,
+            )
         }
     }
 }
@@ -514,6 +588,13 @@ fn format_section(name: &str, text: &str) -> String {
     } else {
         format!("=== {name} ===\n{body}")
     }
+}
+
+fn cancelled_outcome(tool_name: &str) -> AdapterOutcome {
+    let mut outcome = AdapterOutcome::ok(format!("{tool_name} cancelled before adapter work"));
+    outcome.ok = false;
+    outcome.errors.push(format!("{tool_name} cancelled"));
+    outcome
 }
 
 fn successful_backend(
@@ -709,6 +790,7 @@ impl<'a> CodeNavigationAdapter<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn invoke(
         &self,
         tool_name: &str,
@@ -716,6 +798,20 @@ impl<'a> CodeNavigationAdapter<'a> {
         context: &WorkspaceContext,
         dry_run: bool,
     ) -> Result<AdapterOutcome, String> {
+        self.invoke_cancellable(tool_name, args, context, dry_run, &CancellationToken::new())
+    }
+
+    pub fn invoke_cancellable(
+        &self,
+        tool_name: &str,
+        args: &Map<String, Value>,
+        context: &WorkspaceContext,
+        dry_run: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<AdapterOutcome, String> {
+        if cancellation.is_cancelled() {
+            return Ok(cancelled_outcome(tool_name));
+        }
         if dry_run {
             return Ok(AdapterOutcome {
                 ok: true,
@@ -731,10 +827,10 @@ impl<'a> CodeNavigationAdapter<'a> {
         }
 
         match tool_name {
-            "unica.code.definition" => self.definition(tool_name, args, context),
-            "unica.code.outline" => self.outline(tool_name, args, context),
-            "unica.code.grep" => self.grep(tool_name, args, context),
-            "unica.meta.profile" => self.meta_profile(tool_name, args, context),
+            "unica.code.definition" => self.definition(tool_name, args, context, cancellation),
+            "unica.code.outline" => self.outline(tool_name, args, context, cancellation),
+            "unica.code.grep" => self.grep(tool_name, args, context, cancellation),
+            "unica.meta.profile" => self.meta_profile(tool_name, args, context, cancellation),
             _ => Err(format!("unsupported code navigation tool: {tool_name}")),
         }
     }
@@ -744,8 +840,9 @@ impl<'a> CodeNavigationAdapter<'a> {
         tool_name: &str,
         args: &Map<String, Value>,
         context: &WorkspaceContext,
+        cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String> {
-        let readiness = self.rlm_readiness(context, args);
+        let readiness = self.rlm_readiness(context, args, cancellation);
         let db_path = match readiness {
             IndexReadiness::Ready { db_path } => db_path,
             other => return Ok(index_unavailable_outcome(tool_name, other)),
@@ -769,9 +866,10 @@ impl<'a> CodeNavigationAdapter<'a> {
         tool_name: &str,
         args: &Map<String, Value>,
         context: &WorkspaceContext,
+        cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String> {
         let candidates = index_path_candidates(context, args, "path")?;
-        let readiness = self.rlm_readiness(context, args);
+        let readiness = self.rlm_readiness(context, args, cancellation);
         let db_path = match readiness {
             IndexReadiness::Ready { db_path } => db_path,
             other => return Ok(index_unavailable_outcome(tool_name, other)),
@@ -799,6 +897,7 @@ impl<'a> CodeNavigationAdapter<'a> {
         tool_name: &str,
         args: &Map<String, Value>,
         context: &WorkspaceContext,
+        cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String> {
         let query = required_string(args, "query")?;
         let mode = args.get("mode").and_then(Value::as_str).unwrap_or("lines");
@@ -841,7 +940,7 @@ impl<'a> CodeNavigationAdapter<'a> {
             args: git_args.clone(),
             cwd: context.workspace_root.clone(),
             timeout: Some(DEFAULT_PROCESS_TIMEOUT),
-            cancellation: CancellationToken::new(),
+            cancellation: cancellation.clone(),
         })?;
         let body = grep_body(&output.stdout, mode, limit);
         let no_matches = body.is_empty()
@@ -901,8 +1000,9 @@ impl<'a> CodeNavigationAdapter<'a> {
         tool_name: &str,
         args: &Map<String, Value>,
         context: &WorkspaceContext,
+        cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String> {
-        let readiness = self.rlm_readiness(context, args);
+        let readiness = self.rlm_readiness(context, args, cancellation);
         let db_path = match readiness {
             IndexReadiness::Ready { db_path } => db_path,
             other => return Ok(index_unavailable_outcome(tool_name, other)),
@@ -930,16 +1030,26 @@ impl<'a> CodeNavigationAdapter<'a> {
         &self,
         context: &WorkspaceContext,
         args: &Map<String, Value>,
+        cancellation: &CancellationToken,
     ) -> IndexReadiness {
         if self.use_workspace_service {
             match resolve_source_dir(context, args).and_then(|source_dir| {
-                WorkspaceServiceManager::new().rlm_readiness(context, &source_dir, args)
+                WorkspaceServiceManager::new().rlm_readiness_cancellable(
+                    context,
+                    &source_dir,
+                    args,
+                    cancellation,
+                )
             }) {
                 Ok(readiness) => readiness,
                 Err(error) => IndexReadiness::Unavailable(error),
             }
         } else {
-            WorkspaceIndexService::with_runner(self.index_runner).ready_index(context, args)
+            WorkspaceIndexService::with_runner(self.index_runner).ready_index_cancellable(
+                context,
+                args,
+                cancellation,
+            )
         }
     }
 }
@@ -962,6 +1072,7 @@ impl<'a> BslAnalyzerMcpAdapter<'a> {
         Self { runner }
     }
 
+    #[allow(dead_code)]
     pub fn invoke(
         &self,
         tool_name: &str,
@@ -969,10 +1080,24 @@ impl<'a> BslAnalyzerMcpAdapter<'a> {
         context: &WorkspaceContext,
         dry_run: bool,
     ) -> Result<AdapterOutcome, String> {
+        self.invoke_cancellable(tool_name, args, context, dry_run, &CancellationToken::new())
+    }
+
+    pub fn invoke_cancellable(
+        &self,
+        tool_name: &str,
+        args: &Map<String, Value>,
+        context: &WorkspaceContext,
+        dry_run: bool,
+        cancellation: &CancellationToken,
+    ) -> Result<AdapterOutcome, String> {
+        if cancellation.is_cancelled() {
+            return Ok(cancelled_outcome(tool_name));
+        }
         if tool_name == "unica.code.diagnostics" && diagnostics_mode(args) == "analyze" {
             let cli_args = diagnostics_analyze_args(args);
             return CliAdapter::new("bsl-analyzer", &["analyze"], "code analysis")
-                .invoke(tool_name, &cli_args, context, dry_run, false);
+                .invoke_cancellable(tool_name, &cli_args, context, dry_run, false, cancellation);
         }
 
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
@@ -981,7 +1106,13 @@ impl<'a> BslAnalyzerMcpAdapter<'a> {
         let source_dir = resolve_source_dir(context, args)?;
         let (remote_tool, tool_args) = bsl_mcp_tool_request(tool_name, args)?;
         let bundled_tool = resolve_bundled_tool(&plugin_root, "bsl-analyzer", !dry_run)?;
-        let command = bsl_mcp_command(&source_dir, context, remote_tool, tool_args);
+        let command = bsl_mcp_command(
+            &source_dir,
+            context,
+            remote_tool,
+            tool_args,
+            cancellation.clone(),
+        );
         let mut reported_command = vec![bundled_tool.program.display().to_string()];
         reported_command.extend(command.args.clone());
 
@@ -1840,6 +1971,7 @@ fn bsl_mcp_command(
     context: &WorkspaceContext,
     remote_tool: &'static str,
     tool_args: Value,
+    cancellation: CancellationToken,
 ) -> BslMcpCommand {
     BslMcpCommand {
         args: vec![
@@ -1857,6 +1989,7 @@ fn bsl_mcp_command(
         timeout: DEFAULT_PROCESS_TIMEOUT,
         tool_name: remote_tool,
         tool_args,
+        cancellation,
     }
 }
 
@@ -2024,12 +2157,13 @@ impl ProcessRunner for SystemProcessRunner {
 impl BslMcpRunner for SystemBslMcpRunner {
     fn call(&self, command: &BslMcpCommand) -> Result<BslMcpOutput, String> {
         let context = WorkspaceContext::discover(command.cwd.clone())?;
-        let output = WorkspaceServiceManager::new().call_bsl_mcp(
+        let output = WorkspaceServiceManager::new().call_bsl_mcp_cancellable(
             &context,
             &command.source_dir,
             command.tool_name,
             command.tool_args.clone(),
             command.timeout,
+            &command.cancellation,
         )?;
         Ok(BslMcpOutput {
             result_text: output.result_text,

@@ -149,8 +149,23 @@ impl<'a> WorkspaceIndexService<'a> {
         args: &Map<String, Value>,
         dry_run: bool,
     ) -> IndexStartReport {
+        self.start_for_workspace_cancellable(context, args, dry_run, &CancellationToken::new())
+    }
+
+    pub fn start_for_workspace_cancellable(
+        &self,
+        context: &WorkspaceContext,
+        args: &Map<String, Value>,
+        dry_run: bool,
+        cancellation: &CancellationToken,
+    ) -> IndexStartReport {
         if dry_run {
             return IndexStartReport::default();
+        }
+        if cancellation.is_cancelled() {
+            return IndexStartReport {
+                warnings: vec!["rlm index operation cancelled".to_string()],
+            };
         }
 
         let source_root =
@@ -169,7 +184,7 @@ impl<'a> WorkspaceIndexService<'a> {
             };
         }
 
-        let commands = match self.commands(context, &source_root) {
+        let commands = match self.commands(context, &source_root, cancellation) {
             Ok(commands) => commands,
             Err(error) => {
                 let _ = write_status(
@@ -234,6 +249,18 @@ impl<'a> WorkspaceIndexService<'a> {
         context: &WorkspaceContext,
         args: &Map<String, Value>,
     ) -> IndexReadiness {
+        self.ready_index_cancellable(context, args, &CancellationToken::new())
+    }
+
+    pub fn ready_index_cancellable(
+        &self,
+        context: &WorkspaceContext,
+        args: &Map<String, Value>,
+        cancellation: &CancellationToken,
+    ) -> IndexReadiness {
+        if cancellation.is_cancelled() {
+            return IndexReadiness::Unavailable("rlm index operation cancelled".to_string());
+        }
         let source_root =
             match resolve_source_root(context, args.get("sourceDir").and_then(Value::as_str)) {
                 Ok(resolved) => resolved.path,
@@ -244,7 +271,7 @@ impl<'a> WorkspaceIndexService<'a> {
             return IndexReadiness::Building;
         }
 
-        let commands = match self.commands(context, &source_root) {
+        let commands = match self.commands(context, &source_root, cancellation) {
             Ok(commands) => commands,
             Err(error) => return IndexReadiness::Unavailable(error),
         };
@@ -270,6 +297,7 @@ impl<'a> WorkspaceIndexService<'a> {
         &self,
         context: &WorkspaceContext,
         source_root: &Path,
+        cancellation: &CancellationToken,
     ) -> Result<IndexCommands, String> {
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root for internal RLM index adapter lookup".to_string()
@@ -291,7 +319,7 @@ impl<'a> WorkspaceIndexService<'a> {
                 cwd: context.cwd.clone(),
                 env: env.clone(),
                 timeout: INDEX_TIMEOUT,
-                cancellation: CancellationToken::new(),
+                cancellation: cancellation.clone(),
             },
             build: IndexCommand {
                 program: program.clone(),
@@ -299,7 +327,7 @@ impl<'a> WorkspaceIndexService<'a> {
                 cwd: context.cwd.clone(),
                 env: env.clone(),
                 timeout: Duration::from_secs(24 * 60 * 60),
-                cancellation: CancellationToken::new(),
+                cancellation: cancellation.clone(),
             },
             update: IndexCommand {
                 program,
@@ -307,7 +335,7 @@ impl<'a> WorkspaceIndexService<'a> {
                 cwd: context.cwd.clone(),
                 env,
                 timeout: Duration::from_secs(24 * 60 * 60),
-                cancellation: CancellationToken::new(),
+                cancellation: cancellation.clone(),
             },
         })
     }

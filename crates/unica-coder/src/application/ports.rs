@@ -1,5 +1,6 @@
 use super::{project_map, project_status, ToolHandler, ToolSpec};
 use crate::domain::cache::{CacheAccess, CacheReport};
+use crate::domain::cancellation::CancellationToken;
 use crate::domain::events::DomainEvent;
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::internal_adapters::{
@@ -13,7 +14,7 @@ use crate::infrastructure::AdapterOutcome;
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 
-pub(crate) trait ApplicationPorts {
+pub(crate) trait ApplicationPorts: Send + Sync {
     fn discover_workspace(&self, cwd: PathBuf) -> Result<WorkspaceContext, String>;
 
     fn invoke_handler(
@@ -22,6 +23,7 @@ pub(crate) trait ApplicationPorts {
         args: &Map<String, Value>,
         context: &WorkspaceContext,
         dry_run: bool,
+        cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String>;
 
     fn cache_report(
@@ -48,7 +50,11 @@ impl ApplicationPorts for DefaultApplicationPorts {
         args: &Map<String, Value>,
         context: &WorkspaceContext,
         dry_run: bool,
+        cancellation: &CancellationToken,
     ) -> Result<AdapterOutcome, String> {
+        if cancellation.is_cancelled() {
+            return Ok(cancelled_outcome(spec.name));
+        }
         match spec.handler {
             ToolHandler::NativeOperation { operation, .. } => NativeOperationAdapter::invoke(
                 operation,
@@ -60,30 +66,61 @@ impl ApplicationPorts for DefaultApplicationPorts {
             ),
             ToolHandler::ProjectStatus => Ok(project_status(context)),
             ToolHandler::ProjectMap => Ok(project_map(context)),
-            ToolHandler::BuildRuntime { command, .. } => CliAdapter::new(
-                "v8-runner",
-                command,
-                "build/runtime",
-            )
-            .invoke(spec.name, args, context, dry_run, spec.mutating),
-            ToolHandler::RuntimeAdapter => {
-                RuntimeAdapter::new().invoke(spec.name, args, context, dry_run, spec.mutating)
+            ToolHandler::BuildRuntime { command, .. } => {
+                CliAdapter::new("v8-runner", command, "build/runtime").invoke_cancellable(
+                    spec.name,
+                    args,
+                    context,
+                    dry_run,
+                    spec.mutating,
+                    cancellation,
+                )
             }
+            ToolHandler::RuntimeAdapter => RuntimeAdapter::new().invoke_cancellable(
+                spec.name,
+                args,
+                context,
+                dry_run,
+                spec.mutating,
+                cancellation,
+            ),
             ToolHandler::CodeAdapter { command } if command == ["search"] => {
-                CodeSearchAdapter::new().invoke(spec.name, args, context, dry_run)
+                CodeSearchAdapter::new().invoke_cancellable(
+                    spec.name,
+                    args,
+                    context,
+                    dry_run,
+                    cancellation,
+                )
             }
             ToolHandler::CodeAdapter {
                 command: ["definition"] | ["outline"] | ["grep"] | ["meta-profile"],
-            } => CodeNavigationAdapter::new().invoke(spec.name, args, context, dry_run),
+            } => CodeNavigationAdapter::new().invoke_cancellable(
+                spec.name,
+                args,
+                context,
+                dry_run,
+                cancellation,
+            ),
             ToolHandler::CodeAdapter {
                 command: ["graph"] | ["analyze"],
-            } => BslAnalyzerMcpAdapter::new().invoke(spec.name, args, context, dry_run),
-            ToolHandler::CodeAdapter { command } => CliAdapter::new(
-                "bsl-analyzer",
-                command,
-                "code analysis",
-            )
-            .invoke(spec.name, args, context, dry_run, spec.mutating),
+            } => BslAnalyzerMcpAdapter::new().invoke_cancellable(
+                spec.name,
+                args,
+                context,
+                dry_run,
+                cancellation,
+            ),
+            ToolHandler::CodeAdapter { command } => {
+                CliAdapter::new("bsl-analyzer", command, "code analysis").invoke_cancellable(
+                    spec.name,
+                    args,
+                    context,
+                    dry_run,
+                    spec.mutating,
+                    cancellation,
+                )
+            }
             ToolHandler::StandardsAdapter { operation } => {
                 Ok(StandardsAdapter::invoke(operation, args))
             }
@@ -103,4 +140,11 @@ impl ApplicationPorts for DefaultApplicationPorts {
     fn notify_invalidation(&self, context: &WorkspaceContext, events: &[DomainEvent]) {
         WorkspaceServiceManager::new().notify_invalidation(context, events);
     }
+}
+
+fn cancelled_outcome(tool_name: &str) -> AdapterOutcome {
+    let mut outcome = AdapterOutcome::ok(format!("{tool_name} cancelled before adapter execution"));
+    outcome.ok = false;
+    outcome.errors.push(format!("{tool_name} cancelled"));
+    outcome
 }

@@ -1,3 +1,4 @@
+use crate::domain::cancellation::CancellationToken;
 use crate::domain::events::DomainEvent;
 use crate::domain::source_roots::normalize_path_identity;
 use crate::domain::workspace::WorkspaceContext;
@@ -122,11 +123,22 @@ impl<'a> WorkspaceServiceManager<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn ensure_service(
         &self,
         context: &WorkspaceContext,
         source_root: &Path,
     ) -> Result<WorkspaceServiceRecord, String> {
+        self.ensure_service_cancellable(context, source_root, &CancellationToken::new())
+    }
+
+    pub fn ensure_service_cancellable(
+        &self,
+        context: &WorkspaceContext,
+        source_root: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<WorkspaceServiceRecord, String> {
+        cancellation_error(cancellation)?;
         let identity = WorkspaceServiceIdentity::new(context, source_root)?;
         if let Some(record) = self.reusable_record(&identity) {
             return Ok(record);
@@ -134,6 +146,7 @@ impl<'a> WorkspaceServiceManager<'a> {
 
         let started = Instant::now();
         loop {
+            cancellation_error(cancellation)?;
             if let Some(spawn_lock) = acquire_spawn_lock(&identity)? {
                 if let Some(record) = self.reusable_record(&identity) {
                     return Ok(record);
@@ -161,6 +174,7 @@ impl<'a> WorkspaceServiceManager<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn call_bsl_mcp(
         &self,
         context: &WorkspaceContext,
@@ -169,7 +183,27 @@ impl<'a> WorkspaceServiceManager<'a> {
         tool_args: Value,
         timeout: Duration,
     ) -> Result<WorkspaceServiceBslOutput, String> {
-        let record = self.ensure_service(context, source_root)?;
+        self.call_bsl_mcp_cancellable(
+            context,
+            source_root,
+            tool_name,
+            tool_args,
+            timeout,
+            &CancellationToken::new(),
+        )
+    }
+
+    pub fn call_bsl_mcp_cancellable(
+        &self,
+        context: &WorkspaceContext,
+        source_root: &Path,
+        tool_name: &str,
+        tool_args: Value,
+        timeout: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<WorkspaceServiceBslOutput, String> {
+        let record = self.ensure_service_cancellable(context, source_root, cancellation)?;
+        cancellation_error(cancellation)?;
         let response = self.connector.send(
             &record,
             ServiceRequest {
@@ -192,13 +226,25 @@ impl<'a> WorkspaceServiceManager<'a> {
         })
     }
 
+    #[allow(dead_code)]
     pub fn rlm_readiness(
         &self,
         context: &WorkspaceContext,
         source_root: &Path,
         args: &Map<String, Value>,
     ) -> Result<IndexReadiness, String> {
-        let record = self.ensure_service(context, source_root)?;
+        self.rlm_readiness_cancellable(context, source_root, args, &CancellationToken::new())
+    }
+
+    pub fn rlm_readiness_cancellable(
+        &self,
+        context: &WorkspaceContext,
+        source_root: &Path,
+        args: &Map<String, Value>,
+        cancellation: &CancellationToken,
+    ) -> Result<IndexReadiness, String> {
+        let record = self.ensure_service_cancellable(context, source_root, cancellation)?;
+        cancellation_error(cancellation)?;
         let response = self.connector.send(
             &record,
             ServiceRequest {
@@ -304,6 +350,14 @@ impl<'a> WorkspaceServiceManager<'a> {
                 kind: ServiceRequestKind::Shutdown,
             },
         );
+    }
+}
+
+fn cancellation_error(cancellation: &CancellationToken) -> Result<(), String> {
+    if cancellation.is_cancelled() {
+        Err("workspace service operation cancelled".to_string())
+    } else {
+        Ok(())
     }
 }
 
