@@ -5,9 +5,10 @@ use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
 use crate::infrastructure::plugin_runtime::find_plugin_root;
 use crate::infrastructure::workspace_index::{IndexReadiness, WorkspaceIndexService};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc, Arc, Mutex, MutexGuard, TryLockError,
+    mpsc, Arc, Condvar, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,6 +33,7 @@ const SERVICE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const SERVICE_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const SERVICE_RESPONSE_LINE_LIMIT: usize = 8 * 1024 * 1024;
 const SERVICE_SPAWN_LOCK_STALE_SECS: u64 = 30;
+const SERVICE_RECORD_LOCK_FILE: &str = "service.record.lock";
 
 static SYSTEM_SERVICE_CONNECTOR: SystemServiceConnector = SystemServiceConnector;
 static SYSTEM_SERVICE_SPAWNER: SystemServiceSpawner = SystemServiceSpawner;
@@ -290,11 +292,14 @@ impl<'a> WorkspaceServiceManager<'a> {
         };
         let workspace_root = workspace_root.display().to_string();
         for entry in entries.flatten() {
-            let record_path = entry.path().join("service.json");
-            let Ok(text) = fs::read_to_string(record_path) else {
-                continue;
+            let service_dir = entry.path();
+            let lock_identity = WorkspaceServiceIdentity {
+                key: String::new(),
+                workspace_root: String::new(),
+                source_root: String::new(),
+                service_dir,
             };
-            let Ok(record) = serde_json::from_str::<WorkspaceServiceRecord>(&text) else {
+            let Some(record) = read_record(&lock_identity) else {
                 continue;
             };
             if record.workspace_root != workspace_root {
@@ -320,9 +325,7 @@ impl<'a> WorkspaceServiceManager<'a> {
         };
         self.connector
             .send(record, request, &CancellationToken::new())
-            .map(|response| {
-                response.ok && !response.shutdown && response.status.as_deref() == Some("alive")
-            })
+            .map(|response| service_response_is_alive(&response))
             .unwrap_or(false)
     }
 
@@ -366,6 +369,10 @@ impl<'a> WorkspaceServiceManager<'a> {
             &CancellationToken::new(),
         );
     }
+}
+
+fn service_response_is_alive(response: &ServiceResponse) -> bool {
+    response.ok && !response.shutdown && response.status.as_deref() == Some("alive")
 }
 
 fn cancellation_error(cancellation: &CancellationToken) -> Result<(), String> {
@@ -838,11 +845,82 @@ impl ServiceSpawner for SystemServiceSpawner {
     }
 }
 
+#[derive(Default)]
+struct AnalyzerLane {
+    state: Mutex<AnalyzerLaneState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct AnalyzerLaneState {
+    held: bool,
+    next_ticket: u64,
+    waiters: VecDeque<u64>,
+}
+
+impl AnalyzerLane {
+    fn acquire(&self, cancellation: &CancellationToken) -> Result<AnalyzerLanePermit<'_>, String> {
+        self.acquire_with_hook(cancellation, || {})
+    }
+
+    fn acquire_with_hook(
+        &self,
+        cancellation: &CancellationToken,
+        queued: impl FnOnce(),
+    ) -> Result<AnalyzerLanePermit<'_>, String> {
+        let ticket = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let ticket = state.next_ticket;
+            state.next_ticket = state.next_ticket.wrapping_add(1);
+            state.waiters.push_back(ticket);
+            ticket
+        };
+        queued();
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        loop {
+            if cancellation.is_cancelled() {
+                if let Some(index) = state.waiters.iter().position(|waiting| *waiting == ticket) {
+                    state.waiters.remove(index);
+                }
+                self.wake.notify_all();
+                return Err(cancelled_error("workspace analyzer lane wait stopped"));
+            }
+            if !state.held && state.waiters.front() == Some(&ticket) {
+                state.waiters.pop_front();
+                state.held = true;
+                return Ok(AnalyzerLanePermit { lane: self });
+            }
+            let (next, _) = self
+                .wake
+                .wait_timeout(state, Duration::from_millis(10))
+                .unwrap_or_else(|error| error.into_inner());
+            state = next;
+        }
+    }
+}
+
+struct AnalyzerLanePermit<'a> {
+    lane: &'a AnalyzerLane,
+}
+
+impl Drop for AnalyzerLanePermit<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .lane
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.held = false;
+        self.lane.wake.notify_all();
+    }
+}
+
 struct WorkspaceServiceRuntime {
     identity: WorkspaceServiceIdentity,
     token: String,
     record_owner: WorkspaceServiceRecord,
     context: WorkspaceContext,
+    analyzer_lane: AnalyzerLane,
     analyzer: Mutex<Option<BslMcpSession>>,
     source_generation: Mutex<u64>,
     analyzer_invalidated: AtomicBool,
@@ -864,6 +942,7 @@ impl WorkspaceServiceRuntime {
             token: record_owner.token.clone(),
             record_owner: record_owner.clone(),
             context,
+            analyzer_lane: AnalyzerLane::default(),
             analyzer: Mutex::new(None),
             source_generation: Mutex::new(source_generation),
             analyzer_invalidated: AtomicBool::new(false),
@@ -979,22 +1058,11 @@ impl WorkspaceServiceRuntime {
         }
     }
 
-    fn lock_analyzer_cancellable(
+    fn acquire_analyzer_lane(
         &self,
         cancellation: &CancellationToken,
-    ) -> Result<MutexGuard<'_, Option<BslMcpSession>>, String> {
-        loop {
-            if cancellation.is_cancelled() {
-                return Err(cancelled_error("workspace analyzer lane wait stopped"));
-            }
-            match self.analyzer.try_lock() {
-                Ok(analyzer) => return Ok(analyzer),
-                Err(TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(10)),
-                Err(TryLockError::Poisoned(_)) => {
-                    return Err("workspace analyzer state is unavailable".to_string())
-                }
-            }
-        }
+    ) -> Result<AnalyzerLanePermit<'_>, String> {
+        self.analyzer_lane.acquire(cancellation)
     }
 
     fn handle_bsl_mcp(
@@ -1007,13 +1075,17 @@ impl WorkspaceServiceRuntime {
         if cancellation.is_cancelled() {
             return ServiceResponse::error(cancelled_error("workspace analyzer operation stopped"));
         }
-        let mut analyzer = match self.lock_analyzer_cancellable(cancellation) {
-            Ok(analyzer) => analyzer,
+        let _lane = match self.acquire_analyzer_lane(cancellation) {
+            Ok(lane) => lane,
             Err(error) => return ServiceResponse::error(error),
         };
         if cancellation.is_cancelled() {
             return ServiceResponse::error(cancelled_error("workspace analyzer operation stopped"));
         }
+        let mut analyzer = self
+            .analyzer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let current_generation = source_generation(Path::new(&self.identity.source_root));
         if let Ok(mut generation) = self.source_generation.lock() {
             if self.analyzer_invalidated.swap(false, Ordering::AcqRel)
@@ -1085,20 +1157,53 @@ fn invalidates_analyzer(event: &str) -> bool {
 }
 
 fn remove_service_record_if_owned(runtime: &WorkspaceServiceRuntime) {
-    let Some(first) = read_record(&runtime.identity) else {
-        return;
-    };
-    if !runtime.owns_record(&first) {
-        return;
-    }
-    thread::yield_now();
-    let Some(second) = read_record(&runtime.identity) else {
-        return;
-    };
-    if first != second || !runtime.owns_record(&second) {
-        return;
-    }
-    let _ = fs::remove_file(runtime.identity.record_path());
+    remove_service_record_if_owned_with_hook(runtime, || {});
+}
+
+fn remove_service_record_if_owned_with_hook(
+    runtime: &WorkspaceServiceRuntime,
+    inside_critical_section: impl FnOnce(),
+) {
+    let _ = with_record_lock(&runtime.identity, || {
+        let Some(record) = read_record_unlocked(&runtime.identity) else {
+            return Ok(());
+        };
+        if !runtime.owns_record(&record) {
+            return Ok(());
+        }
+        inside_critical_section();
+        let Some(confirmed) = read_record_unlocked(&runtime.identity) else {
+            return Ok(());
+        };
+        if record == confirmed && runtime.owns_record(&confirmed) {
+            fs::remove_file(runtime.identity.record_path()).map_err(|error| {
+                format!("failed to remove owned workspace service record: {error}")
+            })?;
+        }
+        Ok(())
+    });
+}
+
+fn update_service_record_last_access(runtime: &WorkspaceServiceRuntime, last_access_at: u64) {
+    update_service_record_last_access_with_hook(runtime, last_access_at, || {});
+}
+
+fn update_service_record_last_access_with_hook(
+    runtime: &WorkspaceServiceRuntime,
+    last_access_at: u64,
+    inside_critical_section: impl FnOnce(),
+) {
+    let _ = with_record_lock(&runtime.identity, || {
+        let Some(mut record) = read_record_unlocked(&runtime.identity) else {
+            return Ok(());
+        };
+        if !runtime.owns_record(&record) {
+            return Ok(());
+        }
+        inside_critical_section();
+        record.last_access_at = last_access_at;
+        write_record_unlocked(&runtime.identity, &record)
+    });
 }
 
 struct OperationGuard {
@@ -1505,20 +1610,85 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn read_record(identity: &WorkspaceServiceIdentity) -> Option<WorkspaceServiceRecord> {
+struct ServiceRecordLock {
+    file: fs::File,
+}
+
+impl Drop for ServiceRecordLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn acquire_record_lock(identity: &WorkspaceServiceIdentity) -> Result<ServiceRecordLock, String> {
+    fs::create_dir_all(&identity.service_dir)
+        .map_err(|error| format!("failed to create workspace service state directory: {error}"))?;
+    let path = identity.service_dir.join(SERVICE_RECORD_LOCK_FILE);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| {
+            format!(
+                "failed to open workspace service record lock {}: {error}",
+                path.display()
+            )
+        })?;
+    file.lock_exclusive().map_err(|error| {
+        format!(
+            "failed to acquire workspace service record lock {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(ServiceRecordLock { file })
+}
+
+fn with_record_lock<T>(
+    identity: &WorkspaceServiceIdentity,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _lock = acquire_record_lock(identity)?;
+    operation()
+}
+
+fn read_record_unlocked(identity: &WorkspaceServiceIdentity) -> Option<WorkspaceServiceRecord> {
     let text = fs::read_to_string(identity.record_path()).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+fn read_record(identity: &WorkspaceServiceIdentity) -> Option<WorkspaceServiceRecord> {
+    with_record_lock(identity, || Ok(read_record_unlocked(identity)))
+        .ok()
+        .flatten()
+}
+
+fn write_record_unlocked(
+    identity: &WorkspaceServiceIdentity,
+    record: &WorkspaceServiceRecord,
+) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(record).map_err(|err| err.to_string())?;
+    fs::write(identity.record_path(), text + "\n")
+        .map_err(|err| format!("failed to write workspace service record: {err}"))
 }
 
 fn write_record(
     identity: &WorkspaceServiceIdentity,
     record: &WorkspaceServiceRecord,
 ) -> Result<(), String> {
-    fs::create_dir_all(&identity.service_dir)
-        .map_err(|err| format!("failed to create workspace service state directory: {err}"))?;
-    let text = serde_json::to_string_pretty(record).map_err(|err| err.to_string())?;
-    fs::write(identity.record_path(), text + "\n")
-        .map_err(|err| format!("failed to write workspace service record: {err}"))
+    write_record_with_hook(identity, record, || {})
+}
+
+fn write_record_with_hook(
+    identity: &WorkspaceServiceIdentity,
+    record: &WorkspaceServiceRecord,
+    inside_critical_section: impl FnOnce(),
+) -> Result<(), String> {
+    with_record_lock(identity, || {
+        inside_critical_section();
+        write_record_unlocked(identity, record)
+    })
 }
 
 struct SpawnLock {
@@ -1567,11 +1737,19 @@ fn spawn_lock_is_stale(identity: &WorkspaceServiceIdentity) -> bool {
 }
 
 fn wait_for_record(identity: &WorkspaceServiceIdentity) -> Result<WorkspaceServiceRecord, String> {
+    wait_for_record_with_connector(identity, &SYSTEM_SERVICE_CONNECTOR, SERVICE_CONNECT_TIMEOUT)
+}
+
+fn wait_for_record_with_connector(
+    identity: &WorkspaceServiceIdentity,
+    connector: &dyn ServiceConnector,
+    timeout: Duration,
+) -> Result<WorkspaceServiceRecord, String> {
     let started = Instant::now();
-    while started.elapsed() < SERVICE_CONNECT_TIMEOUT {
+    while started.elapsed() < timeout {
         if let Some(record) = read_record(identity) {
             if record.matches(identity, env!("CARGO_PKG_VERSION"))
-                && SYSTEM_SERVICE_CONNECTOR
+                && connector
                     .send(
                         &record,
                         ServiceRequest {
@@ -1580,7 +1758,7 @@ fn wait_for_record(identity: &WorkspaceServiceIdentity) -> Result<WorkspaceServi
                         },
                         &CancellationToken::new(),
                     )
-                    .map(|response| response.ok)
+                    .map(|response| service_response_is_alive(&response))
                     .unwrap_or(false)
             {
                 return Ok(record);
@@ -1756,12 +1934,7 @@ fn serve_workspace_service(
         match listener.accept() {
             Ok((stream, _addr)) => {
                 last_access = Instant::now();
-                if let Some(mut record) = read_record(&runtime.identity) {
-                    if runtime.owns_record(&record) {
-                        record.last_access_at = now_secs();
-                        let _ = write_record(&runtime.identity, &record);
-                    }
-                }
+                update_service_record_last_access(&runtime, now_secs());
                 let handler_runtime = Arc::clone(&runtime);
                 let handler_executor = Arc::clone(&executor);
                 handlers.push(thread::spawn(move || {
@@ -2178,7 +2351,7 @@ mod tests {
             cancellation: &CancellationToken,
         ) -> ServiceResponse {
             let operation_id = kind.operation_id().unwrap().to_string();
-            let _lane = match runtime.lock_analyzer_cancellable(cancellation) {
+            let _lane = match runtime.acquire_analyzer_lane(cancellation) {
                 Ok(lane) => lane,
                 Err(error) => return ServiceResponse::error(error),
             };
@@ -2614,6 +2787,187 @@ mod tests {
 
         assert_eq!(read_record(&identity).unwrap().token, replacement.token);
         cleanup(&context);
+    }
+
+    #[test]
+    fn workspace_service_record_cleanup_serializes_concurrent_replacement() {
+        let context = test_context("cleanup-serialized-race");
+        let identity =
+            WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src")).unwrap();
+        let original = test_record(&identity, 31002, env!("CARGO_PKG_VERSION"));
+        write_record(&identity, original.clone());
+        let runtime = Arc::new(WorkspaceServiceRuntime::new(identity.clone(), &original));
+        let mut replacement = original;
+        replacement.token = "serialized-replacement".to_string();
+        replacement.started_at = replacement.started_at.saturating_add(1);
+        let (inside_tx, inside_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let cleanup_runtime = runtime.clone();
+        let cleanup_thread = thread::spawn(move || {
+            remove_service_record_if_owned_with_hook(&cleanup_runtime, || {
+                inside_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        });
+        inside_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let replacement_identity = identity.clone();
+        let expected = replacement.clone();
+        let (writer_inside_tx, writer_inside_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            write_record_with_hook(&replacement_identity, &replacement, || {
+                writer_inside_tx.send(()).unwrap();
+            })
+            .unwrap();
+        });
+        assert!(writer_inside_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+        release_tx.send(()).unwrap();
+        cleanup_thread.join().unwrap();
+        writer_inside_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        writer.join().unwrap();
+
+        assert_eq!(read_record(&identity).unwrap(), expected);
+        assert!(identity
+            .service_dir
+            .join(SERVICE_RECORD_LOCK_FILE)
+            .is_file());
+        cleanup(&context);
+    }
+
+    #[test]
+    fn workspace_service_record_lock_survives_holder_panic_and_is_reusable() {
+        let context = test_context("record-lock-panic");
+        let identity =
+            WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src")).unwrap();
+        let panic_identity = identity.clone();
+        let _ = thread::spawn(move || {
+            let _lock = acquire_record_lock(&panic_identity).unwrap();
+            panic!("intentional record lock holder panic");
+        })
+        .join();
+        let record = test_record(&identity, 31004, env!("CARGO_PKG_VERSION"));
+
+        super::write_record(&identity, &record).unwrap();
+
+        assert_eq!(read_record(&identity).unwrap(), record);
+        assert!(identity
+            .service_dir
+            .join(SERVICE_RECORD_LOCK_FILE)
+            .is_file());
+        cleanup(&context);
+    }
+
+    #[test]
+    fn workspace_service_last_access_update_cannot_overwrite_replacement() {
+        let context = test_context("last-access-serialized-race");
+        let identity =
+            WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src")).unwrap();
+        let original = test_record(&identity, 31003, env!("CARGO_PKG_VERSION"));
+        write_record(&identity, original.clone());
+        let runtime = Arc::new(WorkspaceServiceRuntime::new(identity.clone(), &original));
+        let mut replacement = original;
+        replacement.token = "last-access-replacement".to_string();
+        replacement.started_at = replacement.started_at.saturating_add(1);
+        let expected = replacement.clone();
+        let (inside_tx, inside_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let update_runtime = runtime.clone();
+        let updater = thread::spawn(move || {
+            update_service_record_last_access_with_hook(&update_runtime, 999, || {
+                inside_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        });
+        inside_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let replacement_identity = identity.clone();
+        let (writer_inside_tx, writer_inside_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            write_record_with_hook(&replacement_identity, &replacement, || {
+                writer_inside_tx.send(()).unwrap();
+            })
+            .unwrap();
+        });
+        assert!(writer_inside_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+        release_tx.send(()).unwrap();
+        updater.join().unwrap();
+        writer_inside_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        writer.join().unwrap();
+
+        assert_eq!(read_record(&identity).unwrap(), expected);
+        cleanup(&context);
+    }
+
+    #[test]
+    fn analyzer_lane_is_fifo_and_cancelled_middle_ticket_advances_queue() {
+        let lane = Arc::new(AnalyzerLane::default());
+        let holder = lane.acquire(&CancellationToken::new()).unwrap();
+        let (queued_tx, queued_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let middle_cancellation = CancellationToken::new();
+        let mut waiters = Vec::new();
+        for id in [1_u8, 2, 3] {
+            let lane = lane.clone();
+            let queued_tx = queued_tx.clone();
+            let acquired_tx = acquired_tx.clone();
+            let cancellation = if id == 2 {
+                middle_cancellation.clone()
+            } else {
+                CancellationToken::new()
+            };
+            waiters.push(thread::spawn(move || {
+                let result = lane.acquire_with_hook(&cancellation, || {
+                    queued_tx.send(id).unwrap();
+                });
+                match result {
+                    Ok(_permit) => acquired_tx.send((id, "acquired")).unwrap(),
+                    Err(error) => {
+                        assert!(error.starts_with("cancelled:"));
+                        acquired_tx.send((id, "cancelled")).unwrap();
+                    }
+                }
+            }));
+            assert_eq!(queued_rx.recv_timeout(Duration::from_secs(2)).unwrap(), id);
+        }
+        middle_cancellation.cancel();
+        assert_eq!(
+            acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (2, "cancelled")
+        );
+        drop(holder);
+        assert_eq!(
+            acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (1, "acquired")
+        );
+        assert_eq!(
+            acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (3, "acquired")
+        );
+        for waiter in waiters {
+            waiter.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn analyzer_lane_recovers_from_poison_without_losing_progress() {
+        let lane = Arc::new(AnalyzerLane::default());
+        let poison_lane = lane.clone();
+        let _ = thread::spawn(move || {
+            let _state = poison_lane.state.lock().unwrap();
+            panic!("intentional analyzer queue poison");
+        })
+        .join();
+
+        let permit = lane.acquire(&CancellationToken::new()).unwrap();
+        drop(permit);
+        let second = lane.acquire(&CancellationToken::new()).unwrap();
+        drop(second);
     }
 
     #[test]
@@ -3521,6 +3875,41 @@ fn main() {
     }
 
     #[test]
+    fn spawn_wait_rejects_shutting_down_record() {
+        struct ShuttingDownConnector;
+        impl ServiceConnector for ShuttingDownConnector {
+            fn send(
+                &self,
+                _record: &WorkspaceServiceRecord,
+                _request: ServiceRequest,
+                _cancellation: &CancellationToken,
+            ) -> Result<ServiceResponse, String> {
+                Ok(ServiceResponse {
+                    ok: true,
+                    status: Some("shutting-down".to_string()),
+                    ..ServiceResponse::default()
+                })
+            }
+        }
+        let context = test_context("spawn-wait-shutting-down");
+        let identity =
+            WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src")).unwrap();
+        write_record(
+            &identity,
+            test_record(&identity, 34567, env!("CARGO_PKG_VERSION")),
+        );
+
+        let result = wait_for_record_with_connector(
+            &identity,
+            &ShuttingDownConnector,
+            Duration::from_millis(75),
+        );
+
+        assert!(result.is_err());
+        cleanup(&context);
+    }
+
+    #[test]
     fn service_config_uses_defaults_and_env_overrides() {
         std::env::remove_var("UNICA_WORKSPACE_SERVICE_IDLE_SECS");
         std::env::remove_var("UNICA_WORKSPACE_SERVICE_MAX_AGE_SECS");
@@ -3706,12 +4095,7 @@ fn main() {
     }
 
     fn write_record(identity: &WorkspaceServiceIdentity, record: WorkspaceServiceRecord) {
-        fs::create_dir_all(&identity.service_dir).unwrap();
-        fs::write(
-            identity.record_path(),
-            serde_json::to_string_pretty(&record).unwrap() + "\n",
-        )
-        .unwrap();
+        super::write_record(identity, &record).unwrap();
     }
 
     fn test_record(
