@@ -63,6 +63,17 @@ class UnicaMcpSmokeTests(unittest.TestCase):
                 responses.append(json.loads(line))
 
             process.stdin.close()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.fail("timed out waiting for MCP stdout EOF")
+                try:
+                    trailing = lines.get(timeout=remaining)
+                except queue.Empty:
+                    self.fail("timed out waiting for MCP stdout EOF")
+                if not trailing:
+                    break
+                self.fail(f"unexpected MCP response after expected ids: {trailing.strip()}")
             return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
             stderr = process.stderr.read()
             self.assertEqual(return_code, 0, stderr)
@@ -72,7 +83,10 @@ class UnicaMcpSmokeTests(unittest.TestCase):
                 process.stdin.close()
             if process.poll() is None:
                 process.kill()
-                process.wait(timeout=5)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
             process.stdout.close()
             process.stderr.close()
 
