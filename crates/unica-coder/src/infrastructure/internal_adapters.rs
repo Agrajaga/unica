@@ -1,6 +1,8 @@
+use crate::domain::cancellation::CancellationToken;
 use crate::domain::source_roots::resolve_source_root;
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
+use crate::infrastructure::managed_child::{ManagedChild, ManagedCommand};
 use crate::infrastructure::plugin_runtime::{find_plugin_root, value_to_cli_string};
 use crate::infrastructure::workspace_index::{
     IndexReadiness, IndexRunner, WorkspaceIndexService, SYSTEM_INDEX_RUNNER,
@@ -12,8 +14,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use std::env;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -23,6 +24,7 @@ pub struct ProcessCommand {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub timeout: Option<Duration>,
+    pub cancellation: CancellationToken,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,7 @@ pub struct ProcessOutput {
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
+    pub cancelled: bool,
 }
 
 pub trait ProcessRunner {
@@ -178,6 +181,7 @@ impl<'a> CliAdapter<'a> {
             args: process_args,
             cwd: context.cwd.clone(),
             timeout: process_timeout,
+            cancellation: CancellationToken::new(),
         })?;
         let ok = output.status_success;
         Ok(AdapterOutcome {
@@ -275,6 +279,7 @@ impl<'a> RuntimeAdapter<'a> {
             args: execution_args,
             cwd: context.cwd.clone(),
             timeout: process_timeout,
+            cancellation: CancellationToken::new(),
         };
         let output = match self.runner.run(&process_command) {
             Ok(output) => output,
@@ -836,6 +841,7 @@ impl<'a> CodeNavigationAdapter<'a> {
             args: git_args.clone(),
             cwd: context.workspace_root.clone(),
             timeout: Some(DEFAULT_PROCESS_TIMEOUT),
+            cancellation: CancellationToken::new(),
         })?;
         let body = grep_body(&output.stdout, mode, limit);
         let no_matches = body.is_empty()
@@ -1994,51 +2000,24 @@ fn join_rel(base: &str, rel: &str) -> String {
 
 impl ProcessRunner for SystemProcessRunner {
     fn run(&self, command: &ProcessCommand) -> Result<ProcessOutput, String> {
-        let mut child = Command::new(&command.program)
-            .args(&command.args)
-            .current_dir(&command.cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| format!("failed to execute process: {err}"))?;
-
-        let started = Instant::now();
-        loop {
-            if child
-                .try_wait()
-                .map_err(|err| format!("failed to poll process: {err}"))?
-                .is_some()
-            {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|err| format!("failed to collect process output: {err}"))?;
-                return Ok(ProcessOutput {
-                    status_success: output.status.success(),
-                    status: output.status.to_string(),
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                    timed_out: false,
-                });
-            }
-
-            if let Some(timeout) = command.timeout {
-                if started.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let output = child.wait_with_output().map_err(|err| {
-                        format!("failed to collect timed-out process output: {err}")
-                    })?;
-                    return Ok(ProcessOutput {
-                        status_success: false,
-                        status: "timeout".to_string(),
-                        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                        timed_out: true,
-                    });
-                }
-            }
-
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        let output = ManagedChild::run(ManagedCommand {
+            program: command.program.clone(),
+            args: command.args.clone(),
+            cwd: command.cwd.clone(),
+            env: Vec::new(),
+            timeout: command.timeout,
+            cancellation: command.cancellation.clone(),
+        })?;
+        let output = ProcessOutput {
+            status_success: output.status_success,
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            timed_out: output.timed_out,
+            cancelled: output.cancelled,
+        };
+        debug_assert!(!(output.timed_out && output.cancelled));
+        Ok(output)
     }
 }
 
@@ -2955,6 +2934,7 @@ mod tests {
                 stdout: "ok".to_string(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -2993,6 +2973,7 @@ mod tests {
                 stdout: "Designer build completed after 240 seconds".to_string(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -3297,6 +3278,7 @@ mod tests {
                 stdout: "ignored".to_string(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let index = FakeIndexRunner::default();
@@ -3327,6 +3309,7 @@ mod tests {
                     .to_string(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let index = FakeIndexRunner {
@@ -3366,6 +3349,7 @@ mod tests {
                 stdout: "CommonModules/Проведение.bsl:42:ОбработкаПроведения\n".to_string(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let index = FakeIndexRunner {
@@ -3407,6 +3391,7 @@ mod tests {
                     .to_string(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let index = FakeIndexRunner {
@@ -3440,6 +3425,7 @@ mod tests {
                 stderr: "fatal: not a git repository (or any of the parent directories): .git\n"
                     .to_string(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let index = FakeIndexRunner {
@@ -3473,6 +3459,7 @@ mod tests {
                 stderr: "fatal: not a git repository (or any of the parent directories): .git\n"
                     .to_string(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let index = FakeIndexRunner {
@@ -3512,6 +3499,7 @@ mod tests {
                 stdout: "CommonModules/Проведение.bsl:42:ОбработкаПроведения\n".to_string(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let index = FakeIndexRunner {
@@ -3557,6 +3545,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -3595,6 +3584,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -3636,6 +3626,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -3695,6 +3686,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -3728,6 +3720,7 @@ mod tests {
                 stdout: "CommonModules/SmokeModule/Ext/Module.bsl:2:SmokeProcedure\n".to_string(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -3776,6 +3769,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -3804,6 +3798,7 @@ mod tests {
                 stderr: "fatal: not a git repository (or any of the parent directories): .git\n"
                     .to_string(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -4066,6 +4061,7 @@ source-set:
                 stdout: "partial stdout".to_string(),
                 stderr: "failure stderr".to_string(),
                 timed_out: false,
+                cancelled: false,
             },
         };
 
@@ -4095,6 +4091,7 @@ source-set:
                 stdout: String::new(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
             },
         };
 
@@ -4124,6 +4121,7 @@ source-set:
                 stdout: String::new(),
                 stderr: String::new(),
                 timed_out: true,
+                cancelled: false,
             },
         };
 
@@ -4153,6 +4151,7 @@ source-set:
                 stdout: String::new(),
                 stderr: String::new(),
                 timed_out: true,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -4183,6 +4182,7 @@ source-set:
                         .to_string(),
                 stderr: "failed to load configuration: Pwd=stderr-secret\n".to_string(),
                 timed_out: false,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -4222,6 +4222,7 @@ source-set:
                 stdout: "started loading configuration...\n".to_string(),
                 stderr: String::new(),
                 timed_out: true,
+                cancelled: false,
             },
         };
         let mut args = Map::new();
@@ -4295,11 +4296,45 @@ source-set:
                 args,
                 cwd: std::env::current_dir().unwrap(),
                 timeout: None,
+                cancellation: CancellationToken::new(),
             })
             .unwrap();
 
         assert!(output.status_success);
         assert_eq!(output.stdout, "ok");
+        assert!(!output.timed_out);
+    }
+
+    #[test]
+    fn cancelled_runner_stops_process_without_reporting_timeout() {
+        #[cfg(windows)]
+        let (program, args) = (
+            PathBuf::from("powershell"),
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Start-Sleep -Seconds 10".to_string(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (program, args) = (
+            PathBuf::from("sh"),
+            vec!["-c".to_string(), "sleep 10".to_string()],
+        );
+        let token = crate::domain::cancellation::CancellationToken::new();
+        token.cancel();
+
+        let output = SYSTEM_PROCESS_RUNNER
+            .run(&ProcessCommand {
+                program,
+                args,
+                cwd: std::env::current_dir().unwrap(),
+                timeout: Some(Duration::from_secs(10)),
+                cancellation: token,
+            })
+            .unwrap();
+
+        assert!(output.cancelled);
         assert!(!output.timed_out);
     }
 
