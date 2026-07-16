@@ -1,4 +1,4 @@
-use crate::domain::source_roots::select_default_source_set;
+use crate::domain::source_roots::{normalize_contained_source_root, select_default_source_set};
 use serde::Serialize;
 use serde_yaml::Value as YamlValue;
 use std::path::{Path, PathBuf};
@@ -71,11 +71,16 @@ pub fn discover_project_source_map(workspace_root: &Path) -> Result<ProjectSourc
         .collect::<Vec<_>>();
     let (effective_source_set, effective_source_root, source_selection_error) =
         match select_default_source_set(&project_source_sets) {
-            Ok(source_set) => (
-                Some(source_set.name.clone()),
-                Some(source_set.path.clone()),
-                None,
-            ),
+            Ok(source_set) => {
+                match normalize_contained_source_root(workspace_root, &source_set.path) {
+                    Ok(root) => (
+                        Some(source_set.name.clone()),
+                        Some(root.display().to_string()),
+                        None,
+                    ),
+                    Err(error) => (None, None, Some(format!("invalid_source_root: {error}"))),
+                }
+            }
             Err(error) => (None, None, Some(error)),
         };
 
@@ -332,6 +337,8 @@ fn yaml_mapping_get<'a>(value: &'a YamlValue, key: &str) -> Option<&'a YamlValue
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::source_roots::resolve_source_root;
+    use crate::domain::workspace::WorkspaceContext;
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -522,6 +529,71 @@ source-set:
             ],
         );
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effective_source_root_rejects_relative_workspace_escape() {
+        let root = temp_workspace("unica-source-map-relative-escape");
+        write(
+            &root.join("v8project.yaml"),
+            "source-set:\n  - name: main\n    type: CONFIGURATION\n    path: ../outside\n",
+        );
+
+        let map = discover_project_source_map(&root).unwrap();
+
+        assert!(map.effective_source_set.is_none());
+        assert!(map.effective_source_root.is_none());
+        assert!(map
+            .source_selection_error
+            .as_deref()
+            .is_some_and(
+                |error| error.starts_with("invalid_source_root:") && error.contains("workspace")
+            ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effective_source_root_rejects_absolute_workspace_escape() {
+        let root = temp_workspace("unica-source-map-absolute-escape");
+        let outside = temp_workspace("unica-source-map-outside");
+        write(
+            &root.join("v8project.yaml"),
+            &format!(
+                "source-set:\n  - name: main\n    type: CONFIGURATION\n    path: {}\n",
+                outside.display()
+            ),
+        );
+
+        let map = discover_project_source_map(&root).unwrap();
+
+        assert!(map.effective_source_root.is_none());
+        assert!(map
+            .source_selection_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("invalid_source_root:")));
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn effective_source_root_uses_resolver_path_identity() {
+        let root = temp_workspace("unica-source-map-normalized");
+        write(
+            &root.join("v8project.yaml"),
+            "source-set:\n  - name: main\n    type: CONFIGURATION\n    path: src/../src/cf\n",
+        );
+        fs::create_dir_all(root.join("src/cf")).unwrap();
+        let context = WorkspaceContext::discover(root.clone()).unwrap();
+
+        let map = discover_project_source_map(&root).unwrap();
+        let resolved = resolve_source_root(&context, None).unwrap();
+
+        assert_eq!(map.effective_source_set.as_deref(), Some("main"));
+        assert_eq!(
+            map.effective_source_root.as_deref(),
+            Some(resolved.path.to_string_lossy().as_ref())
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

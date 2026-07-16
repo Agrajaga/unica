@@ -94,13 +94,27 @@ fn strip_windows_extended_length_prefix(path: &Path) -> PathBuf {
 fn resolve_default(context: &WorkspaceContext) -> Result<ResolvedSourceRoot, String> {
     let map = discover_project_source_map(&context.workspace_root)?;
     let selected = select_default_source_set(&map.source_sets)?;
-    let workspace_root = normalize_path_identity(&context.workspace_root)?;
-    let path = normalize_path_identity(&context.workspace_root.join(&selected.path))?;
-    ensure_inside_workspace(&path, &workspace_root)?;
+    let path = normalize_contained_source_root(&context.workspace_root, &selected.path)?;
     Ok(ResolvedSourceRoot {
         source_set: Some(selected.name.clone()),
         path,
     })
+}
+
+pub(crate) fn normalize_contained_source_root(
+    workspace_root: &Path,
+    configured_path: impl AsRef<Path>,
+) -> Result<PathBuf, String> {
+    let workspace_root = normalize_path_identity(workspace_root)?;
+    let configured_path = configured_path.as_ref();
+    let candidate = if configured_path.is_absolute() {
+        configured_path.to_path_buf()
+    } else {
+        workspace_root.join(configured_path)
+    };
+    let path = normalize_path_identity(&candidate)?;
+    ensure_inside_workspace(&path, &workspace_root)?;
+    Ok(path)
 }
 
 fn resolve_explicit(context: &WorkspaceContext, raw: &str) -> Result<ResolvedSourceRoot, String> {
