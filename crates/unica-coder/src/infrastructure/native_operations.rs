@@ -1,14 +1,11 @@
-//! Native XML/DSL operation facade.
-//!
-//! Family modules under `native_operations/` own operation-specific XML/DSL
-//! behavior; this facade keeps the public adapter surface thin.
-
+//! Thin facade over family-owned native XML/DSL operations.
 pub(crate) mod cf;
 pub(crate) mod cfe;
 pub(crate) mod common;
 pub(crate) mod compile_transaction;
 pub(crate) mod external;
 pub(crate) mod form;
+pub(crate) mod form_event_registry;
 pub(crate) mod help;
 pub(crate) mod interface;
 pub(crate) mod meta;
@@ -39,6 +36,9 @@ impl NativeOperationAdapter {
         if dry_run {
             if let Some(outcome) = external::preview(operation, tool_name, args, context) {
                 return Ok(outcome);
+            }
+            if operation == "form-edit" && form::has_edit_payload(args) {
+                return Ok(form::preview_form_edit(args, context));
             }
             let mut fallback = AdapterOutcome {
                 ok: true,

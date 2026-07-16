@@ -367,7 +367,7 @@ fn call_tool(
     }
     outcome.warnings.extend(index_report.warnings);
 
-    let events = if should_emit_events(spec, dry_run, &outcome) {
+    let events = if should_emit_events(spec, args, dry_run, &outcome) {
         domain_events(spec, args)
     } else {
         Vec::new()
@@ -393,6 +393,29 @@ fn call_tool(
     })
 }
 
+fn should_emit_events(
+    spec: ToolSpec,
+    args: &Map<String, Value>,
+    dry_run: bool,
+    outcome: &AdapterOutcome,
+) -> bool {
+    if !spec.mutating || !outcome.ok {
+        return false;
+    }
+    if !dry_run {
+        return !outcome.changes.is_empty();
+    }
+
+    let is_semantic_form_edit_preview = spec.name == "unica.form.edit"
+        && args.keys().any(|key| {
+            matches!(
+                key.as_str(),
+                "FormPath" | "formPath" | "Path" | "path" | "JsonPath" | "jsonPath" | "definition"
+            )
+        });
+    !is_semantic_form_edit_preview || !outcome.changes.is_empty()
+}
+
 fn is_successful_detailed_compile_preview(
     spec: ToolSpec,
     dry_run: bool,
@@ -408,10 +431,6 @@ fn is_successful_detailed_compile_preview(
                 ..
             }
         )
-}
-
-fn should_emit_events(spec: ToolSpec, dry_run: bool, outcome: &AdapterOutcome) -> bool {
-    spec.mutating && outcome.ok && (dry_run || !outcome.changes.is_empty())
 }
 
 fn runtime_result_diagnostics(
@@ -1069,7 +1088,8 @@ fn configuration_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "unica.form.edit",
-            description: "Edit managed Form.xml elements, attributes, and commands.",
+            description:
+                "Edit managed Form.xml elements, attributes, commands, and validated events.",
             mutating: true,
             cache_access: cache_access_for("form-edit", Some(DomainEventKind::FormChanged)),
             handler: ToolHandler::NativeOperation {
@@ -1451,16 +1471,58 @@ mod tests {
             },
         };
 
-        assert!(!should_emit_events(spec, false, &outcome));
+        let args = Map::new();
+        assert!(!should_emit_events(spec, &args, false, &outcome));
 
         outcome
             .changes
             .push("updated Configuration.xml".to_string());
-        assert!(should_emit_events(spec, false, &outcome));
+        assert!(should_emit_events(spec, &args, false, &outcome));
         assert!(should_emit_events(
             spec,
+            &args,
             true,
-            &AdapterOutcome::ok("dry run")
+            &AdapterOutcome::ok("generic dry run")
+        ));
+
+        let form_edit_spec = ToolSpec {
+            name: "unica.form.edit",
+            description: "test",
+            mutating: true,
+            cache_access: cache_access_for("form-edit", Some(DomainEventKind::FormChanged)),
+            handler: ToolHandler::NativeOperation {
+                operation: "form-edit",
+                event: Some(DomainEventKind::FormChanged),
+            },
+        };
+        let semantic_args = Map::from_iter([
+            ("FormPath".to_string(), json!("Form.xml")),
+            ("definition".to_string(), json!({"formEvents": []})),
+        ]);
+        assert!(!should_emit_events(
+            form_edit_spec,
+            &semantic_args,
+            true,
+            &AdapterOutcome::ok("semantic dry run no-op")
+        ));
+
+        let mut planned = AdapterOutcome::ok("dry run planned change");
+        planned.changes.push("would update Form.xml".to_string());
+        assert!(should_emit_events(
+            form_edit_spec,
+            &semantic_args,
+            true,
+            &planned
+        ));
+
+        let mut rejected = AdapterOutcome::ok("dry run rejected");
+        rejected.ok = false;
+        rejected.changes.push("would update Form.xml".to_string());
+        assert!(!should_emit_events(
+            form_edit_spec,
+            &semantic_args,
+            true,
+            &rejected
         ));
     }
 

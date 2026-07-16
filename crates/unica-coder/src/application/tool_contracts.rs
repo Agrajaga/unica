@@ -557,12 +557,20 @@ pub fn input_schema_for_tool(tool: &ToolSpec) -> Value {
         properties.insert(name.to_string(), property_schema_for_tool(tool, name));
     }
 
-    json!({
+    let mut schema = json!({
         "type": "object",
         "additionalProperties": false,
         "properties": properties,
         "required": required_args(tool),
-    })
+    });
+    if tool.name == "unica.form.edit" {
+        schema["oneOf"] = json!([
+            {"required": ["JsonPath"]},
+            {"required": ["jsonPath"]},
+            {"required": ["definition"]}
+        ]);
+    }
+    schema
 }
 
 pub fn validate_tool_arguments(
@@ -588,6 +596,7 @@ pub fn validate_tool_arguments(
     validate_code_arguments(tool, args, dry_run)?;
     validate_meta_edit_arguments(tool, args)?;
     validate_form_add_arguments(tool, args)?;
+    validate_form_edit_arguments(tool, args, dry_run)?;
     validate_template_add_arguments(tool, args)?;
     validate_support_arguments(tool, args, dry_run)?;
     validate_external_init_arguments(tool, args)?;
@@ -632,6 +641,35 @@ fn validate_form_add_arguments(tool: ToolSpec, args: &Map<String, Value>) -> Res
         return Ok(());
     }
     validate_unique_alias_group(tool.name, args, &["SetDefault", "setDefault"])
+}
+
+fn validate_form_edit_arguments(
+    tool: ToolSpec,
+    args: &Map<String, Value>,
+    dry_run: bool,
+) -> Result<(), String> {
+    if tool.name != "unica.form.edit" {
+        return Ok(());
+    }
+
+    validate_unique_alias_group(tool.name, args, &["FormPath", "formPath", "Path", "path"])?;
+    validate_unique_alias_group(tool.name, args, &["JsonPath", "jsonPath", "definition"])?;
+
+    let has_target = contains_any(args, &["FormPath", "formPath", "Path", "path"]);
+    let has_payload = contains_any(args, &["JsonPath", "jsonPath", "definition"]);
+    if !dry_run || has_target || has_payload {
+        if !has_target {
+            return Err(format!("{} requires `FormPath` argument", tool.name));
+        }
+        if !has_payload {
+            return Err(format!(
+                "{} requires exactly one of `JsonPath` or `definition`",
+                tool.name
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_template_add_arguments(
@@ -1383,6 +1421,9 @@ fn allowed_args(tool: &ToolSpec) -> Vec<&'static str> {
     match tool.handler {
         ToolHandler::NativeOperation { operation, .. } => {
             names.extend(native_args_for(operation));
+            if operation == "form-edit" {
+                names.push("definition");
+            }
         }
         ToolHandler::BuildRuntime { .. } => names.extend(BUILD_ARGS),
         ToolHandler::RuntimeAdapter => names.extend(RUNTIME_ARGS),
@@ -1512,6 +1553,8 @@ fn property_schema(name: &str) -> Value {
             | "regex"
     ) {
         "boolean"
+    } else if name == "definition" {
+        "object"
     } else if matches!(
         name,
         "limit"
@@ -1625,6 +1668,9 @@ fn validate_argument_type(tool_name: &str, key: &str, value: &Value) -> Result<(
         Some("array") if !value.is_array() => {
             Err(format!("{tool_name} argument `{key}` must be array"))
         }
+        Some("object") if !value.is_object() => {
+            Err(format!("{tool_name} argument `{key}` must be object"))
+        }
         _ => Ok(()),
     }
 }
@@ -1688,6 +1734,8 @@ fn expected_scalar_type(key: &str) -> Option<&'static str> {
             | "regex"
     ) {
         Some("boolean")
+    } else if key == "definition" {
+        Some("object")
     } else if matches!(
         key,
         "limit"
@@ -1758,6 +1806,61 @@ mod tests {
         let args = Map::new();
 
         validate_tool_arguments(tool, &args, true).unwrap();
+    }
+
+    #[test]
+    fn form_edit_contract_accepts_inline_definition_or_json_path() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.form.edit")
+            .unwrap();
+        let schema = input_schema_for_tool(&tool);
+        assert_eq!(schema["properties"]["definition"]["type"], "object");
+        assert_eq!(schema["required"], json!(["FormPath"]));
+        assert_eq!(
+            schema["oneOf"],
+            json!([
+                {"required": ["JsonPath"]},
+                {"required": ["jsonPath"]},
+                {"required": ["definition"]}
+            ])
+        );
+
+        let validate_tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.form.validate")
+            .unwrap();
+        let validate_schema = input_schema_for_tool(&validate_tool);
+        assert!(validate_schema["properties"].get("definition").is_none());
+
+        let mut inline = Map::new();
+        inline.insert("FormPath".to_string(), json!("Form.xml"));
+        inline.insert("definition".to_string(), json!({"formEvents": []}));
+        validate_tool_arguments(tool, &inline, false).unwrap();
+
+        let mut file = Map::new();
+        file.insert("FormPath".to_string(), json!("Form.xml"));
+        file.insert("JsonPath".to_string(), json!("edit.json"));
+        validate_tool_arguments(tool, &file, false).unwrap();
+
+        let mut both = inline.clone();
+        both.insert("JsonPath".to_string(), json!("edit.json"));
+        assert!(validate_tool_arguments(tool, &both, false)
+            .unwrap_err()
+            .contains("conflicting aliases"));
+
+        let mut missing_payload = Map::new();
+        missing_payload.insert("FormPath".to_string(), json!("Form.xml"));
+        assert!(validate_tool_arguments(tool, &missing_payload, false)
+            .unwrap_err()
+            .contains("exactly one"));
+
+        let mut wrong_type = Map::new();
+        wrong_type.insert("FormPath".to_string(), json!("Form.xml"));
+        wrong_type.insert("definition".to_string(), json!("not-an-object"));
+        assert!(validate_tool_arguments(tool, &wrong_type, false)
+            .unwrap_err()
+            .contains("must be object"));
     }
 
     #[test]
