@@ -4169,6 +4169,137 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
             self.assertEqual(result.get("changes"), [])
             self.assertEqual(form_path.read_bytes(), before)
 
+    def test_form_edit_accepts_extended_persistent_event_families(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unica-issue77-persistent-events-") as temp:
+            temp_root = Path(temp)
+            workspace = temp_root / "workspace"
+            cache = temp_root / "cache"
+            workspace.mkdir()
+            persistent_types = [
+                "ChartOfAccountsObject.Main",
+                "ChartOfCalculationTypesObject.Payroll",
+                "AccumulationRegisterRecordSet.Stock",
+                "AccountingRegisterRecordSet.Accounting",
+                "CalculationRegisterRecordSet.Payroll",
+            ]
+
+            for index, persistent_type in enumerate(persistent_types, start=1):
+                with self.subTest(persistent_type=persistent_type):
+                    form_path = workspace / f"Form{index}.xml"
+                    form_path.write_text(
+                        f"""<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform"
+      xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config"
+      xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+\t<AutoCommandBar name="FormCommandBar" id="-1"/>
+\t<ChildItems/>
+\t<Attributes>
+\t\t<Attribute name="Object" id="1">
+\t\t\t<Type><v8:Type>cfg:{persistent_type}</v8:Type></Type>
+\t\t\t<MainAttribute>true</MainAttribute>
+\t\t</Attribute>
+\t</Attributes>
+\t<Commands/>
+</Form>""",
+                        encoding="utf-8",
+                    )
+
+                    edit = self.call_mcp_tool(
+                        "unica.form.edit",
+                        {
+                            "FormPath": form_path.name,
+                            "definition": {
+                                "formEvents": [
+                                    {"name": "OnReadAtServer", "handler": "ObjectOnReadAtServer"}
+                                ]
+                            },
+                        },
+                        workspace,
+                        cache,
+                    )
+
+                    self.assertTrue(edit["ok"], json.dumps(edit, ensure_ascii=False, indent=2))
+                    updated = form_path.read_text(encoding="utf-8-sig")
+                    self.assertEqual(updated.count('name="OnReadAtServer"'), 1)
+
+                    validate = self.call_mcp_tool(
+                        "unica.form.validate",
+                        {"FormPath": form_path.name},
+                        workspace,
+                        cache,
+                    )
+                    self.assertTrue(
+                        validate["ok"], json.dumps(validate, ensure_ascii=False, indent=2)
+                    )
+
+    def test_form_compile_dry_run_uses_event_registry_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unica-issue77-compile-preview-") as temp:
+            temp_root = Path(temp)
+            workspace = temp_root / "workspace"
+            cache = temp_root / "cache"
+            workspace.mkdir()
+            invalid_definition = workspace / "invalid.json"
+            valid_definition = workspace / "valid.json"
+            invalid_definition.write_text(
+                json.dumps({"events": {"Opening": "OnOpening"}}),
+                encoding="utf-8",
+            )
+            valid_definition.write_text(
+                json.dumps({"events": {"OnCreateAtServer": "OnCreateAtServer"}}),
+                encoding="utf-8",
+            )
+            invalid_output = workspace / "InvalidForm.xml"
+            valid_output = workspace / "ValidForm.xml"
+            invalid_before = b"invalid-preview-sentinel"
+            valid_before = b"valid-preview-sentinel"
+            invalid_output.write_bytes(invalid_before)
+            valid_output.write_bytes(valid_before)
+            messages = [
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "unica.form.compile",
+                        "arguments": {
+                            "cwd": str(workspace),
+                            "JsonPath": "invalid.json",
+                            "OutputPath": "InvalidForm.xml",
+                            "dryRun": True,
+                        },
+                    },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "unica.form.compile",
+                        "arguments": {
+                            "cwd": str(workspace),
+                            "JsonPath": "valid.json",
+                            "OutputPath": "ValidForm.xml",
+                            "dryRun": True,
+                        },
+                    },
+                },
+            ]
+
+            responses = self.call_mcp_messages(messages, cache)
+            invalid = json.loads(responses[1]["result"]["content"][0]["text"])
+            valid = json.loads(responses[2]["result"]["content"][0]["text"])
+
+            self.assertFalse(invalid["ok"], json.dumps(invalid, ensure_ascii=False, indent=2))
+            self.assertIn("FORM_EVENT_NOT_ALLOWED", "\n".join(invalid.get("errors", [])))
+            self.assertEqual(invalid.get("changes"), [])
+            self.assertTrue(valid["ok"], json.dumps(valid, ensure_ascii=False, indent=2))
+            self.assertTrue(
+                any("would update" in change and "ValidForm.xml" in change for change in valid["changes"]),
+                json.dumps(valid, ensure_ascii=False, indent=2),
+            )
+            self.assertEqual(invalid_output.read_bytes(), invalid_before)
+            self.assertEqual(valid_output.read_bytes(), valid_before)
+
     def test_bsp_skd_edit_parity_covers_documented_operations(self) -> None:
         covered = set()
         for scenario in SCENARIOS:
@@ -4196,13 +4327,12 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
                 encoding="utf-8",
             )
             for example in examples:
-                if example.skill != "form-edit":
-                    continue
                 arguments = example.payload["params"]["arguments"]
-                form_path = workspace / arguments["FormPath"]
-                form_path.parent.mkdir(parents=True, exist_ok=True)
-                form_path.write_text(
-                    """<?xml version="1.0" encoding="UTF-8"?>
+                if example.skill == "form-edit":
+                    form_path = workspace / arguments["FormPath"]
+                    form_path.parent.mkdir(parents=True, exist_ok=True)
+                    form_path.write_text(
+                        """<?xml version="1.0" encoding="UTF-8"?>
 <Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
 \t<AutoCommandBar name="FormCommandBar" id="-1"/>
 \t<ChildItems/>
@@ -4210,11 +4340,35 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
 \t<Commands/>
 </Form>
 """,
-                    encoding="utf-8",
-                )
-                json_path = workspace / arguments["JsonPath"]
-                json_path.parent.mkdir(parents=True, exist_ok=True)
-                json_path.write_text("{}\n", encoding="utf-8")
+                        encoding="utf-8",
+                    )
+                    json_path = workspace / arguments["JsonPath"]
+                    json_path.parent.mkdir(parents=True, exist_ok=True)
+                    json_path.write_text("{}\n", encoding="utf-8")
+                elif example.skill == "form-compile":
+                    output_path = (
+                        workspace
+                        / "src"
+                        / "cf"
+                        / "Catalogs"
+                        / "SkillExample"
+                        / "Forms"
+                        / f"Form{example.line}"
+                        / "Ext"
+                        / "Form.xml"
+                    )
+                    arguments["OutputPath"] = str(output_path.relative_to(workspace))
+                    if arguments.get("FromObject") is True:
+                        object_path = workspace / "src" / "cf" / "Catalogs" / "Валюты.xml"
+                        object_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(FIXTURES_ROOT / BSP_META_CATALOG_FIXTURE, object_path)
+                        arguments["ObjectPath"] = str(object_path.relative_to(workspace))
+                        arguments["Purpose"] = "Item"
+                    else:
+                        json_path = workspace / "fixtures" / f"form-{example.line}.json"
+                        json_path.parent.mkdir(parents=True, exist_ok=True)
+                        json_path.write_text("{}\n", encoding="utf-8")
+                        arguments["JsonPath"] = str(json_path.relative_to(workspace))
             messages = [
                 dry_run_message_for_example(example, index + 1, workspace)
                 for index, example in enumerate(examples)

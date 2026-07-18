@@ -136,12 +136,17 @@ const NAMED_PERSISTENT_OBJECT_TYPES: &[&str] = &[
     "BusinessProcessObject",
     "TaskObject",
     "ExchangePlanObject",
+    "ChartOfAccountsObject",
     "ChartOfCharacteristicTypesObject",
+    "ChartOfCalculationTypesObject",
 ];
 
 const NAMED_PERSISTENT_RECORD_TYPES: &[&str] = &[
     "InformationRegisterRecordManager",
     "InformationRegisterRecordSet",
+    "AccumulationRegisterRecordSet",
+    "AccountingRegisterRecordSet",
+    "CalculationRegisterRecordSet",
 ];
 
 /// Distinguishes a configuration form from an extension form without a
@@ -974,18 +979,39 @@ mod tests {
 
     #[test]
     fn classifies_known_main_attribute_families() {
-        assert_eq!(
-            MainAttributeKind::from_type_name("cfg:DocumentObject.Order"),
-            MainAttributeKind::PersistentObject
-        );
+        for persistent_object in [
+            "cfg:CatalogObject.Goods",
+            "cfg:DocumentObject.Order",
+            "cfg:BusinessProcessObject.Approval",
+            "cfg:TaskObject.Review",
+            "cfg:ExchangePlanObject.Sync",
+            "cfg:ChartOfAccountsObject.Main",
+            "cfg:ChartOfCharacteristicTypesObject.Properties",
+            "cfg:ChartOfCalculationTypesObject.Payroll",
+        ] {
+            assert_eq!(
+                MainAttributeKind::from_type_name(persistent_object),
+                MainAttributeKind::PersistentObject,
+                "{persistent_object} must support persistent object form events"
+            );
+        }
         assert_eq!(
             MainAttributeKind::from_type_name("cfg:ConstantsSet"),
             MainAttributeKind::PersistentObject
         );
-        assert_eq!(
-            MainAttributeKind::from_type_name("cfg:InformationRegisterRecordSet.Prices"),
-            MainAttributeKind::PersistentRecord
-        );
+        for persistent_record in [
+            "cfg:InformationRegisterRecordManager.Prices",
+            "cfg:InformationRegisterRecordSet.Prices",
+            "cfg:AccumulationRegisterRecordSet.Stock",
+            "cfg:AccountingRegisterRecordSet.Accounting",
+            "cfg:CalculationRegisterRecordSet.Payroll",
+        ] {
+            assert_eq!(
+                MainAttributeKind::from_type_name(persistent_record),
+                MainAttributeKind::PersistentRecord,
+                "{persistent_record} must support persistent record form events"
+            );
+        }
         assert_eq!(
             MainAttributeKind::from_type_name("cfg:DynamicList"),
             MainAttributeKind::DynamicList
@@ -1013,12 +1039,10 @@ mod tests {
             );
         }
         for unsupported in [
-            "cfg:ChartOfAccountsObject.Main",
-            "cfg:ChartOfCalculationTypesObject.Payroll",
-            "cfg:AccumulationRegisterRecordSet.Stock",
-            "cfg:AccountingRegisterRecordSet.Accounting",
-            "cfg:CalculationRegisterRecordSet.Payroll",
             "cfg:ReportObject.Sales",
+            "cfg:DataProcessorObject.Import",
+            "cfg:ExternalReportObject.Sales",
+            "cfg:ExternalDataProcessorObject.Import",
         ] {
             assert_eq!(
                 MainAttributeKind::from_type_name(unsupported),
