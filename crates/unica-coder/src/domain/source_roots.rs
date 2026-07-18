@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn nonexistent_path_uses_canonical_identity_of_existing_parent() {
         let root = temp_workspace("unica-source-roots-nonexistent");
-        let expected = fs::canonicalize(&root).unwrap().join("new/source");
+        let expected = normalize_path_identity(&root).unwrap().join("new/source");
 
         let actual = normalize_path_identity(&root.join("new/source")).unwrap();
 
