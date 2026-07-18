@@ -1294,13 +1294,38 @@ impl<'a> CodeNavigationAdapter<'a> {
             ));
         }
         let body = grep_body(&output.stdout, mode, limit);
+        if output.timed_out {
+            let timeout_error = process_timeout_error("git grep", Some(DEFAULT_PROCESS_TIMEOUT));
+            let stderr_diagnostic = output.stderr.trim().to_string();
+            let mut warnings = vec![timeout_error.clone()];
+            if !body.is_empty() {
+                warnings.push("partial git grep matches are incomplete".to_string());
+            }
+            let mut errors = vec![timeout_error];
+            if !stderr_diagnostic.is_empty() {
+                errors.push(stderr_diagnostic);
+            }
+            return Ok(AdapterOutcome {
+                ok: false,
+                summary: format!("{tool_name} timed out through git grep"),
+                changes: Vec::new(),
+                warnings,
+                errors,
+                artifacts: Vec::new(),
+                stdout: Some(format_section("git-grep", &body)),
+                stderr: if output.stderr.trim().is_empty() {
+                    None
+                } else {
+                    Some(output.stderr)
+                },
+                command: Some(std::iter::once("git".to_string()).chain(git_args).collect()),
+            });
+        }
         let no_matches = body.is_empty()
             && !output.status_success
             && output.stderr.trim().is_empty()
-            && !output.timed_out
             && process_exit_code_is(&output.status, 1);
-        let partial_matches = output.timed_out && !body.is_empty();
-        if !output.status_success && !no_matches && !partial_matches {
+        if !output.status_success && !no_matches {
             let error = output.stderr.trim();
             let error = if error.is_empty() {
                 format!("git grep exited with status {}", output.status)
@@ -1329,11 +1354,7 @@ impl<'a> CodeNavigationAdapter<'a> {
             ok: true,
             summary: format!("{tool_name} completed through git grep"),
             changes: Vec::new(),
-            warnings: if output.timed_out {
-                vec!["git grep timed out".to_string()]
-            } else {
-                Vec::new()
-            },
+            warnings: Vec::new(),
             errors: Vec::new(),
             artifacts: Vec::new(),
             stdout: Some(format_section("git-grep", &stdout)),
@@ -4411,6 +4432,53 @@ mod tests {
     }
 
     #[test]
+    fn code_grep_adapter_reports_partial_timeout_as_failure() {
+        let context = temp_context("grep-partial-timeout");
+        let index = FakeIndexRunner::default();
+        let grep = FakeProcessRunner {
+            output: ProcessOutput {
+                status_success: false,
+                status: "timeout".to_string(),
+                stdout: "CommonModules/One.bsl:1:Needle\nCommonModules/Two.bsl:1:Needle\n"
+                    .to_string(),
+                stderr: "[unica: stdout capture truncated; result is not parseable]\n".to_string(),
+                timed_out: true,
+                cancelled: false,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("Needle"));
+        args.insert("limit".to_string(), json!(5));
+
+        let outcome = CodeNavigationAdapter::with_runners(&index, &grep)
+            .invoke("unica.code.grep", &args, &context, false)
+            .unwrap();
+
+        assert!(!outcome.ok);
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("timed out after 120 seconds")));
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("stdout capture truncated")));
+        assert!(outcome
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("partial") && warning.contains("incomplete")));
+        assert!(outcome
+            .stdout
+            .as_deref()
+            .is_some_and(|stdout| stdout.contains("CommonModules/One.bsl")));
+        assert!(outcome
+            .stderr
+            .as_deref()
+            .is_some_and(|stderr| stderr.contains("stdout capture truncated")));
+        cleanup_context(&context);
+    }
+
+    #[test]
     fn code_grep_adapter_rejects_path_escape_before_git_execution() {
         let context = temp_context("grep-escape");
         let index = FakeIndexRunner::default();
@@ -5275,6 +5343,15 @@ source-set:
             !output.timed_out,
             "runner timed out after capturing {} stdout bytes",
             output.stdout.len()
+        );
+        assert!(
+            !output.cancelled,
+            "runner unexpectedly reported cancellation"
+        );
+        assert!(
+            process_exit_code_is(&output.status, 0),
+            "helper must exit successfully, got {}",
+            output.status
         );
         assert!(
             !output.status_success,
