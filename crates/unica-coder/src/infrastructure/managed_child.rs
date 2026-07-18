@@ -820,13 +820,13 @@ mod tests {
                     .env(HELPER_ENV, "process_tree_child")
                     .spawn()
                     .unwrap();
+                print!("inherited-pipe-before-timeout");
+                std::io::Write::flush(&mut std::io::stdout()).unwrap();
                 std::fs::write(
                     pid_file,
                     format!("{}\n{}\n", std::process::id(), child.id()),
                 )
                 .unwrap();
-                print!("inherited-pipe-before-timeout");
-                std::io::Write::flush(&mut std::io::stdout()).unwrap();
                 thread::sleep(Duration::from_secs(10));
             }
             "process_tree_child" => thread::sleep(Duration::from_secs(10)),
