@@ -4370,6 +4370,47 @@ mod tests {
     }
 
     #[test]
+    fn code_grep_adapter_applies_limit_globally_and_sets_process_timeout() {
+        let context = temp_context("grep-global-limit");
+        let index = FakeIndexRunner::default();
+        let grep = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: (0..25)
+                    .map(|index| format!("CommonModules/Module{index}/Ext/Module.bsl:1:Needle"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: false,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("query".to_string(), json!("Needle"));
+        args.insert("limit".to_string(), json!(5));
+
+        let outcome = CodeNavigationAdapter::with_runners(&index, &grep)
+            .invoke("unica.code.grep", &args, &context, false)
+            .unwrap();
+
+        assert!(outcome.ok);
+        let stdout = outcome.stdout.unwrap();
+        let matches = stdout
+            .strip_prefix("=== git-grep ===\n")
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 5);
+        assert!(matches[4].contains("Module4"));
+        assert!(!stdout.contains("Module5"));
+        let commands = grep.commands.borrow();
+        assert_eq!(commands[0].timeout, Some(DEFAULT_PROCESS_TIMEOUT));
+        cleanup_context(&context);
+    }
+
+    #[test]
     fn code_grep_adapter_rejects_path_escape_before_git_execution() {
         let context = temp_context("grep-escape");
         let index = FakeIndexRunner::default();
@@ -5198,6 +5239,56 @@ source-set:
         stderr.flush().unwrap();
         print!("large-stderr-complete");
         std::io::stdout().flush().unwrap();
+    }
+
+    #[test]
+    #[ignore = "helper process invoked by system_process_runner_drains_large_stdout_while_running"]
+    fn system_process_runner_large_stdout_helper() {
+        let chunk = [b'o'; 64 * 1024];
+        let mut stdout = std::io::stdout().lock();
+        for _ in 0..64 {
+            stdout.write_all(&chunk).unwrap();
+        }
+        stdout.write_all(b"large-stdout-complete").unwrap();
+        stdout.flush().unwrap();
+    }
+
+    #[test]
+    fn system_process_runner_drains_large_stdout_while_running() {
+        let output = SYSTEM_PROCESS_RUNNER
+            .run(&ProcessCommand {
+                program: std::env::current_exe().unwrap(),
+                args: vec![
+                    "--ignored".to_string(),
+                    "--exact".to_string(),
+                    "infrastructure::internal_adapters::tests::system_process_runner_large_stdout_helper"
+                        .to_string(),
+                    "--nocapture".to_string(),
+                ],
+                cwd: std::env::current_dir().unwrap(),
+                timeout: Some(Duration::from_secs(10)),
+                cancellation: CancellationToken::new(),
+            })
+            .unwrap();
+
+        assert!(
+            !output.timed_out,
+            "runner timed out after capturing {} stdout bytes",
+            output.stdout.len()
+        );
+        assert!(
+            !output.status_success,
+            "truncated stdout must not be reported as parseable success"
+        );
+        assert!(
+            output.stdout.contains("large-stdout-complete"),
+            "expected bounded stdout tail to contain completion marker"
+        );
+        assert!(
+            output.stderr.contains("stdout capture truncated"),
+            "expected structured truncation diagnostic, got {:?}",
+            output.stderr
+        );
     }
 
     #[test]
