@@ -333,7 +333,7 @@ allowed-tools:
 | `"AccumulationRegisterRecordSet.XXX"` | Набор записей регистра накопления |
 | `"DynamicList"` | Динамический список |
 
-Также допустимы: `ChartOfAccountsRef/Object`, `ChartOfCharacteristicTypesRef/Object`, `ChartOfCalculationTypesRef/Object`, `ExchangePlanRef/Object`, `BusinessProcessRef/Object`, `TaskRef/Object`, `AccountingRegisterRecordSet`, `InformationRegisterRecordManager`, `ConstantsSet`.
+Также допустимы: `ChartOfAccountsRef/Object`, `ChartOfCharacteristicTypesRef/Object`, `ChartOfCalculationTypesRef/Object`, `ExchangePlanRef/Object`, `BusinessProcessRef/Object`, `TaskRef/Object`, `AccountingRegisterRecordSet`, `CalculationRegisterRecordSet`, `InformationRegisterRecordManager`, `ConstantsSet`.
 
 **Платформенные:**
 

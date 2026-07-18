@@ -1180,6 +1180,7 @@ pub(crate) fn form_valid_cfg_prefixes() -> &'static [&'static str] {
         "AccumulationRegisterRecordSet",
         "BusinessProcessObject",
         "BusinessProcessRef",
+        "CalculationRegisterRecordSet",
         "CatalogObject",
         "CatalogRef",
         "ChartOfAccountsObject",
@@ -3490,77 +3491,35 @@ pub(crate) fn replace_form_default_property(
     )
 }
 
+struct FormCompilePlan {
+    output_label: String,
+    output_path: PathBuf,
+    stdout: String,
+    xml: String,
+    stats: FormCompileStats,
+}
+
 pub(crate) fn compile_form(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
 ) -> AdapterOutcome {
-    let write_result = (|| -> Result<(String, PathBuf), String> {
-        let json_path_raw = path_arg(args, &["jsonPath", "JsonPath"]);
-        let from_object = bool_arg(args, &["fromObject", "FromObject"]);
-        if from_object && json_path_raw.is_some() {
-            return Err("Cannot use both -JsonPath and -FromObject. Choose one mode.".to_string());
-        }
-        if !from_object && json_path_raw.is_none() {
-            return Err("Either -JsonPath or -FromObject is required.".to_string());
-        }
-
-        let mut output_label = string_arg(args, &["outputPath", "OutputPath"])
-            .ok_or_else(|| "missing required OutputPath argument".to_string())?
-            .to_string();
-        let mut stdout = String::new();
-        if from_object {
-            if let Some((normalized, resolved_line)) =
-                form_compile_normalize_from_object_output_label(&output_label)
-            {
-                output_label = normalized;
-                stdout.push_str(&resolved_line);
-            }
-        }
-        let output_path = absolutize(PathBuf::from(&output_label), &context.cwd);
-        let defn = if from_object {
-            let (defn, from_object_stdout) =
-                form_compile_definition_from_object(args, context, &output_path)?;
-            stdout.push_str(&from_object_stdout);
-            defn
-        } else {
-            let json_path_raw = json_path_raw
-                .ok_or_else(|| "Either -JsonPath or -FromObject is required.".to_string())?;
-            let json_path = absolutize(json_path_raw.clone(), &context.cwd);
-            if !json_path.exists() {
-                return Err(format!("File not found: {}", json_path_raw.display()));
-            }
-            let json_text = fs::read_to_string(&json_path)
-                .map_err(|err| format!("failed to read {}: {err}", json_path.display()))?;
-            serde_json::from_str(json_text.trim_start_matches('\u{feff}'))
-                .map_err(|err| format!("failed to parse Form JSON: {err}"))?
-        };
-
-        let format_version = detect_format_version(output_path.parent().unwrap_or(&context.cwd));
-        let (xml, stats) = form_compile_xml(&defn, &format_version)?;
-
+    let write_result = plan_form_compile(args, context).and_then(|mut plan| {
+        let output_path = plan.output_path.clone();
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
         }
-        write_utf8_bom(&output_path, &xml)?;
+        write_utf8_bom(&output_path, &plan.xml)?;
 
         if let Some(registered) = register_form_in_parent_object(&output_path)? {
-            stdout.push_str(&registered);
+            plan.stdout.push_str(&registered);
         }
-        stdout.push_str(&format!("[OK] Compiled: {output_label}\n"));
-        stdout.push_str(&format!("     Elements+IDs: {}\n", stats.element_ids));
-        if stats.attributes > 0 {
-            stdout.push_str(&format!("     Attributes: {}\n", stats.attributes));
-        }
-        if stats.commands > 0 {
-            stdout.push_str(&format!("     Commands: {}\n", stats.commands));
-        }
-        if stats.parameters > 0 {
-            stdout.push_str(&format!("     Parameters: {}\n", stats.parameters));
-        }
+        plan.stdout
+            .push_str(&format!("[OK] Compiled: {}\n", plan.output_label));
+        append_form_compile_stats(&mut plan.stdout, &plan.stats);
 
-        Ok((stdout, output_path))
-    })();
+        Ok((plan.stdout, output_path))
+    });
 
     match write_result {
         Ok((stdout, output_path)) => AdapterOutcome {
@@ -3585,6 +3544,109 @@ pub(crate) fn compile_form(
             stderr: Some(format!("{error}\n")),
             command: None,
         },
+    }
+}
+
+pub(crate) fn preview_form_compile(
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+) -> Result<AdapterOutcome, String> {
+    let mut plan = plan_form_compile(args, context)?;
+    plan.stdout
+        .push_str(&format!("[DRY-RUN] Would compile: {}\n", plan.output_label));
+    append_form_compile_stats(&mut plan.stdout, &plan.stats);
+    Ok(AdapterOutcome {
+        ok: true,
+        summary: "dry run: unica.form.compile planned native managed form compilation".to_string(),
+        changes: vec![format!("would update {}", plan.output_path.display())],
+        warnings: Vec::new(),
+        errors: Vec::new(),
+        artifacts: Vec::new(),
+        stdout: Some(plan.stdout),
+        stderr: None,
+        command: None,
+    })
+}
+
+pub(crate) fn has_compile_payload(args: &Map<String, Value>) -> bool {
+    const KEYS: &[&str] = &[
+        "JsonPath",
+        "jsonPath",
+        "FromObject",
+        "fromObject",
+        "ObjectPath",
+        "objectPath",
+        "OutputPath",
+        "outputPath",
+    ];
+    KEYS.iter().any(|key| args.contains_key(*key))
+}
+
+fn plan_form_compile(
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+) -> Result<FormCompilePlan, String> {
+    let json_path_raw = path_arg(args, &["jsonPath", "JsonPath"]);
+    let from_object = bool_arg(args, &["fromObject", "FromObject"]);
+    if from_object && json_path_raw.is_some() {
+        return Err("Cannot use both -JsonPath and -FromObject. Choose one mode.".to_string());
+    }
+    if !from_object && json_path_raw.is_none() {
+        return Err("Either -JsonPath or -FromObject is required.".to_string());
+    }
+
+    let mut output_label = string_arg(args, &["outputPath", "OutputPath"])
+        .ok_or_else(|| "missing required OutputPath argument".to_string())?
+        .to_string();
+    let mut stdout = String::new();
+    if from_object {
+        if let Some((normalized, resolved_line)) =
+            form_compile_normalize_from_object_output_label(&output_label)
+        {
+            output_label = normalized;
+            stdout.push_str(&resolved_line);
+        }
+    }
+    let output_path = absolutize(PathBuf::from(&output_label), &context.cwd);
+    let defn = if from_object {
+        let (defn, from_object_stdout) =
+            form_compile_definition_from_object(args, context, &output_path)?;
+        stdout.push_str(&from_object_stdout);
+        defn
+    } else {
+        let json_path_raw = json_path_raw
+            .ok_or_else(|| "Either -JsonPath or -FromObject is required.".to_string())?;
+        let json_path = absolutize(json_path_raw.clone(), &context.cwd);
+        if !json_path.exists() {
+            return Err(format!("File not found: {}", json_path_raw.display()));
+        }
+        let json_text = fs::read_to_string(&json_path)
+            .map_err(|err| format!("failed to read {}: {err}", json_path.display()))?;
+        serde_json::from_str(json_text.trim_start_matches('\u{feff}'))
+            .map_err(|err| format!("failed to parse Form JSON: {err}"))?
+    };
+
+    let format_version = detect_format_version(output_path.parent().unwrap_or(&context.cwd));
+    let (xml, stats) = form_compile_xml(&defn, &format_version)?;
+    Ok(FormCompilePlan {
+        output_label,
+        output_path,
+        stdout,
+        xml,
+        stats,
+    })
+}
+
+fn append_form_compile_stats(stdout: &mut String, stats: &FormCompileStats) {
+    stdout.push_str(&format!("     Elements+IDs: {}\n", stats.element_ids));
+    if stats.attributes > 0 {
+        stdout.push_str(&format!("     Attributes: {}\n", stats.attributes));
+    }
+    if stats.commands > 0 {
+        stdout.push_str(&format!("     Commands: {}\n", stats.commands));
+    }
+    if stats.parameters > 0 {
+        stdout.push_str(&format!("     Parameters: {}\n", stats.parameters));
     }
 }
 
@@ -7353,6 +7415,7 @@ pub(crate) fn emit_form_single_type(lines: &mut Vec<String>, type_name: &str, in
         || normalized.starts_with("InformationRegisterRecordManager.")
         || normalized.starts_with("AccumulationRegisterRecordSet.")
         || normalized.starts_with("AccountingRegisterRecordSet.")
+        || normalized.starts_with("CalculationRegisterRecordSet.")
         || normalized.starts_with("ConstantsSet.")
         || normalized.starts_with("DataProcessorObject.")
         || normalized.starts_with("ReportObject.")
@@ -9523,6 +9586,34 @@ mod tests {
     }
 
     #[test]
+    fn form_compile_accepts_persistent_object_and_record_event_families() {
+        for main_type in [
+            "ChartOfAccountsObject.Main",
+            "ChartOfCalculationTypesObject.Payroll",
+            "AccumulationRegisterRecordSet.Stock",
+            "AccountingRegisterRecordSet.Accounting",
+            "CalculationRegisterRecordSet.Payroll",
+        ] {
+            let definition = json!({
+                "attributes": [{"name": "Object", "type": main_type, "main": true}],
+                "events": {"OnReadAtServer": "ObjectOnReadAtServer"}
+            });
+
+            let (xml, _) = form_compile_xml(&definition, "2.20")
+                .unwrap_or_else(|error| panic!("{main_type}: {error}"));
+
+            assert!(
+                xml.contains(&format!("<v8:Type>cfg:{main_type}</v8:Type>")),
+                "{main_type}: {xml}"
+            );
+            assert!(
+                xml.contains("<Event name=\"OnReadAtServer\">ObjectOnReadAtServer</Event>"),
+                "{main_type}: {xml}"
+            );
+        }
+    }
+
+    #[test]
     fn form_compile_rejects_invalid_root_events_before_writing() {
         let context = temp_context("compile-invalid-root-events");
         let definition_path = context.cwd.join("form.json");
@@ -9595,6 +9686,93 @@ mod tests {
             assert!(outcome.stdout.is_none(), "{name}: {outcome:?}");
             assert_eq!(fs::read(&form_path).unwrap(), original, "{name}");
         }
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_compile_dry_run_rejects_invalid_root_event_without_writing() {
+        let context = temp_context("compile-invalid-root-event-dry-run");
+        let definition_path = context.cwd.join("form.json");
+        let form_path = context.cwd.join("Form.xml");
+        let original = b"do-not-replace-invalid-form";
+        write_file(&definition_path, r#"{"events":{"Opening":"OnOpening"}}"#);
+        fs::write(&form_path, original).unwrap();
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = NativeOperationAdapter::invoke(
+            "form-compile",
+            "unica.form.compile",
+            &args,
+            &context,
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("FORM_EVENT_NOT_ALLOWED")),
+            "{outcome:?}"
+        );
+        assert!(outcome.changes.is_empty(), "{outcome:?}");
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_compile_dry_run_plans_valid_root_event_without_writing() {
+        let context = temp_context("compile-valid-root-event-dry-run");
+        let definition_path = context.cwd.join("form.json");
+        let form_path = context.cwd.join("Form.xml");
+        let original = b"do-not-replace-valid-form-during-preview";
+        write_file(
+            &definition_path,
+            r#"{"events":{"OnCreateAtServer":"OnCreateAtServer"}}"#,
+        );
+        fs::write(&form_path, original).unwrap();
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = NativeOperationAdapter::invoke(
+            "form-compile",
+            "unica.form.compile",
+            &args,
+            &context,
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert_eq!(outcome.changes.len(), 1, "{outcome:?}");
+        assert!(
+            outcome.changes[0].contains("would update")
+                && outcome.changes[0].contains(&form_path.display().to_string()),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
 
         let _ = fs::remove_dir_all(&context.cwd);
     }

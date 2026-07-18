@@ -35,9 +35,12 @@ pub(crate) fn invoke_preview(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
 ) -> Option<PreviewInvocation> {
+    if operation == "form-compile" && !form::has_compile_payload(args) {
+        return None;
+    }
     if !matches!(
         operation,
-        "meta-compile" | "role-compile" | "subsystem-compile"
+        "form-compile" | "meta-compile" | "role-compile" | "subsystem-compile"
     ) {
         return None;
     }
@@ -45,6 +48,7 @@ pub(crate) fn invoke_preview(
         return Some(PreviewInvocation::Unavailable(reason));
     }
     let planned = match operation {
+        "form-compile" => form::preview_form_compile(args, context),
         "meta-compile" => meta::preview_meta_compile(args, context),
         "role-compile" => role::preview_role_compile(args, context),
         "subsystem-compile" => subsystem::preview_subsystem_compile(args, context),
@@ -58,6 +62,9 @@ fn compile_preview_unavailable(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
 ) -> Option<String> {
+    if operation == "form-compile" {
+        return None;
+    }
     if string_arg(args, &["OutputDir", "outputDir"]).is_none() {
         return Some("missing required OutputDir argument".to_string());
     }
