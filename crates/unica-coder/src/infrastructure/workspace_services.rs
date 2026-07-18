@@ -2373,6 +2373,7 @@ fn run_workspace_service(
         Arc::new(SystemWorkspaceServiceOperationExecutor),
         Duration::from_secs(idle_secs.max(1)),
         Duration::from_secs(max_age_secs.max(1)),
+        SERVICE_REQUEST_HEADER_TIMEOUT,
         SERVICE_SHUTDOWN_GRACE,
     )
 }
@@ -2428,6 +2429,7 @@ fn serve_workspace_service(
     executor: Arc<dyn WorkspaceServiceOperationExecutor>,
     idle_timeout: Duration,
     max_age: Duration,
+    request_header_timeout: Duration,
     shutdown_grace: Duration,
 ) -> Result<(), String> {
     let started = Instant::now();
@@ -2440,7 +2442,7 @@ fn serve_workspace_service(
         while index < handlers.len() {
             if handlers[index].is_finished() {
                 let handler = handlers.swap_remove(index);
-                let _ = handler.join();
+                report_workspace_service_handler_result(handler.join());
             } else {
                 index += 1;
             }
@@ -2523,7 +2525,7 @@ fn serve_workspace_service(
                     continue;
                 };
                 let header_clock = SystemClock::new();
-                let header_deadline = Deadline::new(&header_clock, SERVICE_REQUEST_HEADER_TIMEOUT);
+                let header_deadline = Deadline::new(&header_clock, request_header_timeout);
                 let handler_runtime = Arc::clone(&runtime);
                 let handler_executor = Arc::clone(&executor);
                 match thread::Builder::new()
@@ -2565,7 +2567,7 @@ fn serve_workspace_service(
         while index < handlers.len() {
             if handlers[index].is_finished() {
                 let handler = handlers.swap_remove(index);
-                let _ = handler.join();
+                report_workspace_service_handler_result(handler.join());
             } else {
                 index += 1;
             }
@@ -2576,6 +2578,22 @@ fn serve_workspace_service(
     }
     remove_service_record_if_owned(&runtime);
     result
+}
+
+fn report_workspace_service_handler_result(result: thread::Result<Result<(), String>>) {
+    if let Some(diagnostic) = workspace_service_handler_diagnostic(result) {
+        eprintln!("{diagnostic}");
+    }
+}
+
+fn workspace_service_handler_diagnostic(
+    result: thread::Result<Result<(), String>>,
+) -> Option<String> {
+    match result {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("workspace service connection failed: {error}")),
+        Err(_) => Some("workspace service connection handler panicked".to_string()),
+    }
 }
 
 fn handle_workspace_service_stream(
@@ -3271,12 +3289,39 @@ mod tests {
     );
 
     fn workspace_control_test_server(name: &str) -> WorkspaceControlTestServer {
-        workspace_control_test_server_with_general_limit(name, SERVICE_MAX_CONNECTION_HANDLERS)
+        workspace_control_test_server_with_options(
+            name,
+            SERVICE_MAX_CONNECTION_HANDLERS,
+            SERVICE_REQUEST_HEADER_TIMEOUT,
+        )
     }
 
     fn workspace_control_test_server_with_general_limit(
         name: &str,
         general_limit: usize,
+    ) -> WorkspaceControlTestServer {
+        workspace_control_test_server_with_options(
+            name,
+            general_limit,
+            SERVICE_REQUEST_HEADER_TIMEOUT,
+        )
+    }
+
+    fn workspace_control_test_server_with_header_timeout(
+        name: &str,
+        request_header_timeout: Duration,
+    ) -> WorkspaceControlTestServer {
+        workspace_control_test_server_with_options(
+            name,
+            SERVICE_MAX_CONNECTION_HANDLERS,
+            request_header_timeout,
+        )
+    }
+
+    fn workspace_control_test_server_with_options(
+        name: &str,
+        general_limit: usize,
+        request_header_timeout: Duration,
     ) -> WorkspaceControlTestServer {
         let context = test_context(name);
         let identity =
@@ -3299,6 +3344,7 @@ mod tests {
                 server_executor,
                 Duration::from_secs(30),
                 Duration::from_secs(30),
+                request_header_timeout,
                 SERVICE_SHUTDOWN_GRACE,
             )
         });
@@ -3335,6 +3381,7 @@ mod tests {
                 executor,
                 Duration::from_secs(30),
                 Duration::from_secs(30),
+                SERVICE_REQUEST_HEADER_TIMEOUT,
                 shutdown_grace,
             )
         });
@@ -3466,6 +3513,55 @@ mod tests {
             read_bounded_service_line_with_deadline(&mut reader, &deadline, &clock, |_| Ok(()))
                 .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn workspace_service_header_timeout_is_connection_local() {
+        let (context, record, runtime, _executor, server) =
+            workspace_control_test_server_with_header_timeout(
+                "header-timeout-recovery",
+                Duration::from_millis(50),
+            );
+        let mut stalled = TcpStream::connect(("127.0.0.1", record.port)).unwrap();
+        stalled.write_all(b"{").unwrap();
+        stalled.flush().unwrap();
+
+        let admitted_deadline = Instant::now() + Duration::from_secs(2);
+        while runtime.general_admission.active.load(Ordering::Acquire) == 0 {
+            assert!(
+                Instant::now() < admitted_deadline,
+                "stalled connection was not admitted"
+            );
+            thread::yield_now();
+        }
+        let timeout_deadline = Instant::now() + Duration::from_secs(2);
+        while runtime.general_admission.active.load(Ordering::Acquire) != 0 {
+            assert!(
+                Instant::now() < timeout_deadline,
+                "timed-out connection did not release its handler"
+            );
+            thread::yield_now();
+        }
+
+        assert!(send_test_request(&record, ServiceRequestKind::Ping).ok);
+        assert!(send_test_request(&record, ServiceRequestKind::Shutdown).ok);
+        drop(stalled);
+        server.join().unwrap().unwrap();
+        cleanup(&context);
+    }
+
+    #[test]
+    fn workspace_service_handler_failures_have_stable_diagnostics() {
+        assert_eq!(workspace_service_handler_diagnostic(Ok(Ok(()))), None);
+        assert_eq!(
+            workspace_service_handler_diagnostic(Ok(Err("header timed out".to_string()))),
+            Some("workspace service connection failed: header timed out".to_string())
+        );
+        let panic_result: thread::Result<Result<(), String>> = Err(Box::new("panic"));
+        assert_eq!(
+            workspace_service_handler_diagnostic(panic_result),
+            Some("workspace service connection handler panicked".to_string())
+        );
     }
 
     #[test]
