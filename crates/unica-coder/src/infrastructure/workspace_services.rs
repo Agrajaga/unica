@@ -1218,6 +1218,8 @@ struct WorkspaceServiceRuntime {
     work_admission: Arc<AdmissionGate>,
     general_admission: Arc<AdmissionGate>,
     control_admission: Arc<AdmissionGate>,
+    #[cfg(test)]
+    handler_started_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 type BslSessionStarter = dyn Fn(&WorkspaceContext, &Path, &CancellationToken) -> Result<BslMcpSession, String>
@@ -1248,6 +1250,16 @@ impl WorkspaceServiceRuntime {
             work_admission: AdmissionGate::new(SERVICE_MAX_WORKERS),
             general_admission: AdmissionGate::new(SERVICE_MAX_CONNECTION_HANDLERS),
             control_admission: AdmissionGate::new(SERVICE_MAX_CONTROL_HANDLERS),
+            #[cfg(test)]
+            handler_started_hook: Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    fn notify_handler_started(&self) {
+        let hook = self.handler_started_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
         }
     }
 
@@ -2373,6 +2385,7 @@ fn run_workspace_service(
         Arc::new(SystemWorkspaceServiceOperationExecutor),
         Duration::from_secs(idle_secs.max(1)),
         Duration::from_secs(max_age_secs.max(1)),
+        SERVICE_REQUEST_HEADER_TIMEOUT,
         SERVICE_SHUTDOWN_GRACE,
     )
 }
@@ -2428,6 +2441,7 @@ fn serve_workspace_service(
     executor: Arc<dyn WorkspaceServiceOperationExecutor>,
     idle_timeout: Duration,
     max_age: Duration,
+    request_header_timeout: Duration,
     shutdown_grace: Duration,
 ) -> Result<(), String> {
     let started = Instant::now();
@@ -2440,7 +2454,7 @@ fn serve_workspace_service(
         while index < handlers.len() {
             if handlers[index].is_finished() {
                 let handler = handlers.swap_remove(index);
-                let _ = handler.join();
+                report_workspace_service_handler_result(handler.join());
             } else {
                 index += 1;
             }
@@ -2523,13 +2537,15 @@ fn serve_workspace_service(
                     continue;
                 };
                 let header_clock = SystemClock::new();
-                let header_deadline = Deadline::new(&header_clock, SERVICE_REQUEST_HEADER_TIMEOUT);
+                let header_deadline = Deadline::new(&header_clock, request_header_timeout);
                 let handler_runtime = Arc::clone(&runtime);
                 let handler_executor = Arc::clone(&executor);
                 match thread::Builder::new()
                     .name("unica-workspace-connection".into())
                     .spawn(move || {
                         let _permit = handler_permit;
+                        #[cfg(test)]
+                        handler_runtime.notify_handler_started();
                         handle_workspace_service_stream(
                             stream,
                             handler_runtime,
@@ -2565,7 +2581,7 @@ fn serve_workspace_service(
         while index < handlers.len() {
             if handlers[index].is_finished() {
                 let handler = handlers.swap_remove(index);
-                let _ = handler.join();
+                report_workspace_service_handler_result(handler.join());
             } else {
                 index += 1;
             }
@@ -2576,6 +2592,30 @@ fn serve_workspace_service(
     }
     remove_service_record_if_owned(&runtime);
     result
+}
+
+fn report_workspace_service_handler_result(result: thread::Result<Result<(), String>>) {
+    let stderr = io::stderr();
+    report_workspace_service_handler_result_to(&mut stderr.lock(), result);
+}
+
+fn report_workspace_service_handler_result_to(
+    writer: &mut dyn Write,
+    result: thread::Result<Result<(), String>>,
+) {
+    if let Some(diagnostic) = workspace_service_handler_diagnostic(result) {
+        let _ = writeln!(writer, "{diagnostic}");
+    }
+}
+
+fn workspace_service_handler_diagnostic(
+    result: thread::Result<Result<(), String>>,
+) -> Option<String> {
+    match result {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("workspace service connection failed: {error}")),
+        Err(_) => Some("workspace service connection handler panicked".to_string()),
+    }
 }
 
 fn handle_workspace_service_stream(
@@ -3271,12 +3311,44 @@ mod tests {
     );
 
     fn workspace_control_test_server(name: &str) -> WorkspaceControlTestServer {
-        workspace_control_test_server_with_general_limit(name, SERVICE_MAX_CONNECTION_HANDLERS)
+        workspace_control_test_server_with_options(
+            name,
+            SERVICE_MAX_CONNECTION_HANDLERS,
+            SERVICE_REQUEST_HEADER_TIMEOUT,
+            None,
+        )
     }
 
     fn workspace_control_test_server_with_general_limit(
         name: &str,
         general_limit: usize,
+    ) -> WorkspaceControlTestServer {
+        workspace_control_test_server_with_options(
+            name,
+            general_limit,
+            SERVICE_REQUEST_HEADER_TIMEOUT,
+            None,
+        )
+    }
+
+    fn workspace_control_test_server_with_header_timeout(
+        name: &str,
+        request_header_timeout: Duration,
+        handler_started_hook: Arc<dyn Fn() + Send + Sync>,
+    ) -> WorkspaceControlTestServer {
+        workspace_control_test_server_with_options(
+            name,
+            SERVICE_MAX_CONNECTION_HANDLERS,
+            request_header_timeout,
+            Some(handler_started_hook),
+        )
+    }
+
+    fn workspace_control_test_server_with_options(
+        name: &str,
+        general_limit: usize,
+        request_header_timeout: Duration,
+        handler_started_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> WorkspaceControlTestServer {
         let context = test_context(name);
         let identity =
@@ -3288,6 +3360,7 @@ mod tests {
         write_record(&identity, record.clone());
         let mut runtime = WorkspaceServiceRuntime::new(identity, &record);
         runtime.general_admission = AdmissionGate::new(general_limit);
+        *runtime.handler_started_hook.lock().unwrap() = handler_started_hook;
         let runtime = Arc::new(runtime);
         let executor = Arc::new(BlockingWorkspaceExecutor::default());
         let server_runtime = Arc::clone(&runtime);
@@ -3299,6 +3372,7 @@ mod tests {
                 server_executor,
                 Duration::from_secs(30),
                 Duration::from_secs(30),
+                request_header_timeout,
                 SERVICE_SHUTDOWN_GRACE,
             )
         });
@@ -3335,6 +3409,7 @@ mod tests {
                 executor,
                 Duration::from_secs(30),
                 Duration::from_secs(30),
+                SERVICE_REQUEST_HEADER_TIMEOUT,
                 shutdown_grace,
             )
         });
@@ -3466,6 +3541,63 @@ mod tests {
             read_bounded_service_line_with_deadline(&mut reader, &deadline, &clock, |_| Ok(()))
                 .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn workspace_service_header_timeout_is_connection_local() {
+        let (handler_started_tx, handler_started_rx) = mpsc::sync_channel(0);
+        let handler_started_tx = Mutex::new(Some(handler_started_tx));
+        let handler_started_hook = Arc::new(move || {
+            if let Some(sender) = handler_started_tx.lock().unwrap().take() {
+                let _ = sender.send(());
+            }
+        });
+        let (context, record, runtime, _executor, server) =
+            workspace_control_test_server_with_header_timeout(
+                "header-timeout-recovery",
+                Duration::from_millis(50),
+                handler_started_hook,
+            );
+        let mut stalled = TcpStream::connect(("127.0.0.1", record.port)).unwrap();
+        stalled.write_all(b"{").unwrap();
+        stalled.flush().unwrap();
+
+        handler_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stalled connection handler did not start");
+        let timeout_deadline = Instant::now() + Duration::from_secs(2);
+        while runtime.general_admission.active.load(Ordering::Acquire) != 0 {
+            assert!(
+                Instant::now() < timeout_deadline,
+                "timed-out connection did not release its handler"
+            );
+            thread::yield_now();
+        }
+
+        assert!(send_test_request(&record, ServiceRequestKind::Ping).ok);
+        assert!(send_test_request(&record, ServiceRequestKind::Shutdown).ok);
+        drop(stalled);
+        server.join().unwrap().unwrap();
+        cleanup(&context);
+    }
+
+    #[test]
+    fn workspace_service_handler_failures_have_stable_diagnostics() {
+        assert_eq!(workspace_service_handler_diagnostic(Ok(Ok(()))), None);
+        assert_eq!(
+            workspace_service_handler_diagnostic(Ok(Err("header timed out".to_string()))),
+            Some("workspace service connection failed: header timed out".to_string())
+        );
+        let panic_result: thread::Result<Result<(), String>> = Err(Box::new("panic"));
+        assert_eq!(
+            workspace_service_handler_diagnostic(panic_result),
+            Some("workspace service connection handler panicked".to_string())
+        );
+
+        report_workspace_service_handler_result_to(
+            &mut FailingWriter,
+            Ok(Err("header timed out".to_string())),
+        );
     }
 
     #[test]
