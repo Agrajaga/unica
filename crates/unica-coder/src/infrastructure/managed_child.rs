@@ -809,6 +809,20 @@ mod tests {
                 .unwrap();
                 child.wait().unwrap();
             }
+            "inherited_pipe_parent" => {
+                let _child = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "infrastructure::managed_child::tests::managed_child_test_helper",
+                        "--nocapture",
+                    ])
+                    .env(HELPER_ENV, "process_tree_child")
+                    .spawn()
+                    .unwrap();
+                print!("inherited-pipe-before-timeout");
+                std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                thread::sleep(Duration::from_secs(10));
+            }
             "process_tree_child" => thread::sleep(Duration::from_secs(10)),
             "process_tree_detached_leader" => {
                 let pid_file = std::env::var_os(HELPER_PID_FILE_ENV).unwrap();
@@ -1288,6 +1302,25 @@ mod tests {
         assert!(wait_until_dead(parent_pid, Duration::from_secs(2)));
         assert!(wait_until_dead(child_pid, Duration::from_secs(2)));
         cleanup.disarm();
+    }
+
+    #[test]
+    fn inherited_pipe_descendant_does_not_block_timeout_collection() {
+        let started = Instant::now();
+        let output = run_helper(
+            "inherited_pipe_parent",
+            Duration::from_millis(200),
+            CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert!(output.timed_out);
+        assert!(
+            output.stdout.contains("inherited-pipe-before-timeout"),
+            "{}",
+            output.stdout
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
