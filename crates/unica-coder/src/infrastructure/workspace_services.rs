@@ -250,7 +250,10 @@ impl<'a> WorkspaceServiceManager<'a> {
                     return Ok(record);
                 }
                 let token = new_token(&identity);
-                let result = self.spawner.spawn(&identity, self.config, &token);
+                let spawn_budget = deadline.remaining(cancellation)?;
+                let result =
+                    self.spawner
+                        .spawn(&identity, self.config, &token, cancellation, spawn_budget);
                 drop(spawn_lock);
                 deadline.remaining(cancellation)?;
                 return result;
@@ -604,6 +607,8 @@ trait ServiceSpawner {
         identity: &WorkspaceServiceIdentity,
         config: WorkspaceServiceConfig,
         token: &str,
+        cancellation: &CancellationToken,
+        budget: Duration,
     ) -> Result<WorkspaceServiceRecord, String>;
 }
 
@@ -1049,13 +1054,20 @@ impl ServiceSpawner for SystemServiceSpawner {
         identity: &WorkspaceServiceIdentity,
         config: WorkspaceServiceConfig,
         token: &str,
+        cancellation: &CancellationToken,
+        budget: Duration,
     ) -> Result<WorkspaceServiceRecord, String> {
+        let deadline = WorkspaceServiceCallDeadline::new(budget);
+        deadline.remaining(cancellation)?;
         fs::create_dir_all(&identity.service_dir)
             .map_err(|err| format!("failed to create workspace service directory: {err}"))?;
+        deadline.remaining(cancellation)?;
         let stdout = fs::File::create(identity.service_dir.join("service.stdout.log"))
             .map_err(|err| format!("failed to create workspace service stdout log: {err}"))?;
+        deadline.remaining(cancellation)?;
         let stderr = fs::File::create(identity.service_dir.join("service.stderr.log"))
             .map_err(|err| format!("failed to create workspace service stderr log: {err}"))?;
+        deadline.remaining(cancellation)?;
         let exe = env::current_exe()
             .map_err(|err| format!("failed to locate current unica executable: {err}"))?;
         let mut command = Command::new(exe);
@@ -1082,7 +1094,15 @@ impl ServiceSpawner for SystemServiceSpawner {
             .spawn()
             .map_err(|err| format!("failed to spawn workspace service: {err}"))?;
 
-        wait_for_record(identity)
+        let wait_budget = deadline
+            .remaining(cancellation)?
+            .min(SERVICE_CONNECT_TIMEOUT);
+        wait_for_record_with_connector(
+            identity,
+            &SYSTEM_SERVICE_CONNECTOR,
+            wait_budget,
+            cancellation,
+        )
     }
 }
 
@@ -2139,17 +2159,15 @@ fn spawn_lock_is_stale(identity: &WorkspaceServiceIdentity) -> bool {
         .unwrap_or(false)
 }
 
-fn wait_for_record(identity: &WorkspaceServiceIdentity) -> Result<WorkspaceServiceRecord, String> {
-    wait_for_record_with_connector(identity, &SYSTEM_SERVICE_CONNECTOR, SERVICE_CONNECT_TIMEOUT)
-}
-
 fn wait_for_record_with_connector(
     identity: &WorkspaceServiceIdentity,
     connector: &dyn ServiceConnector,
     timeout: Duration,
+    cancellation: &CancellationToken,
 ) -> Result<WorkspaceServiceRecord, String> {
     let started = Instant::now();
     while started.elapsed() < timeout {
+        cancellation_error(cancellation)?;
         let Some(remaining) = timeout
             .checked_sub(started.elapsed())
             .filter(|remaining| !remaining.is_zero())
@@ -2165,7 +2183,7 @@ fn wait_for_record_with_connector(
                             token: record.token.clone(),
                             kind: ServiceRequestKind::Ping,
                         },
-                        &CancellationToken::new(),
+                        cancellation,
                         remaining,
                     )
                     .map(|response| service_response_is_alive(&response))
@@ -2173,9 +2191,11 @@ fn wait_for_record_with_connector(
             {
                 return Ok(record);
             }
+            cancellation_error(cancellation)?;
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(50).min(remaining));
     }
+    cancellation_error(cancellation)?;
     Err(format!(
         "workspace service did not become ready at {}",
         identity.record_path().display()
@@ -5519,9 +5539,32 @@ fn main() {
             &identity,
             &ShuttingDownConnector,
             Duration::from_millis(75),
+            &CancellationToken::new(),
         );
 
         assert!(result.is_err());
+        cleanup(&context);
+    }
+
+    #[test]
+    fn spawn_wait_prioritizes_cancellation_over_its_timeout() {
+        let context = test_context("spawn-wait-cancelled");
+        let identity =
+            WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src")).unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let started = Instant::now();
+
+        let error = wait_for_record_with_connector(
+            &identity,
+            &RecordingConnector::default(),
+            SERVICE_CONNECT_TIMEOUT,
+            &cancellation,
+        )
+        .unwrap_err();
+
+        assert!(error.starts_with("cancelled:"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(100));
         cleanup(&context);
     }
 
@@ -5759,6 +5802,132 @@ fn main() {
         assert!(ping_budgets[1] < bsl_budgets[0]);
         assert!(bsl_budgets[1] <= ping_budgets[1]);
         assert_eq!(connector.bsl_timeout_secs.borrow().as_slice(), &[1, 1]);
+        assert_eq!(*spawner.spawns.borrow(), 0);
+        cleanup(&context);
+    }
+
+    #[test]
+    fn manager_passes_remaining_budget_and_fresh_token_to_retry_spawn() {
+        let context = test_context("bsl-retry-spawn-budget-token");
+        let source_root = context.workspace_root.join("src");
+        let identity = WorkspaceServiceIdentity::new(&context, &source_root).unwrap();
+        write_record(
+            &identity,
+            test_record(&identity, 34567, env!("CARGO_PKG_VERSION")),
+        );
+        let connector = ResetBslConnector {
+            recover: true,
+            restart_after_reset: true,
+            first_bsl_delay: Duration::from_millis(250),
+            ..ResetBslConnector::default()
+        };
+        let spawner = RecordingSpawner::default();
+        let manager = WorkspaceServiceManager::with_io(&connector, &spawner);
+
+        let output = manager
+            .call_bsl_mcp_cancellable_with_budget(
+                &context,
+                &source_root,
+                WorkspaceServiceBslCall {
+                    tool_name: "diagnostics",
+                    tool_args: json!({"mode": "file"}),
+                    timeout: Duration::from_secs(120),
+                    request_budget: Duration::from_secs(1),
+                },
+                &CancellationToken::new(),
+            )
+            .unwrap();
+
+        assert_eq!(output.result_text, "recovered");
+        assert_eq!(*spawner.spawns.borrow(), 1);
+        let spawn_budgets = spawner.budgets.borrow();
+        assert_eq!(spawn_budgets.len(), 1);
+        assert!(spawn_budgets[0] < Duration::from_secs(1));
+        let spawned_tokens = spawner.tokens.borrow();
+        let bsl_record_tokens = connector.bsl_record_tokens.borrow();
+        let bsl_request_tokens = connector.bsl_request_tokens.borrow();
+        assert_eq!(bsl_record_tokens.len(), 2);
+        assert_eq!(bsl_record_tokens[0], "secret");
+        assert_eq!(bsl_record_tokens[1], spawned_tokens[0]);
+        assert_eq!(*bsl_request_tokens, *bsl_record_tokens);
+        cleanup(&context);
+    }
+
+    #[test]
+    fn manager_bounds_delayed_retry_spawn_by_remaining_deadline() {
+        let context = test_context("bsl-retry-delayed-spawn-budget");
+        let source_root = context.workspace_root.join("src");
+        let identity = WorkspaceServiceIdentity::new(&context, &source_root).unwrap();
+        write_record(
+            &identity,
+            test_record(&identity, 34567, env!("CARGO_PKG_VERSION")),
+        );
+        let connector = ResetBslConnector {
+            restart_after_reset: true,
+            first_bsl_delay: Duration::from_millis(350),
+            ..ResetBslConnector::default()
+        };
+        let spawner = RecordingSpawner {
+            delay: Duration::from_secs(1),
+            ..RecordingSpawner::default()
+        };
+        let manager = WorkspaceServiceManager::with_io(&connector, &spawner);
+        let started = Instant::now();
+
+        let error = manager
+            .call_bsl_mcp_cancellable_with_budget(
+                &context,
+                &source_root,
+                WorkspaceServiceBslCall {
+                    tool_name: "diagnostics",
+                    tool_args: json!({"mode": "file"}),
+                    timeout: Duration::from_secs(120),
+                    request_budget: Duration::from_millis(500),
+                },
+                &CancellationToken::new(),
+            )
+            .unwrap_err();
+
+        assert!(error.starts_with("timeout:"), "{error}");
+        assert!(started.elapsed() < Duration::from_millis(900));
+        assert_eq!(*spawner.spawns.borrow(), 1);
+        assert!(spawner.budgets.borrow()[0] < Duration::from_millis(500));
+        cleanup(&context);
+    }
+
+    #[test]
+    fn manager_does_not_spawn_when_retry_shutdown_observes_cancellation() {
+        let context = test_context("bsl-retry-cancel-before-spawn");
+        let source_root = context.workspace_root.join("src");
+        let identity = WorkspaceServiceIdentity::new(&context, &source_root).unwrap();
+        write_record(
+            &identity,
+            test_record(&identity, 34567, env!("CARGO_PKG_VERSION")),
+        );
+        let connector = ResetBslConnector {
+            restart_after_reset: true,
+            cancel_on_shutdown: true,
+            ..ResetBslConnector::default()
+        };
+        let spawner = RecordingSpawner::default();
+        let manager = WorkspaceServiceManager::with_io(&connector, &spawner);
+        let cancellation = CancellationToken::new();
+
+        let error = manager
+            .call_bsl_mcp_cancellable_with_budget(
+                &context,
+                &source_root,
+                WorkspaceServiceBslCall {
+                    tool_name: "diagnostics",
+                    tool_args: json!({}),
+                    timeout: Duration::from_secs(120),
+                    request_budget: Duration::from_secs(1),
+                },
+                &cancellation,
+            )
+            .unwrap_err();
+
+        assert!(error.starts_with("cancelled:"), "{error}");
         assert_eq!(*spawner.spawns.borrow(), 0);
         cleanup(&context);
     }
@@ -6012,6 +6181,8 @@ fn main() {
     #[derive(Default)]
     struct ResetBslConnector {
         recover: bool,
+        restart_after_reset: bool,
+        cancel_on_shutdown: bool,
         first_bsl_delay: Duration,
         pings: std::cell::RefCell<u32>,
         bsl_calls: std::cell::RefCell<u32>,
@@ -6019,20 +6190,28 @@ fn main() {
         ping_budgets: std::cell::RefCell<Vec<Duration>>,
         bsl_budgets: std::cell::RefCell<Vec<Duration>>,
         bsl_timeout_secs: std::cell::RefCell<Vec<u64>>,
+        bsl_record_tokens: std::cell::RefCell<Vec<String>>,
+        bsl_request_tokens: std::cell::RefCell<Vec<String>>,
     }
 
     impl ServiceConnector for ResetBslConnector {
         fn send(
             &self,
-            _record: &WorkspaceServiceRecord,
+            record: &WorkspaceServiceRecord,
             request: ServiceRequest,
-            _cancellation: &CancellationToken,
+            cancellation: &CancellationToken,
             budget: Duration,
         ) -> Result<ServiceResponse, String> {
+            let request_token = request.token;
             match request.kind {
                 ServiceRequestKind::Ping => {
                     *self.pings.borrow_mut() += 1;
                     self.ping_budgets.borrow_mut().push(budget);
+                    if self.restart_after_reset && *self.bsl_calls.borrow() > 0 {
+                        return Err(
+                            "failed to connect workspace service: connection refused".to_string()
+                        );
+                    }
                     Ok(ServiceResponse {
                         ok: true,
                         status: Some("alive".to_string()),
@@ -6047,6 +6226,10 @@ fn main() {
                     self.operation_ids.borrow_mut().push(operation_id);
                     self.bsl_budgets.borrow_mut().push(budget);
                     self.bsl_timeout_secs.borrow_mut().push(timeout_secs);
+                    self.bsl_record_tokens
+                        .borrow_mut()
+                        .push(record.token.clone());
+                    self.bsl_request_tokens.borrow_mut().push(request_token);
                     let mut calls = self.bsl_calls.borrow_mut();
                     *calls += 1;
                     if *calls == 1 && !self.first_bsl_delay.is_zero() {
@@ -6064,6 +6247,16 @@ fn main() {
                                 .to_string(),
                         )
                     }
+                }
+                ServiceRequestKind::Shutdown => {
+                    if self.cancel_on_shutdown {
+                        cancellation.cancel();
+                    }
+                    Ok(ServiceResponse {
+                        ok: true,
+                        shutdown: true,
+                        ..ServiceResponse::default()
+                    })
                 }
                 _ => panic!("unexpected request kind"),
             }
@@ -6129,6 +6322,9 @@ fn main() {
     #[derive(Default)]
     struct RecordingSpawner {
         spawns: std::cell::RefCell<u32>,
+        delay: Duration,
+        budgets: std::cell::RefCell<Vec<Duration>>,
+        tokens: std::cell::RefCell<Vec<String>>,
     }
 
     impl ServiceSpawner for RecordingSpawner {
@@ -6136,10 +6332,36 @@ fn main() {
             &self,
             identity: &WorkspaceServiceIdentity,
             _config: WorkspaceServiceConfig,
-            _token: &str,
+            token: &str,
+            cancellation: &CancellationToken,
+            budget: Duration,
         ) -> Result<WorkspaceServiceRecord, String> {
+            cancellation_error(cancellation)?;
             *self.spawns.borrow_mut() += 1;
-            Ok(test_record(identity, 45678, env!("CARGO_PKG_VERSION")))
+            self.budgets.borrow_mut().push(budget);
+            self.tokens.borrow_mut().push(token.to_string());
+            let started = Instant::now();
+            while started.elapsed() < self.delay {
+                cancellation_error(cancellation)?;
+                let Some(remaining) = budget
+                    .checked_sub(started.elapsed())
+                    .filter(|remaining| !remaining.is_zero())
+                else {
+                    return Err(workspace_service_request_timeout_error());
+                };
+                thread::sleep(
+                    Duration::from_millis(10)
+                        .min(remaining)
+                        .min(self.delay.saturating_sub(started.elapsed())),
+                );
+            }
+            cancellation_error(cancellation)?;
+            if started.elapsed() >= budget {
+                return Err(workspace_service_request_timeout_error());
+            }
+            let mut record = test_record(identity, 45678, env!("CARGO_PKG_VERSION"));
+            record.token = token.to_string();
+            Ok(record)
         }
     }
 }
