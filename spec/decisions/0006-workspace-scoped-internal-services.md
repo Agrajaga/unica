@@ -96,8 +96,20 @@ Unica may start hidden internal services scoped by workspace and source root.
     deadline exhaustion, and invalid protocol responses are terminal and are
     never retried. Both attempts, including repeated discovery, share the one
     120-second overall budget from item 15; the retried analyzer request receives
-    only the remaining timeout. A future mutating BSL tool must not enter the
-    retry allowlist.
+    only the remaining timeout. If repeated discovery spawns a service but its
+    readiness handshake fails, the startup child is terminated and reaped before
+    releasing the spawn lock; its record is removed only when PID and token still
+    identify that child. Service discovery is serialized by a persistent
+    OS-advisory spawn lock, which the OS releases on process death. While a peer
+    owns that lock, callers do not reuse even a live published record; they wait
+    within the shared request deadline, then reacquire the lock and revalidate the
+    record. This prevents analyzer or RLM work from escaping startup cleanup before
+    the spawning client completes its handshake. The readiness check accepts only
+    the child PID and token created by that spawner. During the handshake, the
+    spawner also contains the startup process in a process group on Unix or a Job
+    Object on Windows. Failed readiness terminates and reaps it; successful
+    readiness explicitly detaches it before releasing the lock. A future mutating
+    BSL tool must not enter the retry allowlist.
 
 ## Неграницы
 

@@ -3,7 +3,7 @@ use crate::domain::events::DomainEvent;
 use crate::domain::source_roots::normalize_path_identity;
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::bundled_tools::resolve_bundled_tool;
-use crate::infrastructure::managed_child::ManagedChild;
+use crate::infrastructure::managed_child::{ManagedChild, ManagedStartupChild};
 use crate::infrastructure::plugin_runtime::find_plugin_root;
 use crate::infrastructure::workspace_index::{IndexReadiness, WorkspaceIndexService};
 use fs2::FileExt;
@@ -40,8 +40,8 @@ const SERVICE_MAX_PENDING_CONTROL: usize = 64;
 const SERVICE_CONTROL_CLASSIFICATION_LIMIT: usize = 64 * 1024;
 const SERVICE_MAX_WORKERS: usize = 8;
 const SERVICE_REQUEST_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVICE_SPAWN_CLEANUP_WAIT: Duration = Duration::from_secs(2);
 const BSL_STDERR_TAIL_LIMIT: usize = 64 * 1024;
-const SERVICE_SPAWN_LOCK_STALE_SECS: u64 = 30;
 const SERVICE_RECORD_LOCK_FILE: &str = "service.record.lock";
 
 static SYSTEM_SERVICE_CONNECTOR: SystemServiceConnector = SystemServiceConnector;
@@ -238,11 +238,6 @@ impl<'a> WorkspaceServiceManager<'a> {
     ) -> Result<WorkspaceServiceRecord, String> {
         deadline.remaining(cancellation)?;
         let identity = WorkspaceServiceIdentity::new(context, source_root)?;
-        if let Some(record) = self.reusable_record(&identity, cancellation, deadline)? {
-            return Ok(record);
-        }
-
-        let started = Instant::now();
         loop {
             deadline.remaining(cancellation)?;
             if let Some(spawn_lock) = acquire_spawn_lock(&identity)? {
@@ -259,24 +254,8 @@ impl<'a> WorkspaceServiceManager<'a> {
                 return result;
             }
 
-            if let Some(record) = self.wait_for_peer_service(
-                &identity,
-                Duration::from_millis(250),
-                cancellation,
-                deadline,
-            )? {
-                return Ok(record);
-            }
-            if spawn_lock_is_stale(&identity) {
-                let _ = fs::remove_file(spawn_lock_path(&identity));
-                continue;
-            }
-            if started.elapsed() >= SERVICE_CONNECT_TIMEOUT {
-                return Err(format!(
-                    "workspace service spawn is locked and did not become ready at {}",
-                    identity.record_path().display()
-                ));
-            }
+            let remaining = deadline.remaining(cancellation)?;
+            thread::sleep(Duration::from_millis(50).min(remaining));
         }
     }
 
@@ -503,24 +482,6 @@ impl<'a> WorkspaceServiceManager<'a> {
             return Ok(Some(record));
         }
         self.shutdown_record(&record, cancellation, deadline);
-        Ok(None)
-    }
-
-    fn wait_for_peer_service(
-        &self,
-        identity: &WorkspaceServiceIdentity,
-        timeout: Duration,
-        cancellation: &CancellationToken,
-        deadline: &WorkspaceServiceCallDeadline,
-    ) -> Result<Option<WorkspaceServiceRecord>, String> {
-        let started = Instant::now();
-        while started.elapsed() < timeout {
-            let remaining = deadline.remaining(cancellation)?;
-            if let Some(record) = self.reusable_record(identity, cancellation, deadline)? {
-                return Ok(Some(record));
-            }
-            thread::sleep(Duration::from_millis(50).min(remaining));
-        }
         Ok(None)
     }
 
@@ -1090,20 +1051,86 @@ impl ServiceSpawner for SystemServiceSpawner {
         if let Some(plugin_root) = find_plugin_root(Path::new(&identity.workspace_root)) {
             command.env("UNICA_PLUGIN_ROOT", plugin_root);
         }
-        command
-            .spawn()
+        let mut child = ManagedStartupChild::spawn_configured(command)
             .map_err(|err| format!("failed to spawn workspace service: {err}"))?;
-
-        let wait_budget = deadline
-            .remaining(cancellation)?
-            .min(SERVICE_CONNECT_TIMEOUT);
-        wait_for_record_with_connector(
-            identity,
-            &SYSTEM_SERVICE_CONNECTOR,
-            wait_budget,
-            cancellation,
-        )
+        let child_pid = child.id();
+        let readiness = (|| {
+            let wait_budget = deadline
+                .remaining(cancellation)?
+                .min(SERVICE_CONNECT_TIMEOUT);
+            let record = wait_for_record_with_connector(
+                identity,
+                &SYSTEM_SERVICE_CONNECTOR,
+                child_pid,
+                token,
+                wait_budget,
+                cancellation,
+            )?;
+            deadline.remaining(cancellation)?;
+            Ok(record)
+        })();
+        match readiness {
+            Ok(record) => match child.detach() {
+                Ok(()) => Ok(record),
+                Err(error) => {
+                    let cleanup = terminate_failed_workspace_service_spawn(
+                        &mut child,
+                        identity,
+                        token,
+                        SERVICE_SPAWN_CLEANUP_WAIT,
+                    );
+                    match cleanup {
+                        Ok(()) => Err(error),
+                        Err(cleanup_error) => Err(format!("{error}; {cleanup_error}")),
+                    }
+                }
+            },
+            Err(error) => {
+                let cleanup = terminate_failed_workspace_service_spawn(
+                    &mut child,
+                    identity,
+                    token,
+                    SERVICE_SPAWN_CLEANUP_WAIT,
+                );
+                match cleanup {
+                    Ok(()) => Err(error),
+                    Err(cleanup_error) => Err(format!("{error}; {cleanup_error}")),
+                }
+            }
+        }
     }
+}
+
+fn terminate_failed_workspace_service_spawn(
+    child: &mut ManagedStartupChild,
+    identity: &WorkspaceServiceIdentity,
+    token: &str,
+    wait_limit: Duration,
+) -> Result<(), String> {
+    let pid = child.id();
+    child
+        .terminate_bounded(wait_limit)
+        .map_err(|error| format!("failed to clean up spawned workspace service {pid}: {error}"))?;
+    remove_spawned_service_record_if_owned(identity, pid, token)
+}
+
+fn remove_spawned_service_record_if_owned(
+    identity: &WorkspaceServiceIdentity,
+    pid: u32,
+    token: &str,
+) -> Result<(), String> {
+    with_record_lock(identity, || {
+        let Some(record) = read_record_unlocked(identity) else {
+            return Ok(());
+        };
+        if record.pid != pid || record.token != token {
+            return Ok(());
+        }
+        fs::remove_file(identity.record_path()).map_err(|error| {
+            format!("failed to remove failed workspace service record: {error}")
+        })?;
+        Ok(())
+    })
 }
 
 #[derive(Default)]
@@ -2115,12 +2142,12 @@ fn write_record_with_hook(
 }
 
 struct SpawnLock {
-    path: PathBuf,
+    file: fs::File,
 }
 
 impl Drop for SpawnLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -2132,36 +2159,49 @@ fn acquire_spawn_lock(identity: &WorkspaceServiceIdentity) -> Result<Option<Spaw
     fs::create_dir_all(&identity.service_dir)
         .map_err(|err| format!("failed to create workspace service lock directory: {err}"))?;
     let path = spawn_lock_path(identity);
-    match OpenOptions::new().create_new(true).write(true).open(&path) {
-        Ok(mut file) => {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| {
+            format!(
+                "failed to acquire workspace service spawn lock {}: {error}",
+                path.display()
+            )
+        })?;
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            file.set_len(0)
+                .map_err(|err| format!("failed to reset workspace service spawn lock: {err}"))?;
             let payload = format!("pid={}\nstarted_at={}\n", std::process::id(), now_secs());
             file.write_all(payload.as_bytes())
                 .map_err(|err| format!("failed to write workspace service spawn lock: {err}"))?;
-            Ok(Some(SpawnLock { path }))
+            Ok(Some(SpawnLock { file }))
         }
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(None),
+        Err(error) if spawn_lock_is_contended(&error) => Ok(None),
         Err(error) => Err(format!(
-            "failed to acquire workspace service spawn lock {}: {error}",
+            "failed to lock workspace service spawn lock {}: {error}",
             path.display()
         )),
     }
 }
 
-fn spawn_lock_is_stale(identity: &WorkspaceServiceIdentity) -> bool {
-    let Ok(metadata) = fs::metadata(spawn_lock_path(identity)) else {
-        return false;
-    };
-    metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.elapsed().ok())
-        .map(|age| age >= Duration::from_secs(SERVICE_SPAWN_LOCK_STALE_SECS))
-        .unwrap_or(false)
+fn spawn_lock_is_contended(error: &io::Error) -> bool {
+    let expected = fs2::lock_contended_error();
+    error.kind() == ErrorKind::WouldBlock
+        || error
+            .raw_os_error()
+            .zip(expected.raw_os_error())
+            .is_some_and(|(actual, expected)| actual == expected)
 }
 
 fn wait_for_record_with_connector(
     identity: &WorkspaceServiceIdentity,
     connector: &dyn ServiceConnector,
+    expected_pid: u32,
+    expected_token: &str,
     timeout: Duration,
     cancellation: &CancellationToken,
 ) -> Result<WorkspaceServiceRecord, String> {
@@ -2175,7 +2215,9 @@ fn wait_for_record_with_connector(
             break;
         };
         if let Some(record) = read_record(identity) {
-            if record.matches(identity, env!("CARGO_PKG_VERSION"))
+            if record.pid == expected_pid
+                && record.token == expected_token
+                && record.matches(identity, env!("CARGO_PKG_VERSION"))
                 && connector
                     .send(
                         &record,
@@ -5530,14 +5572,14 @@ fn main() {
         let context = test_context("spawn-wait-shutting-down");
         let identity =
             WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src")).unwrap();
-        write_record(
-            &identity,
-            test_record(&identity, 34567, env!("CARGO_PKG_VERSION")),
-        );
+        let record = test_record(&identity, 34567, env!("CARGO_PKG_VERSION"));
+        write_record(&identity, record.clone());
 
         let result = wait_for_record_with_connector(
             &identity,
             &ShuttingDownConnector,
+            record.pid,
+            &record.token,
             Duration::from_millis(75),
             &CancellationToken::new(),
         );
@@ -5558,6 +5600,8 @@ fn main() {
         let error = wait_for_record_with_connector(
             &identity,
             &RecordingConnector::default(),
+            34567,
+            "secret",
             SERVICE_CONNECT_TIMEOUT,
             &cancellation,
         )
@@ -5566,6 +5610,75 @@ fn main() {
         assert!(error.starts_with("cancelled:"), "{error}");
         assert!(started.elapsed() < Duration::from_millis(100));
         cleanup(&context);
+    }
+
+    #[test]
+    fn failed_spawn_cleanup_reaps_child_and_preserves_replacement_record() {
+        let context = test_context("failed-spawn-child-cleanup");
+        let source_root = context.workspace_root.join("src");
+        let identity = WorkspaceServiceIdentity::new(&context, &source_root).unwrap();
+
+        let mut owned_command = Command::new(std::env::current_exe().unwrap());
+        owned_command
+            .args([
+                "--exact",
+                "infrastructure::workspace_services::tests::spawn_cleanup_child_fixture",
+                "--nocapture",
+            ])
+            .env("UNICA_SPAWN_CLEANUP_CHILD_FIXTURE", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut owned_child = ManagedStartupChild::spawn_configured(owned_command).unwrap();
+        thread::sleep(Duration::from_millis(75));
+        assert!(owned_child.is_running().unwrap());
+        let mut owned_record = test_record(&identity, 34567, env!("CARGO_PKG_VERSION"));
+        owned_record.pid = owned_child.id();
+        owned_record.token = "owned-spawn-token".to_string();
+        write_record(&identity, owned_record);
+
+        terminate_failed_workspace_service_spawn(
+            &mut owned_child,
+            &identity,
+            "owned-spawn-token",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert!(read_record(&identity).is_none());
+
+        let mut replaced_command = Command::new(std::env::current_exe().unwrap());
+        replaced_command
+            .args([
+                "--exact",
+                "infrastructure::workspace_services::tests::spawn_cleanup_child_fixture",
+                "--nocapture",
+            ])
+            .env("UNICA_SPAWN_CLEANUP_CHILD_FIXTURE", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut replaced_child = ManagedStartupChild::spawn_configured(replaced_command).unwrap();
+        thread::sleep(Duration::from_millis(75));
+        assert!(replaced_child.is_running().unwrap());
+        let replacement = test_record(&identity, 45678, env!("CARGO_PKG_VERSION"));
+        write_record(&identity, replacement.clone());
+
+        terminate_failed_workspace_service_spawn(
+            &mut replaced_child,
+            &identity,
+            "different-spawn-token",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(read_record(&identity), Some(replacement));
+        cleanup(&context);
+    }
+
+    #[test]
+    fn spawn_cleanup_child_fixture() {
+        if std::env::var_os("UNICA_SPAWN_CLEANUP_CHILD_FIXTURE").is_some() {
+            thread::sleep(Duration::from_secs(30));
+        }
     }
 
     #[test]
@@ -5652,18 +5765,18 @@ fn main() {
     }
 
     #[test]
-    fn manager_waits_for_peer_spawn_lock_and_reuses_record() {
+    fn manager_waits_for_peer_spawn_lock_release_before_reusing_record() {
         let context = test_context("peer-lock");
         let source_root = context.workspace_root.join("src");
         let identity = WorkspaceServiceIdentity::new(&context, &source_root).unwrap();
         let spawn_lock = acquire_spawn_lock(&identity).unwrap().unwrap();
-        let writer_identity = identity.clone();
-        let writer = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(75));
-            write_record(
-                &writer_identity,
-                test_record(&writer_identity, 34567, env!("CARGO_PKG_VERSION")),
-            );
+        write_record(
+            &identity,
+            test_record(&identity, 34567, env!("CARGO_PKG_VERSION")),
+        );
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(spawn_lock);
         });
         let connector = RecordingConnector {
             ping_ok: true,
@@ -5671,13 +5784,89 @@ fn main() {
         };
         let spawner = RecordingSpawner::default();
         let manager = WorkspaceServiceManager::with_io(&connector, &spawner);
+        let started = Instant::now();
 
         let record = manager.ensure_service(&context, &source_root).unwrap();
 
-        writer.join().unwrap();
-        drop(spawn_lock);
+        releaser.join().unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(125));
         assert_eq!(record.port, 34567);
+        assert_eq!(*connector.pings.borrow(), 1);
         assert_eq!(*spawner.spawns.borrow(), 0);
+        cleanup(&context);
+    }
+
+    #[test]
+    fn manager_spawn_lock_wait_observes_cancellation_and_shared_deadline() {
+        let context = test_context("peer-lock-deadline");
+        let source_root = context.workspace_root.join("src");
+        let identity = WorkspaceServiceIdentity::new(&context, &source_root).unwrap();
+        let spawn_lock = acquire_spawn_lock(&identity).unwrap().unwrap();
+        let connector = RecordingConnector::default();
+        let spawner = RecordingSpawner::default();
+        let manager = WorkspaceServiceManager::with_io(&connector, &spawner);
+
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let cancelled = manager
+            .ensure_service_cancellable(&context, &source_root, &cancellation)
+            .unwrap_err();
+        assert!(cancelled.starts_with("cancelled:"), "{cancelled}");
+
+        let started = Instant::now();
+        let timed_out = manager
+            .ensure_service_cancellable_with_deadline(
+                &context,
+                &source_root,
+                &CancellationToken::new(),
+                &WorkspaceServiceCallDeadline::new(Duration::from_millis(75)),
+            )
+            .unwrap_err();
+        assert!(timed_out.starts_with("timeout:"), "{timed_out}");
+        assert!(started.elapsed() < Duration::from_millis(300));
+        assert!(connector.requests.borrow().is_empty());
+        assert_eq!(*spawner.spawns.borrow(), 0);
+
+        drop(spawn_lock);
+        cleanup(&context);
+    }
+
+    #[test]
+    fn spawn_lock_contention_classifier_uses_fs2_platform_error() {
+        assert!(spawn_lock_is_contended(&fs2::lock_contended_error()));
+        assert!(spawn_lock_is_contended(&io::Error::from(
+            ErrorKind::WouldBlock
+        )));
+        assert!(!spawn_lock_is_contended(&io::Error::from(
+            ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[test]
+    fn spawn_wait_ignores_live_record_not_owned_by_spawned_child() {
+        let context = test_context("spawn-wait-owned-record");
+        let identity =
+            WorkspaceServiceIdentity::new(&context, &context.workspace_root.join("src")).unwrap();
+        write_record(
+            &identity,
+            test_record(&identity, 34567, env!("CARGO_PKG_VERSION")),
+        );
+        let connector = RecordingConnector {
+            ping_ok: true,
+            ..RecordingConnector::default()
+        };
+
+        let result = wait_for_record_with_connector(
+            &identity,
+            &connector,
+            45678,
+            "new-spawn-token",
+            Duration::from_millis(75),
+            &CancellationToken::new(),
+        );
+
+        assert!(result.is_err());
+        assert!(connector.requests.borrow().is_empty());
         cleanup(&context);
     }
 
@@ -5864,11 +6053,11 @@ fn main() {
         );
         let connector = ResetBslConnector {
             restart_after_reset: true,
-            first_bsl_delay: Duration::from_millis(350),
+            first_bsl_delay: Duration::from_millis(100),
             ..ResetBslConnector::default()
         };
         let spawner = RecordingSpawner {
-            delay: Duration::from_secs(1),
+            delay: Duration::from_secs(2),
             ..RecordingSpawner::default()
         };
         let manager = WorkspaceServiceManager::with_io(&connector, &spawner);
@@ -5882,16 +6071,16 @@ fn main() {
                     tool_name: "diagnostics",
                     tool_args: json!({"mode": "file"}),
                     timeout: Duration::from_secs(120),
-                    request_budget: Duration::from_millis(500),
+                    request_budget: Duration::from_secs(1),
                 },
                 &CancellationToken::new(),
             )
             .unwrap_err();
 
         assert!(error.starts_with("timeout:"), "{error}");
-        assert!(started.elapsed() < Duration::from_millis(900));
+        assert!(started.elapsed() < Duration::from_millis(1_500));
         assert_eq!(*spawner.spawns.borrow(), 1);
-        assert!(spawner.budgets.borrow()[0] < Duration::from_millis(500));
+        assert!(spawner.budgets.borrow()[0] < Duration::from_secs(1));
         cleanup(&context);
     }
 
