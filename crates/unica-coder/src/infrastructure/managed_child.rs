@@ -809,6 +809,26 @@ mod tests {
                 .unwrap();
                 child.wait().unwrap();
             }
+            "inherited_pipe_parent" => {
+                let pid_file = std::env::var_os(HELPER_PID_FILE_ENV).unwrap();
+                let child = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "infrastructure::managed_child::tests::managed_child_test_helper",
+                        "--nocapture",
+                    ])
+                    .env(HELPER_ENV, "process_tree_child")
+                    .spawn()
+                    .unwrap();
+                print!("inherited-pipe-before-timeout");
+                std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                std::fs::write(
+                    pid_file,
+                    format!("{}\n{}\n", std::process::id(), child.id()),
+                )
+                .unwrap();
+                thread::sleep(Duration::from_secs(10));
+            }
             "process_tree_child" => thread::sleep(Duration::from_secs(10)),
             "process_tree_detached_leader" => {
                 let pid_file = std::env::var_os(HELPER_PID_FILE_ENV).unwrap();
@@ -1287,6 +1307,59 @@ mod tests {
         assert!(output.cancelled);
         assert!(wait_until_dead(parent_pid, Duration::from_secs(2)));
         assert!(wait_until_dead(child_pid, Duration::from_secs(2)));
+        cleanup.disarm();
+    }
+
+    #[test]
+    fn inherited_pipe_descendant_does_not_block_timeout_collection() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "unica-inherited-pipe-pids-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _pid_file_cleanup = FileCleanupGuard(pid_file.clone());
+        let cancellation = CancellationToken::new();
+        let managed = ManagedChild::spawn(ManagedCommand {
+            program: std::env::current_exe().unwrap(),
+            args: vec![
+                "--exact".to_string(),
+                "infrastructure::managed_child::tests::managed_child_test_helper".to_string(),
+                "--nocapture".to_string(),
+            ],
+            cwd: std::env::current_dir().unwrap(),
+            env: vec![
+                (
+                    OsString::from(HELPER_ENV),
+                    OsString::from("inherited_pipe_parent"),
+                ),
+                (
+                    OsString::from(HELPER_PID_FILE_ENV),
+                    pid_file.clone().into_os_string(),
+                ),
+            ],
+            timeout: Some(Duration::from_millis(200)),
+            cancellation: cancellation.clone(),
+        })
+        .unwrap();
+        let mut managed_cleanup = ManagedChildCleanupGuard::new(managed, cancellation);
+        let pids = read_helper_pids(&pid_file, Duration::from_secs(2));
+        let mut cleanup = ProcessCleanupGuard(pids.clone());
+        let started = Instant::now();
+        let output = managed_cleanup.managed_mut().wait_for_output().unwrap();
+        managed_cleanup.disarm();
+
+        assert!(output.timed_out);
+        assert!(
+            output.stdout.contains("inherited-pipe-before-timeout"),
+            "{}",
+            output.stdout
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(wait_until_dead(pids[0], Duration::from_secs(2)));
+        assert!(wait_until_dead(pids[1], Duration::from_secs(2)));
         cleanup.disarm();
     }
 
