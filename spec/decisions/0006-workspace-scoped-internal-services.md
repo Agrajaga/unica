@@ -94,7 +94,10 @@ Unica may start hidden internal services scoped by workspace and source root.
     discovery so the new request uses the current port and token. Unknown or
     future BSL tools, typed service failures (`ok: false`), cancellation,
     deadline exhaustion, and invalid protocol responses are terminal and are
-    never retried. A future mutating BSL tool must not enter the retry allowlist.
+    never retried. Both attempts, including repeated discovery, share the one
+    120-second overall budget from item 15; the retried analyzer request receives
+    only the remaining timeout. A future mutating BSL tool must not enter the
+    retry allowlist.
 
 ## Неграницы
 
