@@ -70,7 +70,7 @@ class LegacyMigrationBoundaryTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertNotIn(marker, release)
 
-    def test_v080_metadata_and_docs_keep_only_the_frozen_v077_bridge(self) -> None:
+    def test_v080_metadata_and_docs_keep_only_the_frozen_v078_bridge(self) -> None:
         metadata = json.loads(
             (REPO_ROOT / "plugins/unica/.codex-plugin/plugin.json").read_text(
                 encoding="utf-8"
@@ -90,16 +90,21 @@ class LegacyMigrationBoundaryTests(unittest.TestCase):
 
         self.assertEqual("0.8.0", metadata["version"])
         for filename in ("install-unica.sh", "install-unica.ps1"):
-            frozen_url = f"releases/download/v0.7.7/{filename}"
+            frozen_url = f"releases/download/v0.7.8/{filename}"
+            obsolete_url = f"releases/download/v0.7.7/{filename}"
             with self.subTest(filename=filename):
                 self.assertIn(frozen_url, readme)
                 self.assertIn(frozen_url, plugin_readme)
+                self.assertNotIn(obsolete_url, readme)
+                self.assertNotIn(obsolete_url, plugin_readme)
         for text in (internal_package, marketplace_adr):
-            self.assertIn("v0.7.7", text)
+            self.assertIn("v0.7.8", text)
             self.assertIn("v0.8.0", text)
             self.assertIn("ordinary marketplace update", text)
         self.assertTrue(release_note.is_file())
-        self.assertIn("v0.7.7", release_note.read_text(encoding="utf-8"))
+        release_text = release_note.read_text(encoding="utf-8")
+        self.assertIn("v0.7.8", release_text)
+        self.assertNotIn("v0.7.7", release_text)
 
 
 if __name__ == "__main__":
