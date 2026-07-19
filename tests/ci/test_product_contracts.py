@@ -60,22 +60,40 @@ class ProductContractTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertIn(value, readme)
 
-    def test_readme_documents_the_frozen_v077_bridge(self) -> None:
+    def test_readme_documents_the_stable_v077_migration_guide(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         readme = (repo_root / "README.md").read_text(encoding="utf-8")
+        section = readme.split("## Переход со старой установки и откат", 1)[1].split(
+            "\n## ", 1
+        )[0]
 
-        self.assertIn("| Исходное состояние |", readme)
-        self.assertIn(
+        required = (
+            "codex plugin list",
+            "| Ваша версия | Что делать |",
+            "`0.3.0`–`0.7.4`",
+            "`0.7.5` и новее",
             "releases/download/v0.7.7/install-unica.sh",
-            readme,
-        )
-        self.assertIn(
             "releases/download/v0.7.7/install-unica.ps1",
-            readme,
+            "--ref migration-v0.7.7",
+            "-Ref migration-v0.7.7",
+            "codex plugin marketplace upgrade unica",
+            "предыдущая установка уже восстановлена",
         )
-        self.assertIn("v0.7.5", readme)
-        self.assertIn("техническ", readme.lower())
-        self.assertIn("v0.8.0", readme)
+        for value in required:
+            with self.subTest(value=value):
+                self.assertIn(value, section)
+
+        for forbidden in (
+            "каноническ",
+            "legacy",
+            "техническ",
+            "transactional",
+            "migrate-preflight",
+            "checksum",
+            "v0.8.0",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, section.lower())
 
     def test_v077_release_note_declares_the_legacy_boundary(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
