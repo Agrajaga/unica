@@ -600,12 +600,17 @@ fn each_mutation_failure_restores_exact_config_and_keeps_backup() {
         let engine = MigrationEngine::new(codex_home.clone(), runner);
         let legacy_root = codex_home.join("marketplaces/unica-local");
         fs::create_dir_all(&legacy_root).unwrap();
+        fs::write(legacy_root.join("marker"), "exact legacy source").unwrap();
         let plan = classify_discovery(legacy_discovery(&codex_home), &codex_home).unwrap();
 
         let error = engine.apply(plan, |_| Ok(())).unwrap_err();
 
         assert!(error.to_string().contains("rolled back"), "{error}");
         assert_eq!(fs::read(codex_home.join("config.toml")).unwrap(), original);
+        assert_eq!(
+            fs::read_to_string(legacy_root.join("marker")).unwrap(),
+            "exact legacy source"
+        );
         let backups = fs::read_dir(codex_home.join("unica/migration-backups"))
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -617,6 +622,35 @@ fn each_mutation_failure_restores_exact_config_and_keeps_backup() {
         assert!(diagnostics.contains("rollback-succeeded"));
         assert!(!diagnostics.contains("token=secret"));
     }
+}
+
+#[test]
+fn inverse_cli_failure_is_reported_even_when_discovery_matches_restored_config() {
+    let codex_home = temp_root("inverse-failure");
+    let original = b"model = \"gpt-5\"\n# exact legacy config\n";
+    fs::write(codex_home.join("config.toml"), original).unwrap();
+    let legacy_root = codex_home.join("marketplaces/unica-local");
+    fs::create_dir_all(&legacy_root).unwrap();
+    fs::write(legacy_root.join("marker"), "exact legacy source").unwrap();
+    let runner = FailingMutationRunner::with_inverse_failure(codex_home.clone(), 1);
+    let engine = MigrationEngine::new(codex_home.clone(), runner);
+    let plan = classify_discovery(legacy_discovery(&codex_home), &codex_home).unwrap();
+
+    let error = engine.apply(plan, |_| Ok(())).unwrap_err();
+
+    assert!(
+        error.to_string().contains("rollback also failed"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("injected inverse failure"),
+        "{error}"
+    );
+    assert_eq!(fs::read(codex_home.join("config.toml")).unwrap(), original);
+    assert_eq!(
+        fs::read_to_string(legacy_root.join("marker")).unwrap(),
+        "exact legacy source"
+    );
 }
 
 fn legacy_discovery(codex_home: &Path) -> CodexDiscovery {
@@ -934,6 +968,8 @@ struct RunnerState {
     fail_on: usize,
     mutation_index: usize,
     failed: bool,
+    fail_inverse: bool,
+    inverse_failed: bool,
 }
 
 impl FailingMutationRunner {
@@ -944,6 +980,21 @@ impl FailingMutationRunner {
                 fail_on,
                 mutation_index: 0,
                 failed: false,
+                fail_inverse: false,
+                inverse_failed: false,
+            }),
+        }
+    }
+
+    fn with_inverse_failure(codex_home: PathBuf, fail_on: usize) -> Self {
+        Self {
+            codex_home,
+            state: Mutex::new(RunnerState {
+                fail_on,
+                mutation_index: 0,
+                failed: false,
+                fail_inverse: true,
+                inverse_failed: false,
             }),
         }
     }
@@ -979,8 +1030,20 @@ impl CommandRunner for FailingMutationRunner {
 
         fs::write(self.codex_home.join("config.toml"), b"partially mutated\n").unwrap();
         let mut state = self.state.lock().unwrap();
+        let is_marketplace_add = command.args.len() >= 3
+            && command.args[0] == "plugin"
+            && command.args[1] == "marketplace"
+            && command.args[2] == "add";
+        if state.failed && state.fail_inverse && !state.inverse_failed && is_marketplace_add {
+            state.inverse_failed = true;
+            return Err(BootstrapError::new("injected inverse failure"));
+        }
         if !state.failed && state.mutation_index == state.fail_on {
             state.failed = true;
+            let legacy_root = self.codex_home.join("marketplaces/unica-local");
+            if legacy_root.exists() {
+                fs::remove_dir_all(legacy_root).unwrap();
+            }
             return Err(BootstrapError::new(
                 "injected mutation failure token=secret",
             ));

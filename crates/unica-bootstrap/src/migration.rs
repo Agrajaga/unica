@@ -540,7 +540,6 @@ impl<R: CommandRunner> MigrationEngine<R> {
         verify(&plugin_root)?;
 
         for path in &plan.remove_legacy_paths {
-            journal.push(JournalEntry::RemovedLegacyPath(path.clone()));
             remove_managed_path(&self.codex_home, path)?;
         }
 
@@ -561,6 +560,7 @@ impl<R: CommandRunner> MigrationEngine<R> {
     ) -> Result<()> {
         let mut inverse_errors = Vec::new();
         let mut errors = Vec::new();
+        // Remove transaction-created canonical state before restoring any saved tree.
         for entry in journal.iter().rev() {
             let result = match entry {
                 JournalEntry::AddedCanonicalPlugin => self
@@ -576,6 +576,25 @@ impl<R: CommandRunner> MigrationEngine<R> {
                     ])
                     .map(|_| ()),
                 JournalEntry::UpgradedCanonicalMarketplace => Ok(()),
+                JournalEntry::RemovedMarketplace(_) | JournalEntry::RemovedPlugin { .. } => Ok(()),
+            };
+            if let Err(error) = result {
+                inverse_errors.push(error.to_string());
+            }
+        }
+        if let Err(error) = backup.restore_preserved_paths(&self.codex_home, plan) {
+            errors.push(error.to_string());
+        }
+        // A Codex command may mutate or delete legacy files before returning failure.
+        // Restore every captured path, regardless of how far the explicit cleanup ran.
+        for path in &plan.remove_legacy_paths {
+            if let Err(error) = backup.restore_legacy_path(&self.codex_home, path) {
+                errors.push(error.to_string());
+            }
+        }
+        // Registrations depend on their restored local source tree, so recreate them last.
+        for entry in journal.iter().rev() {
+            let result = match entry {
                 JournalEntry::RemovedMarketplace(name) => {
                     let source = &plan.legacy_marketplaces[name].marketplace_source.source;
                     self.run_codex(&["plugin", "marketplace", "add", source, "--json"])
@@ -588,27 +607,25 @@ impl<R: CommandRunner> MigrationEngine<R> {
                 JournalEntry::RemovedPlugin {
                     restore_via_cli: false,
                     ..
-                } => Ok(()),
-                JournalEntry::RemovedLegacyPath(path) => {
-                    backup.restore_legacy_path(&self.codex_home, path)
                 }
+                | JournalEntry::AddedCanonicalPlugin
+                | JournalEntry::AddedCanonicalMarketplace
+                | JournalEntry::UpgradedCanonicalMarketplace => Ok(()),
             };
             if let Err(error) = result {
                 inverse_errors.push(error.to_string());
             }
         }
+        // Codex inverse commands can rewrite config formatting; restore the exact bytes last.
         if let Err(error) = backup.restore_config(&self.codex_home) {
-            errors.push(error.to_string());
-        }
-        if let Err(error) = backup.restore_preserved_paths(&self.codex_home, plan) {
             errors.push(error.to_string());
         }
         let restoration = discover(&self.runner, &self.codex_home)
             .and_then(|current| verify_restored_discovery(&plan.original_discovery, &current));
         if let Err(error) = restoration {
             errors.push(error.to_string());
-            errors.extend(inverse_errors);
         }
+        errors.extend(inverse_errors);
         if errors.is_empty() {
             Ok(())
         } else {
@@ -628,7 +645,6 @@ enum JournalEntry {
     AddedCanonicalMarketplace,
     UpgradedCanonicalMarketplace,
     AddedCanonicalPlugin,
-    RemovedLegacyPath(PathBuf),
 }
 
 struct Backup {
