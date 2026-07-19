@@ -239,6 +239,14 @@ fn successful_orphan_cleanup_retains_exact_backup_and_becomes_idempotent() {
                 & 0o777,
             0o600
         );
+        assert_eq!(
+            fs::metadata(backup.join("diagnostics.jsonl"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
     assert!(engine.preflight().unwrap().is_noop());
 }
@@ -323,6 +331,28 @@ fn failed_runtime_verification_rolls_back_before_legacy_cleanup() {
         fs::read_to_string(codex_home.join("plugins/cache/unica-local/marker")).unwrap(),
         "cache"
     );
+}
+
+#[test]
+fn rollback_proof_rejects_a_different_active_marketplace_root() {
+    let codex_home = orphaned_legacy_home("rollback-root-mismatch");
+    let runner = OrphanCleanupRunner::with_root_mismatch(codex_home.clone());
+    let engine = MigrationEngine::new(codex_home.clone(), runner);
+    let plan = classify_discovery(canonical_discovery(), &codex_home).unwrap();
+
+    let error = engine
+        .apply(plan, |_| {
+            Err(BootstrapError::new("injected verification failure"))
+        })
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("rollback also failed"),
+        "{error}"
+    );
+    assert!(error
+        .to_string()
+        .contains("rollback discovery does not match"));
 }
 
 #[test]
@@ -430,6 +460,49 @@ fn previous_canonical_version_is_upgraded_and_preserved_for_rollback() {
 }
 
 #[test]
+fn canonical_marketplace_root_with_parent_traversal_is_rejected_before_backup() {
+    let codex_home = temp_root("root-parent-traversal");
+    let victim = codex_home.parent().unwrap().join("unica-path-victim");
+    fs::create_dir_all(&victim).unwrap();
+    fs::write(victim.join("marker"), "outside").unwrap();
+    let mut discovery = previous_canonical_discovery(&codex_home);
+    discovery.marketplaces.marketplaces[0].root = Some(
+        codex_home
+            .join("../unica-path-victim")
+            .to_string_lossy()
+            .into_owned(),
+    );
+
+    let error = classify_discovery(discovery, &codex_home).unwrap_err();
+
+    assert!(error.to_string().contains("unsafe components"), "{error}");
+    assert_eq!(
+        fs::read_to_string(victim.join("marker")).unwrap(),
+        "outside"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_managed_path_ancestor_is_rejected_before_backup_or_cleanup() {
+    use std::os::unix::fs::symlink;
+
+    let codex_home = temp_root("ancestor-symlink");
+    let victim = codex_home.parent().unwrap().join("unica-symlink-victim");
+    fs::create_dir_all(victim.join("unica-local")).unwrap();
+    fs::write(victim.join("unica-local/marker"), "outside").unwrap();
+    symlink(&victim, codex_home.join("marketplaces")).unwrap();
+
+    let error = classify_discovery(canonical_discovery(), &codex_home).unwrap_err();
+
+    assert!(error.to_string().contains("symlinked ancestor"), "{error}");
+    assert_eq!(
+        fs::read_to_string(victim.join("unica-local/marker")).unwrap(),
+        "outside"
+    );
+}
+
+#[test]
 fn previous_canonical_version_updates_and_verifies_installed_plugin_root() {
     let codex_home = previous_canonical_home("update-success");
     let runner = CanonicalUpdateRunner::new(codex_home.clone());
@@ -486,6 +559,38 @@ fn previous_canonical_version_is_restored_when_installed_runtime_verification_fa
 }
 
 #[test]
+fn each_canonical_update_command_failure_restores_previous_version() {
+    for fail_on in 0..3 {
+        let codex_home = previous_canonical_home(&format!("update-command-{fail_on}"));
+        let original_config = fs::read(codex_home.join("config.toml")).unwrap();
+        let runner = CanonicalUpdateRunner::with_failure(codex_home.clone(), fail_on);
+        let engine = MigrationEngine::new(codex_home.clone(), runner);
+        let plan =
+            classify_discovery(previous_canonical_discovery(&codex_home), &codex_home).unwrap();
+
+        let error = engine.apply(plan, |_| Ok(())).unwrap_err();
+
+        assert!(
+            error.to_string().contains("rolled back"),
+            "stage {fail_on}: {error}"
+        );
+        assert_eq!(
+            fs::read(codex_home.join("config.toml")).unwrap(),
+            original_config
+        );
+        assert_eq!(
+            fs::read_to_string(codex_home.join(".tmp/marketplaces/unica/marker")).unwrap(),
+            "previous marketplace"
+        );
+        assert_eq!(
+            fs::read_to_string(codex_home.join("plugins/cache/unica/unica/0.7.2/marker")).unwrap(),
+            "previous plugin"
+        );
+        assert!(!current_plugin_root(&codex_home).exists());
+    }
+}
+
+#[test]
 fn each_mutation_failure_restores_exact_config_and_keeps_backup() {
     for fail_on in 0..4 {
         let codex_home = temp_root(&format!("rollback-{fail_on}"));
@@ -507,6 +612,10 @@ fn each_mutation_failure_restores_exact_config_and_keeps_backup() {
             .unwrap();
         assert_eq!(backups.len(), 1);
         assert!(backups[0].path().join("snapshot.json").is_file());
+        let diagnostics = fs::read_to_string(backups[0].path().join("diagnostics.jsonl")).unwrap();
+        assert!(diagnostics.contains("migration-failed"));
+        assert!(diagnostics.contains("rollback-succeeded"));
+        assert!(!diagnostics.contains("token=secret"));
     }
 }
 
@@ -613,6 +722,8 @@ fn write_current_plugin_package(codex_home: &Path) {
 struct OrphanCleanupRunner {
     codex_home: PathBuf,
     fail_final_plugin_discovery: bool,
+    mismatch_rollback_marketplace_root: bool,
+    marketplace_discoveries: Mutex<usize>,
     plugin_discoveries: Mutex<usize>,
 }
 
@@ -621,6 +732,18 @@ impl OrphanCleanupRunner {
         Self {
             codex_home,
             fail_final_plugin_discovery,
+            mismatch_rollback_marketplace_root: false,
+            marketplace_discoveries: Mutex::new(0),
+            plugin_discoveries: Mutex::new(0),
+        }
+    }
+
+    fn with_root_mismatch(codex_home: PathBuf) -> Self {
+        Self {
+            codex_home,
+            fail_final_plugin_discovery: false,
+            mismatch_rollback_marketplace_root: true,
+            marketplace_discoveries: Mutex::new(0),
             plugin_discoveries: Mutex::new(0),
         }
     }
@@ -635,7 +758,13 @@ impl CommandRunner for OrphanCleanupRunner {
             .args
             .ends_with(&["marketplace".into(), "list".into(), "--json".into()])
         {
-            return Ok(serde_json::to_string(&canonical_discovery().marketplaces).unwrap());
+            let mut discoveries = self.marketplace_discoveries.lock().unwrap();
+            *discoveries += 1;
+            let mut marketplaces = canonical_discovery().marketplaces;
+            if self.mismatch_rollback_marketplace_root && *discoveries >= 2 {
+                marketplaces.marketplaces[0].root = Some("/cache/unica-other".to_string());
+            }
+            return Ok(serde_json::to_string(&marketplaces).unwrap());
         }
         if command
             .args
@@ -676,11 +805,40 @@ impl CommandRunner for OrphanCleanupRunner {
 
 struct CanonicalUpdateRunner {
     codex_home: PathBuf,
+    failure: Mutex<UpdateFailureState>,
+}
+
+struct UpdateFailureState {
+    fail_on: usize,
+    mutation_index: usize,
+    failed: bool,
 }
 
 impl CanonicalUpdateRunner {
     fn new(codex_home: PathBuf) -> Self {
-        Self { codex_home }
+        Self::with_failure(codex_home, usize::MAX)
+    }
+
+    fn with_failure(codex_home: PathBuf, fail_on: usize) -> Self {
+        Self {
+            codex_home,
+            failure: Mutex::new(UpdateFailureState {
+                fail_on,
+                mutation_index: 0,
+                failed: false,
+            }),
+        }
+    }
+
+    fn finish_mutation(&self) -> Result<String> {
+        let mut state = self.failure.lock().unwrap();
+        let mutation_index = state.mutation_index;
+        state.mutation_index += 1;
+        if !state.failed && mutation_index == state.fail_on {
+            state.failed = true;
+            return Err(BootstrapError::new("injected canonical update failure"));
+        }
+        Ok("{}".to_string())
     }
 
     fn discovery(&self) -> CodexDiscovery {
@@ -727,7 +885,7 @@ impl CommandRunner for CanonicalUpdateRunner {
             if cache.exists() {
                 fs::remove_dir_all(cache).unwrap();
             }
-            return Ok("{}".to_string());
+            return self.finish_mutation();
         }
         if command.args
             == [
@@ -744,7 +902,7 @@ impl CommandRunner for CanonicalUpdateRunner {
             }
             fs::create_dir_all(&marketplace).unwrap();
             fs::write(marketplace.join("marker"), "current marketplace").unwrap();
-            return Ok("{}".to_string());
+            return self.finish_mutation();
         }
         if command.args
             == [
@@ -758,7 +916,7 @@ impl CommandRunner for CanonicalUpdateRunner {
             fs::create_dir_all(root.join(".codex-plugin")).unwrap();
             fs::write(root.join(".codex-plugin/plugin.json"), b"{}").unwrap();
             fs::write(root.join("runtime-manifest.json"), b"{}").unwrap();
-            return Ok("{}".to_string());
+            return self.finish_mutation();
         }
         Err(BootstrapError::new(format!(
             "unexpected update command: {} {:?}",

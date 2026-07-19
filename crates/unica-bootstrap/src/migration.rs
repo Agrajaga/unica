@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::Permissions;
 use std::io::{ErrorKind, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -163,7 +164,11 @@ fn reject_symlinked_config(codex_home: &Path) -> Result<()> {
             "refusing to migrate with symlinked Codex config: {}",
             config_path.display()
         ))),
-        Ok(_) => Ok(()),
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(BootstrapError::new(format!(
+            "Codex config is not a regular file: {}",
+            config_path.display()
+        ))),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
@@ -189,7 +194,11 @@ fn existing_legacy_paths(codex_home: &Path) -> Result<Vec<PathBuf>> {
     candidates
         .into_iter()
         .filter_map(|path| match fs::symlink_metadata(&path) {
-            Ok(_) => Some(validate_legacy_path_tree(&path).map(|()| path)),
+            Ok(_) => Some(
+                ensure_path_within_codex_home(codex_home, &path)
+                    .and_then(|()| validate_legacy_path_tree(&path))
+                    .map(|()| path),
+            ),
             Err(error) if error.kind() == ErrorKind::NotFound => None,
             Err(error) => Some(Err(error.into())),
         })
@@ -269,25 +278,11 @@ fn is_known_legacy_local(marketplace: &MarketplaceRecord, codex_home: &Path) -> 
     if marketplace.marketplace_source.source_type != "local" {
         return Ok(false);
     }
-    same_existing_path(
+    let relative = managed_relative_path(
+        codex_home,
         Path::new(&marketplace.marketplace_source.source),
-        &codex_home.join("marketplaces").join("unica-local"),
-    )
-}
-
-fn same_existing_path(left: &Path, right: &Path) -> Result<bool> {
-    match (fs::canonicalize(left), fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => Ok(left == right),
-        (Err(left_error), Err(right_error))
-            if left_error.kind() == ErrorKind::NotFound
-                && right_error.kind() == ErrorKind::NotFound =>
-        {
-            Ok(left == right)
-        }
-        (Err(left_error), _) if left_error.kind() == ErrorKind::NotFound => Ok(left == right),
-        (_, Err(right_error)) if right_error.kind() == ErrorKind::NotFound => Ok(left == right),
-        (Err(error), _) | (_, Err(error)) => Err(error.into()),
-    }
+    )?;
+    Ok(relative == Path::new("marketplaces").join("unica-local"))
 }
 
 fn is_owned_canonical_plugin(plugin: &crate::codex::PluginRecord) -> bool {
@@ -349,6 +344,7 @@ fn prove_current_canonical(discovery: CodexDiscovery, codex_home: &Path) -> Resu
         ));
     }
     let root = canonical_plugin_root(codex_home);
+    ensure_path_within_codex_home(codex_home, &root)?;
     if !root.join(".codex-plugin/plugin.json").is_file()
         || !root.join("runtime-manifest.json").is_file()
     {
@@ -377,10 +373,11 @@ fn discovery_signature(discovery: &CodexDiscovery) -> (BTreeSet<String>, BTreeSe
         .iter()
         .map(|marketplace| {
             format!(
-                "{}\0{}\0{}",
+                "{}\0{}\0{}\0{}",
                 marketplace.name,
                 marketplace.marketplace_source.source_type,
-                marketplace.marketplace_source.source
+                marketplace.marketplace_source.source,
+                marketplace.root.as_deref().unwrap_or("")
             )
         })
         .collect();
@@ -452,10 +449,21 @@ impl<R: CommandRunner> MigrationEngine<R> {
         }
 
         let backup = Backup::capture(&self.codex_home, &plan)?;
+        backup.append_diagnostic("migration-started", None)?;
         let mut journal = Vec::new();
         let result = self.apply_steps(&plan, &mut journal, verify);
         if let Err(error) = result {
+            let _ = backup.append_diagnostic("migration-failed", Some(&error.to_string()));
             let rollback = self.rollback(&plan, &journal, &backup);
+            let rollback_detail = rollback.as_ref().err().map(ToString::to_string);
+            let _ = backup.append_diagnostic(
+                if rollback.is_ok() {
+                    "rollback-succeeded"
+                } else {
+                    "rollback-failed"
+                },
+                rollback_detail.as_deref(),
+            );
             return Err(match rollback {
                 Ok(()) => BootstrapError::new(format!(
                     "migration failed and was rolled back to the preflight state; backup: {}; resolve the reported cause and rerun the installer: {error}",
@@ -467,6 +475,7 @@ impl<R: CommandRunner> MigrationEngine<R> {
                 )),
             });
         }
+        let _ = backup.append_diagnostic("migration-succeeded", None);
 
         Ok(MigrationReport {
             changed: true,
@@ -532,7 +541,7 @@ impl<R: CommandRunner> MigrationEngine<R> {
 
         for path in &plan.remove_legacy_paths {
             journal.push(JournalEntry::RemovedLegacyPath(path.clone()));
-            remove_exact_path(path)?;
+            remove_managed_path(&self.codex_home, path)?;
         }
 
         let final_state = discover(&self.runner, &self.codex_home)?;
@@ -631,10 +640,17 @@ struct Backup {
 impl Backup {
     fn capture(codex_home: &Path, plan: &MigrationPlan) -> Result<Self> {
         reject_symlinked_config(codex_home)?;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| {
+                BootstrapError::new(format!("system clock before Unix epoch: {error}"))
+            })?
+            .as_secs();
         let root = codex_home
             .join("unica")
             .join("migration-backups")
-            .join(Uuid::new_v4().to_string());
+            .join(format!("{timestamp}-{}", Uuid::new_v4()));
+        ensure_path_within_codex_home(codex_home, &root)?;
         create_private_dir_all(&root)?;
         let config_path = codex_home.join("config.toml");
         let (config, config_permissions) = if config_path.is_file() {
@@ -658,6 +674,10 @@ impl Backup {
             &root.join("snapshot.json"),
             &serde_json::to_vec_pretty(&snapshot)?,
         )?;
+        write_private_file(
+            &root.join("diagnostics.jsonl"),
+            format!("{{\"timestampUnix\":{timestamp},\"event\":\"backup-captured\"}}\n").as_bytes(),
+        )?;
         for path in &plan.remove_legacy_paths {
             let destination = backup_path(&root, "legacy-paths", codex_home, path)?;
             copy_path(path, &destination)?;
@@ -673,7 +693,29 @@ impl Backup {
         })
     }
 
+    fn append_diagnostic(&self, event: &str, detail: Option<&str>) -> Result<()> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| {
+                BootstrapError::new(format!("system clock before Unix epoch: {error}"))
+            })?
+            .as_secs();
+        let record = serde_json::json!({
+            "timestampUnix": timestamp,
+            "event": event,
+            "detail": detail.map(redact_diagnostic),
+        });
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(self.root.join("diagnostics.jsonl"))?;
+        serde_json::to_writer(&mut file, &record)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        Ok(())
+    }
+
     fn restore_config(&self, codex_home: &Path) -> Result<()> {
+        reject_symlinked_config(codex_home)?;
         let config_path = codex_home.join("config.toml");
         match &self.config {
             Some(bytes) => {
@@ -693,8 +735,9 @@ impl Backup {
     fn restore_legacy_path(&self, codex_home: &Path, path: &Path) -> Result<()> {
         let source = backup_path(&self.root, "legacy-paths", codex_home, path)?;
         if path_exists(path)? {
-            remove_exact_path(path)?;
+            remove_managed_path(codex_home, path)?;
         }
+        ensure_path_within_codex_home(codex_home, path)?;
         copy_path(&source, path)
     }
 
@@ -702,8 +745,9 @@ impl Backup {
         for path in &plan.preserve_on_rollback_paths {
             let source = backup_path(&self.root, "preserved-paths", codex_home, path)?;
             if path_exists(path)? {
-                remove_exact_path(path)?;
+                remove_managed_path(codex_home, path)?;
             }
+            ensure_path_within_codex_home(codex_home, path)?;
             copy_path(&source, path)?;
         }
         Ok(())
@@ -733,36 +777,101 @@ fn backup_path(
     codex_home: &Path,
     path: &Path,
 ) -> Result<PathBuf> {
-    let relative = relative_to_codex_home(codex_home, path).map_err(|_| {
+    let relative = managed_relative_path(codex_home, path)?;
+    let destination = backup_root.join(category).join(relative);
+    managed_relative_path(backup_root, &destination)?;
+    Ok(destination)
+}
+
+fn managed_relative_path(codex_home: &Path, path: &Path) -> Result<PathBuf> {
+    let canonical_home = fs::canonicalize(codex_home).map_err(|error| {
         BootstrapError::new(format!(
-            "refusing to back up legacy path outside Codex home: {}",
-            path.display()
+            "failed to resolve Codex home {}: {error}",
+            codex_home.display()
         ))
     })?;
-    Ok(backup_root.join(category).join(relative))
-}
-
-fn relative_to_codex_home(codex_home: &Path, path: &Path) -> std::result::Result<PathBuf, ()> {
-    if let Ok(relative) = path.strip_prefix(codex_home) {
-        return Ok(relative.to_path_buf());
-    }
-    let canonical_home = fs::canonicalize(codex_home).map_err(|_| ())?;
-    let canonical_path = fs::canonicalize(path).map_err(|_| ())?;
-    canonical_path
-        .strip_prefix(canonical_home)
-        .map(Path::to_path_buf)
-        .map_err(|_| ())
-}
-
-fn ensure_path_within_codex_home(codex_home: &Path, path: &Path) -> Result<()> {
-    relative_to_codex_home(codex_home, path)
-        .map(|_| ())
+    let relative = path
+        .strip_prefix(codex_home)
+        .or_else(|_| path.strip_prefix(&canonical_home))
         .map_err(|_| {
             BootstrapError::new(format!(
                 "refusing to manage path outside Codex home: {}",
                 path.display()
             ))
+        })?;
+    let mut normalized = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(BootstrapError::new(format!(
+                    "refusing to manage path with unsafe components: {}",
+                    path.display()
+                )))
+            }
+        }
+    }
+
+    let mut current = canonical_home.clone();
+    let mut ancestor_missing = false;
+    for component in normalized.components() {
+        current.push(component.as_os_str());
+        if ancestor_missing {
+            continue;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(BootstrapError::new(format!(
+                    "refusing to manage path through symlinked ancestor: {}",
+                    current.display()
+                )))
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => ancestor_missing = true,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if !ancestor_missing {
+        let resolved = fs::canonicalize(&current)?;
+        if !resolved.starts_with(&canonical_home) {
+            return Err(BootstrapError::new(format!(
+                "refusing to manage resolved path outside Codex home: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(normalized)
+}
+
+fn ensure_path_within_codex_home(codex_home: &Path, path: &Path) -> Result<()> {
+    managed_relative_path(codex_home, path).map(|_| ())
+}
+
+fn redact_diagnostic(value: &str) -> String {
+    value
+        .lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if [
+                "authorization",
+                "credential",
+                "password",
+                "secret",
+                "token",
+                "api_key",
+                "apikey",
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle))
+            {
+                "[redacted]"
+            } else {
+                line
+            }
         })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn path_exists(path: &Path) -> Result<bool> {
@@ -841,4 +950,9 @@ fn remove_exact_path(path: &Path) -> Result<()> {
         fs::remove_file(path)?;
     }
     Ok(())
+}
+
+fn remove_managed_path(codex_home: &Path, path: &Path) -> Result<()> {
+    ensure_path_within_codex_home(codex_home, path)?;
+    remove_exact_path(path)
 }

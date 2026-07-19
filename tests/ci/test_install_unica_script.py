@@ -75,6 +75,7 @@ class InstallUnicaScriptTests(unittest.TestCase):
                 ],
             )
             self.assertIn("Migration backup", result.stdout)
+            self.assertIn("Open a new Codex task or restart the client", result.stdout)
 
     def test_shim_contains_no_legacy_archive_or_manual_config_mutation(self) -> None:
         text = SCRIPT.read_text(encoding="utf-8")
@@ -93,6 +94,7 @@ class InstallUnicaScriptTests(unittest.TestCase):
         self.assertIn('MARKETPLACE_REF="${UNICA_MARKETPLACE_REF:-main}"', text)
         self.assertIn("migrate-preflight", text)
         self.assertIn("migrate", text)
+        self.assertIn("Open a new Codex task or restart the client", text)
 
     def write_fake_git(self, path: Path) -> None:
         self.write_executable(
@@ -135,6 +137,7 @@ class InstallUnicaPowerShellScriptTests(unittest.TestCase):
         self.assertIn("unica-bootstrap.exe", text)
         self.assertIn('"migrate-preflight"', text)
         self.assertIn('"migrate"', text)
+        self.assertIn("Open a new Codex task or restart the client", text)
         self.assertNotIn("pwsh", lower)
         self.assertNotIn("bash", lower)
         self.assertNotIn("invoke-webrequest", lower)
