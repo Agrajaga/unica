@@ -1,7 +1,10 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use toml_edit::{DocumentMut, Item, TableLike};
 
 use unica_bootstrap::{
     classify_discovery, BootstrapError, CodexDiscovery, CommandRunner, CommandSpec,
@@ -59,6 +62,31 @@ fn canonical_plugin(version: &str) -> PluginRecord {
     }
 }
 
+fn materialize_contract_fixture(contents: &str, codex_home: &str) -> serde_json::Value {
+    fn replace_token(value: &mut serde_json::Value, codex_home: &str) {
+        match value {
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    replace_token(item, codex_home);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for item in fields.values_mut() {
+                    replace_token(item, codex_home);
+                }
+            }
+            serde_json::Value::String(text) => {
+                *text = text.replace("${CODEX_HOME}", codex_home);
+            }
+            _ => {}
+        }
+    }
+
+    let mut value: serde_json::Value = serde_json::from_str(contents).unwrap();
+    replace_token(&mut value, codex_home);
+    value
+}
+
 #[test]
 fn parses_current_empty_codex_json_contract() {
     let marketplaces: MarketplaceList =
@@ -69,6 +97,56 @@ fn parses_current_empty_codex_json_contract() {
     assert!(marketplaces.marketplaces.is_empty());
     assert!(plugins.installed.is_empty());
     assert!(plugins.available.is_empty());
+}
+
+#[test]
+fn parses_codex_0_145_contract_when_unrelated_marketplace_omits_source() {
+    let codex_home = temp_root("codex-0-145-contract");
+    let home = codex_home.to_string_lossy();
+    let metadata: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/codex-0.145.0-alpha.18/metadata.json"
+    ))
+    .unwrap();
+    let marketplaces = materialize_contract_fixture(
+        include_str!("fixtures/codex-0.145.0-alpha.18/marketplaces-local.json"),
+        &home,
+    );
+    let plugins = materialize_contract_fixture(
+        include_str!("fixtures/codex-0.145.0-alpha.18/plugins-installed.json"),
+        &home,
+    );
+
+    let discovery = CodexDiscovery {
+        marketplaces: serde_json::from_value(marketplaces).unwrap(),
+        plugins: serde_json::from_value(plugins).unwrap(),
+    };
+    let plan = classify_discovery(discovery, &codex_home).unwrap();
+
+    assert_eq!(metadata["codexVersion"], "codex-cli 0.145.0-alpha.18");
+    assert_eq!(metadata["captureKind"], "minimized-from-real-output");
+    assert_eq!(
+        metadata["officialRelease"]["windowsAssetSha256"],
+        "f719bcb43de2bcfed3af1055e53a57fa9b7ed00dcbce70c13ec71fd1f41ba86a"
+    );
+    assert_eq!(plan.remove_plugin_ids, vec!["unica@unica"]);
+    assert_eq!(plan.remove_marketplaces, vec!["unica"]);
+    assert!(plan.add_canonical_marketplace);
+    assert!(plan.install_canonical_plugin);
+}
+
+#[test]
+fn codex_contract_fixture_materializes_a_windows_root_as_json_data() {
+    let marketplaces = materialize_contract_fixture(
+        include_str!("fixtures/codex-0.145.0-alpha.18/marketplaces-local.json"),
+        r"D:\a\unica\codex-home",
+    );
+
+    let parsed: MarketplaceList = serde_json::from_value(marketplaces).unwrap();
+
+    assert_eq!(
+        parsed.marketplaces[1].root.as_deref(),
+        Some(r"D:\a\unica\codex-home/marketplaces/unica-local")
+    );
 }
 
 #[test]
@@ -377,6 +455,86 @@ fn unknown_owner_of_reserved_unica_name_fails_before_mutation() {
 }
 
 #[test]
+fn reserved_unica_without_source_is_rejected_as_missing_identity() {
+    let marketplaces: MarketplaceList =
+        serde_json::from_str(r#"{"marketplaces":[{"name":"unica","root":"/unknown"}]}"#).unwrap();
+    let discovery = CodexDiscovery {
+        marketplaces,
+        plugins: PluginList::default(),
+    };
+
+    let error = classify_discovery(discovery, Path::new("/codex-home")).unwrap_err();
+
+    assert!(
+        error.to_string().contains("missing source identity"),
+        "{error}"
+    );
+}
+
+#[test]
+fn source_less_unica_root_is_owned_only_with_the_official_v061_contract() {
+    let codex_home = temp_root("source-less-unica-v061");
+    let legacy_root = codex_home.join("marketplaces/unica");
+    let manifest_dir = legacy_root.join("plugins/unica/.codex-plugin");
+    let legacy_cache = codex_home.join("plugins/cache/unica/unica");
+    fs::create_dir_all(&manifest_dir).unwrap();
+    fs::create_dir_all(&legacy_cache).unwrap();
+    fs::write(
+        manifest_dir.join("plugin.json"),
+        r#"{
+          "name": "unica",
+          "version": "0.6.1",
+          "repository": "https://github.com/IngvarConsulting/unica"
+        }"#,
+    )
+    .unwrap();
+    let discovery = CodexDiscovery {
+        marketplaces: MarketplaceList {
+            marketplaces: vec![MarketplaceRecord {
+                name: "unica".to_string(),
+                root: Some(legacy_root.to_string_lossy().into_owned()),
+                marketplace_source: MarketplaceSource::default(),
+                extra: Default::default(),
+            }],
+            ..Default::default()
+        },
+        plugins: PluginList::default(),
+    };
+
+    let plan = classify_discovery(discovery, &codex_home).unwrap();
+
+    assert_eq!(plan.remove_marketplaces, vec!["unica"]);
+    assert!(plan.remove_legacy_paths.contains(&legacy_root));
+    assert!(plan.remove_legacy_paths.contains(&legacy_cache));
+}
+
+#[test]
+fn source_less_unica_root_with_an_unknown_package_contract_is_rejected() {
+    let codex_home = temp_root("source-less-unica-unknown");
+    let legacy_root = codex_home.join("marketplaces/unica");
+    fs::create_dir_all(&legacy_root).unwrap();
+    let discovery = CodexDiscovery {
+        marketplaces: MarketplaceList {
+            marketplaces: vec![MarketplaceRecord {
+                name: "unica".to_string(),
+                root: Some(legacy_root.to_string_lossy().into_owned()),
+                marketplace_source: MarketplaceSource::default(),
+                extra: Default::default(),
+            }],
+            ..Default::default()
+        },
+        plugins: PluginList::default(),
+    };
+
+    let error = classify_discovery(discovery, &codex_home).unwrap_err();
+
+    assert!(
+        error.to_string().contains("missing source identity"),
+        "{error}"
+    );
+}
+
+#[test]
 fn canonical_source_matching_only_by_substring_is_rejected() {
     let discovery = CodexDiscovery {
         marketplaces: MarketplaceList {
@@ -525,6 +683,256 @@ fn previous_canonical_version_updates_and_verifies_installed_plugin_root() {
     );
     assert!(current_plugin_root(&codex_home).is_dir());
     assert!(!codex_home.join("plugins/cache/unica/unica/0.7.2").exists());
+}
+
+#[test]
+fn canonical_update_preserves_direct_canonical_plugin_setting() {
+    let codex_home = previous_canonical_home("update-preserves-settings");
+    fs::write(
+        codex_home.join("config.toml"),
+        canonical_config_with_user_owned_settings(),
+    )
+    .unwrap();
+    let runner = NativeCodexMutationRunner::new(codex_home.clone());
+    let engine = MigrationEngine::new(codex_home.clone(), runner);
+    let plan = classify_discovery(previous_canonical_discovery(&codex_home), &codex_home).unwrap();
+
+    engine.apply(plan, |_| Ok(())).unwrap();
+
+    assert_canonical_direct_user_setting(&codex_home);
+}
+
+#[test]
+fn canonical_update_preserves_nested_canonical_plugin_setting() {
+    let codex_home = previous_canonical_home("update-preserves-nested-setting");
+    fs::write(
+        codex_home.join("config.toml"),
+        canonical_config_with_user_owned_settings(),
+    )
+    .unwrap();
+    let runner = NativeCodexMutationRunner::new(codex_home.clone());
+    let engine = MigrationEngine::new(codex_home.clone(), runner);
+    let plan = classify_discovery(previous_canonical_discovery(&codex_home), &codex_home).unwrap();
+
+    engine.apply(plan, |_| Ok(())).unwrap();
+
+    assert_canonical_nested_user_owned_server(&codex_home);
+}
+
+#[test]
+fn orphan_alias_removal_without_install_preserves_direct_canonical_setting() {
+    let codex_home = orphaned_legacy_home("orphan-preserves-settings");
+    fs::write(
+        codex_home.join("config.toml"),
+        format!(
+            "[plugins.\"unica@unica-local\"]\nenabled = true\n\n{}",
+            canonical_config_with_user_owned_settings()
+        ),
+    )
+    .unwrap();
+    let runner = OrphanCleanupRunner::new(codex_home.clone(), false);
+    let engine = MigrationEngine::new(codex_home.clone(), runner);
+    let plan = classify_discovery(canonical_discovery(), &codex_home).unwrap();
+    assert!(!plan.install_canonical_plugin);
+
+    engine.apply(plan, |_| Ok(())).unwrap();
+
+    assert_alias_plugin_table_is_absent(&codex_home);
+    assert_canonical_direct_user_setting(&codex_home);
+}
+
+#[test]
+fn orphan_alias_removal_without_install_preserves_nested_canonical_setting() {
+    let codex_home = orphaned_legacy_home("orphan-preserves-nested-setting");
+    fs::write(
+        codex_home.join("config.toml"),
+        format!(
+            "[plugins.\"unica@unica-local\"]\nenabled = true\n\n{}",
+            canonical_config_with_user_owned_settings()
+        ),
+    )
+    .unwrap();
+    let runner = OrphanCleanupRunner::new(codex_home.clone(), false);
+    let engine = MigrationEngine::new(codex_home.clone(), runner);
+    let plan = classify_discovery(canonical_discovery(), &codex_home).unwrap();
+    assert!(!plan.install_canonical_plugin);
+
+    engine.apply(plan, |_| Ok(())).unwrap();
+
+    assert_alias_plugin_table_is_absent(&codex_home);
+    assert_canonical_nested_user_owned_server(&codex_home);
+}
+
+#[test]
+fn migration_without_plugin_mutation_does_not_rewrite_config() {
+    let codex_home = temp_root("path-only-keeps-config-bytes");
+    let original =
+        b"# keep exact formatting\n[plugins.\"unica@unica\"]\nenabled=true # keep spacing\n";
+    fs::write(codex_home.join("config.toml"), original).unwrap();
+    fs::create_dir_all(codex_home.join("marketplaces/unica-local")).unwrap();
+    fs::create_dir_all(codex_home.join("plugins/cache/unica-local")).unwrap();
+    write_current_plugin_package(&codex_home);
+    let runner = OrphanCleanupRunner::new(codex_home.clone(), false);
+    let engine = MigrationEngine::new(codex_home.clone(), runner);
+    let plan = classify_discovery(canonical_discovery(), &codex_home).unwrap();
+    assert!(plan.remove_plugin_ids.is_empty());
+    assert!(!plan.install_canonical_plugin);
+    assert!(!plan.remove_legacy_paths.is_empty());
+
+    engine.apply(plan, |_| Ok(())).unwrap();
+
+    assert_eq!(fs::read(codex_home.join("config.toml")).unwrap(), original);
+}
+
+#[test]
+fn canonical_update_overlays_user_values_onto_fresh_table_and_preserves_decorations() {
+    let codex_home = previous_canonical_home("update-merges-fresh-and-user-settings");
+    fs::write(
+        codex_home.join("config.toml"),
+        "[plugins.\"unica@unica\"]\n\
+         enabled = false # stale installer value\n\
+         inline_user = { mode = \"fast\", tags = [\"one\", \"two\"] } # keep inline comment\n\
+         user_array = [\n\
+           \"alpha\", # keep array comment\n\
+           \"beta\",\n\
+         ]\n",
+    )
+    .unwrap();
+    let runner = NativeCodexMutationRunner::new(codex_home.clone());
+    let engine = MigrationEngine::new(codex_home.clone(), runner);
+    let plan = classify_discovery(previous_canonical_discovery(&codex_home), &codex_home).unwrap();
+
+    engine.apply(plan, |_| Ok(())).unwrap();
+
+    let rendered = fs::read_to_string(codex_home.join("config.toml")).unwrap();
+    let config: DocumentMut = rendered.parse().unwrap();
+    let canonical = canonical_plugin_table(&config);
+    assert_eq!(
+        canonical.get("fresh_metadata").and_then(Item::as_str),
+        Some("generated-by-codex")
+    );
+    assert_eq!(
+        canonical
+            .get("inline_user")
+            .and_then(Item::as_inline_table)
+            .and_then(|table| table.get("mode"))
+            .and_then(|value| value.as_str()),
+        Some("fast")
+    );
+    assert_eq!(
+        canonical
+            .get("user_array")
+            .and_then(Item::as_array)
+            .map(|array| array.len()),
+        Some(2)
+    );
+    assert!(rendered.contains("# fresh Codex metadata"), "{rendered}");
+    assert!(rendered.contains("# keep inline comment"), "{rendered}");
+    assert!(rendered.contains("# keep array comment"), "{rendered}");
+    assert!(!rendered.contains("# stale installer value"), "{rendered}");
+}
+
+#[test]
+fn windows_atomic_replace_source_uses_supported_flags_and_partial_failure_states() {
+    let source = include_str!("../src/migration.rs");
+
+    assert!(
+        !source.contains("REPLACEFILE_WRITE_THROUGH"),
+        "ReplaceFileW documents REPLACEFILE_WRITE_THROUGH as unsupported"
+    );
+    for documented_error in [
+        "ERROR_UNABLE_TO_REMOVE_REPLACED",
+        "ERROR_UNABLE_TO_MOVE_REPLACEMENT",
+        "ERROR_UNABLE_TO_MOVE_REPLACEMENT_2",
+    ] {
+        assert!(
+            source.contains(documented_error),
+            "Windows replacement must handle {documented_error} explicitly"
+        );
+    }
+    assert!(
+        !source.contains("let _ = fs::remove_file(&backup)"),
+        "successful Windows replacement must not hide backup cleanup failures"
+    );
+    assert!(
+        source.contains("retained recovery artifact"),
+        "backup cleanup errors must identify the retained recovery artifact"
+    );
+}
+
+#[test]
+fn exact_issue_90_duplicate_migration_removes_alias_and_preserves_direct_canonical_setting() {
+    let codex_home = temp_root("issue-90-preserves-settings");
+    fs::write(
+        codex_home.join("config.toml"),
+        format!(
+            "{}\n[plugins.\"unica@unica-local\"]\nenabled = true\nalias_user_setting = \"remove me\"\n",
+            canonical_config_with_user_owned_settings()
+        ),
+    )
+    .unwrap();
+    let legacy_root = codex_home.join("marketplaces/unica-local");
+    let alias_cache = codex_home.join("plugins/cache/unica-local");
+    fs::create_dir_all(&legacy_root).unwrap();
+    fs::create_dir_all(&alias_cache).unwrap();
+    fs::write(alias_cache.join("marker"), "legacy alias cache").unwrap();
+
+    let runner = NativeCodexMutationRunner::for_issue_90(codex_home.clone());
+    let marketplaces = runner.marketplaces();
+    let commands = runner.commands();
+    let engine = MigrationEngine::new(codex_home.clone(), runner);
+    let plan = classify_discovery(issue_90_duplicate_discovery(&codex_home), &codex_home).unwrap();
+
+    engine.apply(plan, |_| Ok(())).unwrap();
+
+    assert_canonical_marketplace_removals(&commands, &marketplaces);
+    assert!(!alias_cache.exists());
+    assert_alias_plugin_table_is_absent(&codex_home);
+    assert_canonical_direct_user_setting(&codex_home);
+}
+
+#[test]
+fn exact_issue_90_duplicate_migration_removes_alias_and_preserves_nested_canonical_setting() {
+    let codex_home = temp_root("issue-90-preserves-nested-setting");
+    fs::write(
+        codex_home.join("config.toml"),
+        format!(
+            "{}\n[plugins.\"unica@unica-local\"]\nenabled = true\nalias_user_setting = \"remove me\"\n",
+            canonical_config_with_user_owned_settings()
+        ),
+    )
+    .unwrap();
+    let legacy_root = codex_home.join("marketplaces/unica-local");
+    let alias_cache = codex_home.join("plugins/cache/unica-local");
+    fs::create_dir_all(&legacy_root).unwrap();
+    fs::create_dir_all(&alias_cache).unwrap();
+    fs::write(alias_cache.join("marker"), "legacy alias cache").unwrap();
+
+    let runner = NativeCodexMutationRunner::for_issue_90(codex_home.clone());
+    let marketplaces = runner.marketplaces();
+    let commands = runner.commands();
+    let engine = MigrationEngine::new(codex_home.clone(), runner);
+    let plan = classify_discovery(issue_90_duplicate_discovery(&codex_home), &codex_home).unwrap();
+
+    engine.apply(plan, |_| Ok(())).unwrap();
+
+    assert_canonical_marketplace_removals(&commands, &marketplaces);
+    assert!(!alias_cache.exists());
+    assert_alias_plugin_table_is_absent(&codex_home);
+    assert_canonical_nested_user_owned_server(&codex_home);
+}
+
+#[test]
+#[should_panic(expected = "canonical Codex enable flag must stay true")]
+fn setting_assertions_reject_a_disabled_canonical_plugin() {
+    let codex_home = temp_root("disabled-canonical-setting");
+    fs::write(
+        codex_home.join("config.toml"),
+        canonical_config_with_user_owned_settings().replace("enabled = true", "enabled = false"),
+    )
+    .unwrap();
+
+    assert_canonical_direct_user_setting(&codex_home);
 }
 
 #[test]
@@ -702,6 +1110,26 @@ fn previous_canonical_discovery(codex_home: &Path) -> CodexDiscovery {
     discovery
 }
 
+fn issue_90_duplicate_discovery(codex_home: &Path) -> CodexDiscovery {
+    let source = codex_home.join("marketplaces/unica-local");
+    CodexDiscovery {
+        marketplaces: MarketplaceList {
+            marketplaces: vec![
+                marketplace("unica", "local", &source.to_string_lossy()),
+                marketplace("unica-local", "local", &source.to_string_lossy()),
+            ],
+            ..Default::default()
+        },
+        plugins: PluginList {
+            installed: vec![
+                plugin("unica@unica", "unica", true),
+                plugin("unica@unica-local", "unica-local", true),
+            ],
+            ..Default::default()
+        },
+    }
+}
+
 fn current_plugin_root(codex_home: &Path) -> PathBuf {
     codex_home
         .join("plugins/cache/unica/unica")
@@ -722,6 +1150,126 @@ fn previous_canonical_home(name: &str) -> PathBuf {
 
 fn canonical_config() -> &'static str {
     "[plugins.\"unica@unica\"]\nenabled = true\n"
+}
+
+fn canonical_config_with_user_owned_settings() -> &'static str {
+    "model = \"gpt-5\"\n\
+     [plugins.\"unica@unica\"]\n\
+     enabled = true\n\
+     direct_user_setting = \"keep me\"\n\
+     \n\
+     [plugins.\"unica@unica\".mcp_servers.user_owned]\n\
+     command = \"user-owned-command\"\n\
+     args = [\"--persist\"]\n"
+}
+
+fn parsed_config(codex_home: &Path) -> DocumentMut {
+    fs::read_to_string(codex_home.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+fn plugin_table<'a>(config: &'a DocumentMut, plugin_id: &str) -> &'a dyn TableLike {
+    config["plugins"]
+        .as_table_like()
+        .and_then(|plugins| plugins.get(plugin_id))
+        .and_then(Item::as_table_like)
+        .unwrap_or_else(|| panic!("missing [plugins.\"{plugin_id}\"] table in {config}"))
+}
+
+fn canonical_plugin_table(config: &DocumentMut) -> &dyn TableLike {
+    let canonical = plugin_table(config, "unica@unica");
+    assert_eq!(
+        canonical.get("enabled").and_then(Item::as_bool),
+        Some(true),
+        "canonical Codex enable flag must stay true at plugins.\"unica@unica\".enabled"
+    );
+    canonical
+}
+
+fn assert_canonical_direct_user_setting(codex_home: &Path) {
+    let config = parsed_config(codex_home);
+    let canonical = canonical_plugin_table(&config);
+
+    assert_eq!(
+        canonical.get("direct_user_setting").and_then(Item::as_str),
+        Some("keep me"),
+        "direct setting must remain directly owned by [plugins.\"unica@unica\"]"
+    );
+}
+
+fn assert_canonical_nested_user_owned_server(codex_home: &Path) {
+    let config = parsed_config(codex_home);
+    let canonical = canonical_plugin_table(&config);
+    let mcp_servers = canonical
+        .get("mcp_servers")
+        .and_then(Item::as_table_like)
+        .expect("missing [plugins.\"unica@unica\".mcp_servers] table");
+    let user_owned = mcp_servers
+        .get("user_owned")
+        .and_then(Item::as_table_like)
+        .expect("missing [plugins.\"unica@unica\".mcp_servers.user_owned] table");
+
+    assert_eq!(
+        user_owned.get("command").and_then(Item::as_str),
+        Some("user-owned-command"),
+        "nested command must remain owned by [plugins.\"unica@unica\".mcp_servers.user_owned]"
+    );
+    assert_eq!(
+        user_owned
+            .get("args")
+            .and_then(Item::as_array)
+            .and_then(|args| args.get(0))
+            .and_then(|arg| arg.as_str()),
+        Some("--persist"),
+        "nested args must remain owned by [plugins.\"unica@unica\".mcp_servers.user_owned]"
+    );
+}
+
+fn assert_alias_plugin_table_is_absent(codex_home: &Path) {
+    let config = parsed_config(codex_home);
+    let plugins = config["plugins"]
+        .as_table_like()
+        .expect("missing [plugins] table");
+
+    assert!(
+        plugins.get("unica@unica-local").is_none(),
+        "legacy alias must not remain below [plugins]"
+    );
+}
+
+fn assert_canonical_marketplace_removals(
+    commands: &Arc<Mutex<Vec<CommandSpec>>>,
+    marketplaces: &Arc<Mutex<BTreeSet<String>>>,
+) {
+    let commands = commands.lock().unwrap();
+    for marketplace in ["unica", "unica-local"] {
+        assert!(
+            commands.iter().any(|command| {
+                command.args
+                    == [
+                        "plugin".to_string(),
+                        "marketplace".to_string(),
+                        "remove".to_string(),
+                        marketplace.to_string(),
+                        "--json".to_string(),
+                    ]
+            }),
+            "migration did not invoke Codex marketplace removal for {marketplace}"
+        );
+    }
+    drop(commands);
+    assert_eq!(
+        marketplaces
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["unica".to_string()],
+        "the runner's live marketplace registry must reflect those removals"
+    );
 }
 
 fn orphaned_legacy_home(name: &str) -> PathBuf {
@@ -954,6 +1502,189 @@ impl CommandRunner for CanonicalUpdateRunner {
         }
         Err(BootstrapError::new(format!(
             "unexpected update command: {} {:?}",
+            command.program, command.args
+        )))
+    }
+}
+
+struct NativeCodexMutationRunner {
+    codex_home: PathBuf,
+    marketplaces: Arc<Mutex<BTreeSet<String>>>,
+    commands: Arc<Mutex<Vec<CommandSpec>>>,
+}
+
+impl NativeCodexMutationRunner {
+    fn new(codex_home: PathBuf) -> Self {
+        Self::with_marketplaces(codex_home, ["unica"])
+    }
+
+    fn for_issue_90(codex_home: PathBuf) -> Self {
+        Self::with_marketplaces(codex_home, ["unica", "unica-local"])
+    }
+
+    fn with_marketplaces<const N: usize>(codex_home: PathBuf, marketplaces: [&str; N]) -> Self {
+        Self {
+            codex_home,
+            marketplaces: Arc::new(Mutex::new(
+                marketplaces.into_iter().map(str::to_string).collect(),
+            )),
+            commands: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn marketplaces(&self) -> Arc<Mutex<BTreeSet<String>>> {
+        Arc::clone(&self.marketplaces)
+    }
+
+    fn commands(&self) -> Arc<Mutex<Vec<CommandSpec>>> {
+        Arc::clone(&self.commands)
+    }
+
+    fn marketplace_discovery(&self) -> MarketplaceList {
+        let marketplaces = self.marketplaces.lock().unwrap();
+        MarketplaceList {
+            marketplaces: marketplaces
+                .iter()
+                .map(|name| {
+                    if name == "unica" {
+                        canonical_discovery().marketplaces.marketplaces.remove(0)
+                    } else {
+                        marketplace(
+                            name,
+                            "local",
+                            &self
+                                .codex_home
+                                .join("marketplaces")
+                                .join(name)
+                                .to_string_lossy(),
+                        )
+                    }
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn remove_plugin_config_table(&self, plugin_id: &str) {
+        let config_path = self.codex_home.join("config.toml");
+        let mut config: DocumentMut = fs::read_to_string(&config_path).unwrap().parse().unwrap();
+        let plugins = config["plugins"]
+            .as_table_like_mut()
+            .expect("native Codex plugin removal requires [plugins]");
+        assert!(
+            plugins.remove(plugin_id).is_some(),
+            "native Codex plugin removal requires [plugins.\"{plugin_id}\"]"
+        );
+
+        fs::write(config_path, config.to_string()).unwrap();
+    }
+
+    fn add_canonical_plugin_config(&self) {
+        let config_path = self.codex_home.join("config.toml");
+        let mut config: DocumentMut = fs::read_to_string(&config_path).unwrap().parse().unwrap();
+        if !config.as_table().contains_key("plugins") {
+            config["plugins"] = Item::Table(toml_edit::Table::new());
+        }
+        let plugins = config["plugins"]
+            .as_table_like_mut()
+            .expect("native Codex plugin installation requires [plugins]");
+        let mut canonical = toml_edit::Table::new();
+        canonical["enabled"] = toml_edit::value(true);
+        canonical["fresh_metadata"] = toml_edit::value("generated-by-codex");
+        canonical["fresh_metadata"]
+            .as_value_mut()
+            .unwrap()
+            .decor_mut()
+            .set_suffix(" # fresh Codex metadata");
+        plugins.insert("unica@unica", Item::Table(canonical));
+
+        fs::write(config_path, config.to_string()).unwrap();
+    }
+}
+
+impl CommandRunner for NativeCodexMutationRunner {
+    fn run(&self, command: &CommandSpec) -> Result<String> {
+        self.commands.lock().unwrap().push(command.clone());
+        if command.program == "git" {
+            return Ok(String::new());
+        }
+        if command
+            .args
+            .ends_with(&["marketplace".into(), "list".into(), "--json".into()])
+        {
+            return Ok(serde_json::to_string(&self.marketplace_discovery()).unwrap());
+        }
+        if command
+            .args
+            .ends_with(&["list".into(), "--available".into(), "--json".into()])
+        {
+            return Ok(serde_json::to_string(&canonical_discovery().plugins).unwrap());
+        }
+        if command.args.len() == 4
+            && command.args[0] == "plugin"
+            && command.args[1] == "remove"
+            && command.args[3] == "--json"
+        {
+            self.remove_plugin_config_table(&command.args[2]);
+            if command.args[2] == "unica@unica" {
+                let cache = self.codex_home.join("plugins/cache/unica/unica");
+                if cache.exists() {
+                    fs::remove_dir_all(cache).unwrap();
+                }
+            }
+            return Ok("{}".to_string());
+        }
+        if command.args
+            == [
+                "plugin".to_string(),
+                "marketplace".to_string(),
+                "upgrade".to_string(),
+                "unica".to_string(),
+                "--json".to_string(),
+            ]
+        {
+            return Ok("{}".to_string());
+        }
+        if command.args.len() == 7
+            && command.args[0] == "plugin"
+            && command.args[1] == "marketplace"
+            && command.args[2] == "add"
+            && command.args[6] == "--json"
+        {
+            self.marketplaces
+                .lock()
+                .unwrap()
+                .insert("unica".to_string());
+            return Ok("{}".to_string());
+        }
+        if command.args
+            == [
+                "plugin".to_string(),
+                "add".to_string(),
+                "unica@unica".to_string(),
+                "--json".to_string(),
+            ]
+        {
+            self.add_canonical_plugin_config();
+            write_current_plugin_package(&self.codex_home);
+            return Ok("{}".to_string());
+        }
+        if command.args.len() == 5
+            && command.args[0] == "plugin"
+            && command.args[1] == "marketplace"
+            && command.args[2] == "remove"
+            && command.args[4] == "--json"
+        {
+            let marketplace = &command.args[3];
+            if !self.marketplaces.lock().unwrap().remove(marketplace) {
+                return Err(BootstrapError::new(format!(
+                    "native Codex marketplace {marketplace} was not registered"
+                )));
+            }
+            return Ok("{}".to_string());
+        }
+        Err(BootstrapError::new(format!(
+            "unexpected native Codex mutation command: {} {:?}",
             command.program, command.args
         )))
     }

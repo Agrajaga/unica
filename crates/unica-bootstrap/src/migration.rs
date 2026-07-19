@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
+use toml_edit::{DocumentMut, Item};
 use uuid::Uuid;
 
 use crate::codex::{discover, CodexDiscovery, CommandRunner, CommandSpec, MarketplaceRecord};
@@ -18,7 +19,7 @@ pub const CANONICAL_REF: &str = "main";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CANONICAL_HTTPS_SOURCE: &str = "https://github.com/ingvarconsulting/unica-marketplace";
 const LEGACY_PLUGIN_SELECTOR: &str = "unica@unica-local";
-const LEGACY_PLUGIN_CONFIG_TABLE: &str = "[plugins.\"unica@unica-local\"]";
+const LEGACY_V061_REPOSITORY: &str = "https://github.com/IngvarConsulting/unica";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,13 +68,12 @@ pub fn classify_discovery(discovery: CodexDiscovery, codex_home: &Path) -> Resul
     let original_discovery = discovery.clone();
     let mut canonical_marketplace = None;
     let mut legacy_marketplaces = BTreeMap::new();
-    for marketplace in &discovery.marketplaces.marketplaces {
+    for discovered_marketplace in &discovery.marketplaces.marketplaces {
+        let marketplace = normalize_marketplace_identity(discovered_marketplace, codex_home)?;
         match marketplace.name.as_str() {
-            "unica" if is_canonical(marketplace) => {
-                canonical_marketplace = Some(marketplace.clone())
-            }
-            "unica" if is_known_legacy_local(marketplace, codex_home)? => {
-                legacy_marketplaces.insert(marketplace.name.clone(), marketplace.clone());
+            "unica" if is_canonical(&marketplace) => canonical_marketplace = Some(marketplace),
+            "unica" if is_known_legacy_local(&marketplace, codex_home)? => {
+                legacy_marketplaces.insert(marketplace.name.clone(), marketplace);
             }
             "unica" => {
                 return Err(BootstrapError::new(format!(
@@ -81,8 +81,8 @@ pub fn classify_discovery(discovery: CodexDiscovery, codex_home: &Path) -> Resul
                     marketplace.marketplace_source.source
                 )));
             }
-            "unica-local" if is_known_legacy_local(marketplace, codex_home)? => {
-                legacy_marketplaces.insert(marketplace.name.clone(), marketplace.clone());
+            "unica-local" if is_known_legacy_local(&marketplace, codex_home)? => {
+                legacy_marketplaces.insert(marketplace.name.clone(), marketplace);
             }
             "unica-local" => {
                 return Err(BootstrapError::new(format!(
@@ -148,7 +148,7 @@ pub fn classify_discovery(discovery: CodexDiscovery, codex_home: &Path) -> Resul
         add_canonical_marketplace,
         upgrade_canonical_marketplace,
         install_canonical_plugin,
-        remove_legacy_paths: existing_legacy_paths(codex_home)?,
+        remove_legacy_paths: existing_legacy_paths(codex_home, &legacy_marketplaces)?,
         preserve_on_rollback_paths,
         canonical_plugin_root: canonical_plugin_root(codex_home),
         legacy_marketplaces,
@@ -181,16 +181,79 @@ fn config_has_legacy_plugin(codex_home: &Path) -> Result<bool> {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
     };
-    Ok(config
-        .lines()
-        .any(|line| line.trim() == LEGACY_PLUGIN_CONFIG_TABLE))
+    let config = parse_codex_config(&config_path, &config)?;
+    let Some(plugins) = config.as_table().get("plugins") else {
+        return Ok(false);
+    };
+    let plugins = plugins.as_table_like().ok_or_else(|| {
+        BootstrapError::new(format!(
+            "unsupported Codex config {}: plugins must be a table",
+            config_path.display()
+        ))
+    })?;
+    Ok(plugins.contains_key("unica@unica-local"))
 }
 
-fn existing_legacy_paths(codex_home: &Path) -> Result<Vec<PathBuf>> {
-    let candidates = [
+fn parse_codex_config(path: &Path, config: &str) -> Result<DocumentMut> {
+    config.parse().map_err(|error| {
+        BootstrapError::new(format!("invalid Codex config {}: {error}", path.display()))
+    })
+}
+
+fn capture_canonical_user_settings(
+    config_path: &Path,
+    config: &DocumentMut,
+) -> Result<Option<Item>> {
+    let Some(plugins) = config.as_table().get("plugins") else {
+        return Ok(None);
+    };
+    let plugins = plugins.as_table_like().ok_or_else(|| {
+        BootstrapError::new(format!(
+            "unsupported Codex config {}: plugins must be a table",
+            config_path.display()
+        ))
+    })?;
+    let Some(canonical) = plugins.get("unica@unica") else {
+        return Ok(None);
+    };
+    let mut captured = canonical.clone();
+    let canonical = captured.as_table_like_mut().ok_or_else(|| {
+        BootstrapError::new(format!(
+            "unsupported Codex config {}: plugins.\"unica@unica\" must be a table",
+            config_path.display()
+        ))
+    })?;
+    canonical.remove("enabled");
+    Ok(Some(captured))
+}
+
+fn existing_legacy_paths(
+    codex_home: &Path,
+    legacy_marketplaces: &BTreeMap<String, MarketplaceRecord>,
+) -> Result<Vec<PathBuf>> {
+    let mut candidates = vec![
         codex_home.join("marketplaces").join("unica-local"),
         codex_home.join("plugins").join("cache").join("unica-local"),
     ];
+    candidates.extend(
+        legacy_marketplaces
+            .values()
+            .map(|marketplace| PathBuf::from(&marketplace.marketplace_source.source)),
+    );
+    if legacy_marketplaces.contains_key("unica-local") {
+        candidates.push(codex_home.join("plugins").join("cache").join("unica-local"));
+    }
+    if legacy_marketplaces.contains_key("unica") {
+        candidates.push(
+            codex_home
+                .join("plugins")
+                .join("cache")
+                .join("unica")
+                .join("unica"),
+        );
+    }
+    candidates.sort();
+    candidates.dedup();
     candidates
         .into_iter()
         .filter_map(|path| match fs::symlink_metadata(&path) {
@@ -262,6 +325,39 @@ fn is_canonical(marketplace: &MarketplaceRecord) -> bool {
         && is_canonical_source(&marketplace.marketplace_source.source)
 }
 
+fn normalize_marketplace_identity(
+    marketplace: &MarketplaceRecord,
+    codex_home: &Path,
+) -> Result<MarketplaceRecord> {
+    let mut normalized = marketplace.clone();
+    if !matches!(normalized.name.as_str(), "unica" | "unica-local") {
+        return Ok(normalized);
+    }
+
+    let source_type_missing = normalized.marketplace_source.source_type.trim().is_empty();
+    let source_missing = normalized.marketplace_source.source.trim().is_empty();
+    if !source_type_missing && !source_missing {
+        return Ok(normalized);
+    }
+
+    if source_type_missing && source_missing {
+        if let Some(root) = normalized.root.as_deref().map(Path::new) {
+            let exact_known_root = root == codex_home.join("marketplaces").join("unica-local")
+                || root == codex_home.join("marketplaces").join("unica");
+            if exact_known_root && is_owned_legacy_root(codex_home, root)? {
+                normalized.marketplace_source.source_type = "local".to_string();
+                normalized.marketplace_source.source = root.to_string_lossy().into_owned();
+                return Ok(normalized);
+            }
+        }
+    }
+
+    Err(BootstrapError::new(format!(
+        "reserved marketplace name {} is missing source identity",
+        normalized.name
+    )))
+}
+
 fn is_canonical_source(source: &str) -> bool {
     let normalized = source
         .trim()
@@ -278,11 +374,38 @@ fn is_known_legacy_local(marketplace: &MarketplaceRecord, codex_home: &Path) -> 
     if marketplace.marketplace_source.source_type != "local" {
         return Ok(false);
     }
-    let relative = managed_relative_path(
+    is_owned_legacy_root(
         codex_home,
         Path::new(&marketplace.marketplace_source.source),
-    )?;
-    Ok(relative == Path::new("marketplaces").join("unica-local"))
+    )
+}
+
+fn is_owned_legacy_root(codex_home: &Path, root: &Path) -> Result<bool> {
+    let relative = managed_relative_path(codex_home, root)?;
+    if relative == Path::new("marketplaces").join("unica-local") {
+        return Ok(true);
+    }
+    if relative != Path::new("marketplaces").join("unica") {
+        return Ok(false);
+    }
+
+    let manifest_path = root.join("plugins/unica/.codex-plugin/plugin.json");
+    let manifest = match fs::read_to_string(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let manifest: Value = serde_json::from_str(&manifest).map_err(|error| {
+        BootstrapError::new(format!(
+            "invalid legacy Unica manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    Ok(
+        manifest.get("name").and_then(Value::as_str) == Some("unica")
+            && manifest.get("version").and_then(Value::as_str) == Some("0.6.1")
+            && manifest.get("repository").and_then(Value::as_str) == Some(LEGACY_V061_REPOSITORY),
+    )
 }
 
 fn is_owned_canonical_plugin(plugin: &crate::codex::PluginRecord) -> bool {
@@ -451,7 +574,12 @@ impl<R: CommandRunner> MigrationEngine<R> {
         let backup = Backup::capture(&self.codex_home, &plan)?;
         backup.append_diagnostic("migration-started", None)?;
         let mut journal = Vec::new();
-        let result = self.apply_steps(&plan, &mut journal, verify);
+        let result = self.apply_steps(
+            &plan,
+            &mut journal,
+            backup.canonical_user_settings.as_ref(),
+            verify,
+        );
         if let Err(error) = result {
             let _ = backup.append_diagnostic("migration-failed", Some(&error.to_string()));
             let rollback = self.rollback(&plan, &journal, &backup);
@@ -492,17 +620,20 @@ impl<R: CommandRunner> MigrationEngine<R> {
         &self,
         plan: &MigrationPlan,
         journal: &mut Vec<JournalEntry>,
+        canonical_user_settings: Option<&Item>,
         verify: F,
     ) -> Result<()>
     where
         F: FnOnce(&Path) -> Result<()>,
     {
+        let mut plugin_config_mutated = false;
         for plugin_id in &plan.remove_plugin_ids {
             journal.push(JournalEntry::RemovedPlugin {
                 id: plugin_id.clone(),
                 restore_via_cli: plan.discovered_legacy_plugins.contains(plugin_id),
             });
             self.run_codex(&["plugin", "remove", plugin_id, "--json"])?;
+            plugin_config_mutated = true;
         }
         for marketplace in &plan.remove_marketplaces {
             journal.push(JournalEntry::RemovedMarketplace(marketplace.clone()));
@@ -533,6 +664,12 @@ impl<R: CommandRunner> MigrationEngine<R> {
         if plan.install_canonical_plugin {
             journal.push(JournalEntry::AddedCanonicalPlugin);
             self.run_codex(&["plugin", "add", "unica@unica", "--json"])?;
+            plugin_config_mutated = true;
+        }
+        if plugin_config_mutated {
+            if let Some(settings) = canonical_user_settings {
+                restore_canonical_user_settings(&self.codex_home, settings)?;
+            }
         }
 
         let current = discover(&self.runner, &self.codex_home)?;
@@ -651,11 +788,32 @@ struct Backup {
     root: PathBuf,
     config: Option<Vec<u8>>,
     config_permissions: Option<Permissions>,
+    canonical_user_settings: Option<Item>,
 }
 
 impl Backup {
     fn capture(codex_home: &Path, plan: &MigrationPlan) -> Result<Self> {
         reject_symlinked_config(codex_home)?;
+        let config_path = codex_home.join("config.toml");
+        let (config, config_permissions, canonical_user_settings) = if config_path.is_file() {
+            let metadata = fs::symlink_metadata(&config_path)?;
+            let bytes = fs::read(&config_path)?;
+            let text = std::str::from_utf8(&bytes).map_err(|error| {
+                BootstrapError::new(format!(
+                    "invalid Codex config {}: config is not UTF-8: {error}",
+                    config_path.display()
+                ))
+            })?;
+            let document = parse_codex_config(&config_path, text)?;
+            let canonical_user_settings = capture_canonical_user_settings(&config_path, &document)?;
+            (
+                Some(bytes),
+                Some(metadata.permissions()),
+                canonical_user_settings,
+            )
+        } else {
+            (None, None, None)
+        };
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| {
@@ -668,15 +826,9 @@ impl Backup {
             .join(format!("{timestamp}-{}", Uuid::new_v4()));
         ensure_path_within_codex_home(codex_home, &root)?;
         create_private_dir_all(&root)?;
-        let config_path = codex_home.join("config.toml");
-        let (config, config_permissions) = if config_path.is_file() {
-            let metadata = fs::symlink_metadata(&config_path)?;
-            let bytes = fs::read(&config_path)?;
-            write_private_file(&root.join("config.toml"), &bytes)?;
-            (Some(bytes), Some(metadata.permissions()))
-        } else {
-            (None, None)
-        };
+        if let Some(bytes) = &config {
+            write_private_file(&root.join("config.toml"), bytes)?;
+        }
         let snapshot = serde_json::json!({
             "schemaVersion": 2,
             "removePluginIds": plan.remove_plugin_ids,
@@ -685,6 +837,7 @@ impl Backup {
             "removeLegacyPaths": plan.remove_legacy_paths,
             "preserveOnRollbackPaths": plan.preserve_on_rollback_paths,
             "configExisted": config.is_some(),
+            "canonicalUserSettingsCaptured": canonical_user_settings.is_some(),
         });
         write_private_file(
             &root.join("snapshot.json"),
@@ -706,6 +859,7 @@ impl Backup {
             root,
             config,
             config_permissions,
+            canonical_user_settings,
         })
     }
 
@@ -735,12 +889,12 @@ impl Backup {
         let config_path = codex_home.join("config.toml");
         match &self.config {
             Some(bytes) => {
-                let temporary = codex_home.join(format!(".config.toml.restore-{}", Uuid::new_v4()));
-                write_private_file(&temporary, bytes)?;
-                if let Some(permissions) = &self.config_permissions {
-                    fs::set_permissions(&temporary, permissions.clone())?;
-                }
-                replace_config_file(&temporary, &config_path)?;
+                atomic_write_config(
+                    &config_path,
+                    bytes,
+                    self.config_permissions.as_ref(),
+                    "restore",
+                )?;
             }
             None if config_path.exists() => fs::remove_file(config_path)?,
             None => {}
@@ -770,6 +924,114 @@ impl Backup {
     }
 }
 
+fn restore_canonical_user_settings(codex_home: &Path, captured: &Item) -> Result<()> {
+    reject_symlinked_config(codex_home)?;
+    let config_path = codex_home.join("config.toml");
+    let metadata = fs::symlink_metadata(&config_path).map_err(|error| {
+        BootstrapError::new(format!(
+            "failed to preserve canonical Unica settings in {}: {error}",
+            config_path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(BootstrapError::new(format!(
+            "failed to preserve canonical Unica settings: {} is not a regular file",
+            config_path.display()
+        )));
+    }
+    let config = fs::read_to_string(&config_path)?;
+    let mut config = parse_codex_config(&config_path, &config)?;
+
+    let captured_table = captured.as_table_like().ok_or_else(|| {
+        BootstrapError::new(
+            "failed to preserve canonical Unica settings: captured subtree is not a table",
+        )
+    })?;
+    let captured_entries = captured_table
+        .iter()
+        .filter(|(name, _)| *name != "enabled")
+        .map(|(name, item)| {
+            (
+                captured_table
+                    .key(name)
+                    .expect("iterated TOML table key must exist")
+                    .clone(),
+                item.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let plugins = config
+        .as_table_mut()
+        .get_mut("plugins")
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| {
+            BootstrapError::new(format!(
+                "failed to preserve canonical Unica settings in {}: plugins must be a table",
+                config_path.display()
+            ))
+        })?;
+    let canonical = plugins
+        .get_mut("unica@unica")
+        .ok_or_else(|| {
+            BootstrapError::new(format!(
+                "failed to preserve canonical Unica settings in {}: plugin mutation did not retain plugins.\"unica@unica\"",
+                config_path.display()
+            ))
+        })?
+        .as_table_like_mut()
+        .ok_or_else(|| {
+            BootstrapError::new(format!(
+                "failed to preserve canonical Unica settings in {}: plugins.\"unica@unica\" must be a table",
+                config_path.display()
+            ))
+        })?;
+    if !canonical.contains_key("enabled") {
+        return Err(BootstrapError::new(format!(
+            "failed to preserve canonical Unica settings in {}: plugin mutation did not retain enabled",
+            config_path.display()
+        )));
+    }
+    for (key, item) in captured_entries {
+        *canonical.entry_format(&key).or_insert(Item::None) = item;
+    }
+
+    atomic_write_config(
+        &config_path,
+        config.to_string().as_bytes(),
+        Some(&metadata.permissions()),
+        "preserve",
+    )
+}
+
+fn atomic_write_config(
+    destination: &Path,
+    bytes: &[u8],
+    permissions: Option<&Permissions>,
+    purpose: &str,
+) -> Result<()> {
+    let parent = destination.parent().ok_or_else(|| {
+        BootstrapError::new(format!(
+            "Codex config has no parent directory: {}",
+            destination.display()
+        ))
+    })?;
+    let temporary = parent.join(format!(".config.toml.{purpose}-{}", Uuid::new_v4()));
+    write_private_file(&temporary, bytes)?;
+    if let Some(permissions) = permissions {
+        if let Err(error) = fs::set_permissions(&temporary, permissions.clone()) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+    }
+    let result = replace_config_file(&temporary, destination);
+    #[cfg(not(windows))]
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 #[cfg(not(windows))]
 fn replace_config_file(source: &Path, destination: &Path) -> Result<()> {
     fs::rename(source, destination)?;
@@ -778,13 +1040,143 @@ fn replace_config_file(source: &Path, destination: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn replace_config_file(source: &Path, destination: &Path) -> Result<()> {
-    match fs::remove_file(destination) {
-        Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
     }
-    fs::rename(source, destination)?;
-    Ok(())
+
+    let destination_exists = match fs::symlink_metadata(destination) {
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !destination_exists {
+        let moved = unsafe {
+            MoveFileExW(
+                wide(source).as_ptr(),
+                wide(destination).as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        return if moved == 0 {
+            Err(BootstrapError::new(format!(
+                "failed to move replacement {} to {}: {}; replacement retained for recovery",
+                source.display(),
+                destination.display(),
+                std::io::Error::last_os_error()
+            )))
+        } else {
+            Ok(())
+        };
+    }
+
+    // All three paths are siblings so ReplaceFileW stays on one volume. Supplying a
+    // backup name makes its documented partial failures recoverable: in particular,
+    // ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 moves the old destination to `backup` while
+    // leaving the replacement at `source`. The unsupported WRITE_THROUGH replacement
+    // flag is deliberately not used; the replacement file itself was sync_all'ed.
+    let parent = destination.parent().ok_or_else(|| {
+        BootstrapError::new(format!(
+            "Codex config has no parent directory: {}",
+            destination.display()
+        ))
+    })?;
+    let backup = parent.join(format!(".config.toml.replace-backup-{}", Uuid::new_v4()));
+    let replaced = unsafe {
+        ReplaceFileW(
+            wide(destination).as_ptr(),
+            wide(source).as_ptr(),
+            wide(&backup).as_ptr(),
+            0,
+            ptr::null(),
+            ptr::null(),
+        )
+    };
+    if replaced != 0 {
+        remove_windows_replace_backup(&backup)?;
+        return Ok(());
+    }
+
+    let replace_error = std::io::Error::last_os_error();
+    match windows_replace_failure_state(replace_error.raw_os_error()) {
+        WindowsReplaceFailureState::NamesUnchanged => Err(BootstrapError::new(format!(
+            "failed to atomically replace {} with {}: {replace_error}; destination and replacement retained for recovery",
+            destination.display(),
+            source.display()
+        ))),
+        WindowsReplaceFailureState::DestinationMovedToBackup => {
+            let completed = unsafe {
+                MoveFileExW(
+                    wide(source).as_ptr(),
+                    wide(destination).as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if completed == 0 {
+                return Err(BootstrapError::new(format!(
+                    "failed to atomically replace {} with {}: {replace_error}; completion also failed: {}; replacement {} and original backup {} retained for recovery",
+                    destination.display(),
+                    source.display(),
+                    std::io::Error::last_os_error(),
+                    source.display(),
+                    backup.display()
+                )));
+            }
+            remove_windows_replace_backup(&backup)?;
+            Ok(())
+        }
+        WindowsReplaceFailureState::OtherNamesUnchanged => Err(BootstrapError::new(format!(
+            "failed to atomically replace {} with {}: {replace_error}; replacement retained for recovery",
+            destination.display(),
+            source.display()
+        ))),
+    }
+}
+
+#[cfg(any(windows, test))]
+const ERROR_UNABLE_TO_REMOVE_REPLACED: i32 = 1175;
+#[cfg(any(windows, test))]
+const ERROR_UNABLE_TO_MOVE_REPLACEMENT: i32 = 1176;
+#[cfg(any(windows, test))]
+const ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsReplaceFailureState {
+    NamesUnchanged,
+    DestinationMovedToBackup,
+    OtherNamesUnchanged,
+}
+
+#[cfg(any(windows, test))]
+fn windows_replace_failure_state(error_code: Option<i32>) -> WindowsReplaceFailureState {
+    match error_code {
+        Some(ERROR_UNABLE_TO_REMOVE_REPLACED | ERROR_UNABLE_TO_MOVE_REPLACEMENT) => {
+            WindowsReplaceFailureState::NamesUnchanged
+        }
+        Some(ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) => {
+            WindowsReplaceFailureState::DestinationMovedToBackup
+        }
+        _ => WindowsReplaceFailureState::OtherNamesUnchanged,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn remove_windows_replace_backup(backup: &Path) -> Result<()> {
+    match fs::remove_file(backup) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(BootstrapError::new(format!(
+            "atomic config replacement succeeded but failed to delete retained recovery artifact {}: {error}",
+            backup.display()
+        ))),
+    }
 }
 
 fn backup_path(
@@ -971,4 +1363,70 @@ fn remove_exact_path(path: &Path) -> Result<()> {
 fn remove_managed_path(codex_home: &Path, path: &Path) -> Result<()> {
     ensure_path_within_codex_home(codex_home, path)?;
     remove_exact_path(path)
+}
+
+#[cfg(test)]
+mod windows_replace_failure_tests {
+    use super::{
+        remove_windows_replace_backup, windows_replace_failure_state, WindowsReplaceFailureState,
+    };
+    use std::fs;
+
+    #[test]
+    fn documented_unchanged_name_failures_do_not_request_recovery_move() {
+        for error_code in [1175, 1176] {
+            assert_eq!(
+                windows_replace_failure_state(Some(error_code)),
+                WindowsReplaceFailureState::NamesUnchanged
+            );
+        }
+    }
+
+    #[test]
+    fn documented_moved_destination_failure_requests_completion_from_replacement() {
+        assert_eq!(
+            windows_replace_failure_state(Some(1177)),
+            WindowsReplaceFailureState::DestinationMovedToBackup
+        );
+    }
+
+    #[test]
+    fn all_other_failures_keep_the_replacement_as_a_recovery_artifact() {
+        assert_eq!(
+            windows_replace_failure_state(Some(87)),
+            WindowsReplaceFailureState::OtherNamesUnchanged
+        );
+        assert_eq!(
+            windows_replace_failure_state(None),
+            WindowsReplaceFailureState::OtherNamesUnchanged
+        );
+    }
+
+    #[test]
+    fn backup_cleanup_failure_reports_the_retained_artifact_path() {
+        let backup = std::env::temp_dir().join(format!(
+            ".config.toml.replace-backup-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&backup).unwrap();
+
+        let error = remove_windows_replace_backup(&backup).unwrap_err();
+
+        assert!(error.to_string().contains("retained recovery artifact"));
+        assert!(error
+            .to_string()
+            .contains(&backup.to_string_lossy().to_string()));
+        assert!(backup.is_dir());
+        fs::remove_dir(backup).unwrap();
+    }
+
+    #[test]
+    fn backup_cleanup_accepts_an_already_absent_artifact() {
+        let backup = std::env::temp_dir().join(format!(
+            ".config.toml.replace-backup-missing-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        remove_windows_replace_backup(&backup).unwrap();
+    }
 }

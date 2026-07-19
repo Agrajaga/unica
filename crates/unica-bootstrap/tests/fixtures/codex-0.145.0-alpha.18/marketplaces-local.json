@@ -1,0 +1,12 @@
+{
+  "marketplaces": [
+    {
+      "name": "openai-curated",
+      "root": "${CODEX_HOME}/.tmp/plugins"
+    },
+    {
+      "name": "unica",
+      "root": "${CODEX_HOME}/marketplaces/unica-local"
+    }
+  ]
+}
