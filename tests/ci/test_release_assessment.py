@@ -31,6 +31,28 @@ def load_bsp_harvest_module():
 
 
 class ReleaseAssessmentTests(unittest.TestCase):
+    def write_response_id_mcp(self, path: Path, response_ids: list[int]) -> None:
+        path.write_text(
+            f"""#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import sys
+
+message = json.loads(sys.stdin.readline())
+for response_id in {json.dumps(response_ids)}:
+    print(json.dumps({{
+        "jsonrpc": "2.0",
+        "id": response_id,
+        "result": {{"content": [{{"type": "text", "text": "ok"}}]}},
+    }}), flush=True)
+for _raw in sys.stdin:
+    pass
+""",
+            encoding="utf-8",
+        )
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
     def write_eof_sensitive_mcp(self, path: Path) -> None:
         path.write_text(
             """#!/usr/bin/env python3
@@ -54,6 +76,7 @@ def respond(message):
     print(json.dumps(response), flush=True)
 
 for raw in sys.stdin:
+    print(json.dumps({"jsonrpc": "2.0", "method": "notifications/progress", "params": {}}), flush=True)
     worker = threading.Thread(target=respond, args=(json.loads(raw),))
     worker.start()
     workers.append(worker)
@@ -189,6 +212,165 @@ for raw in sys.stdin:
             self.assertEqual(returncode, 0, stderr)
             self.assertEqual(len(responses), 1)
             self.assertNotIn("error", responses[0])
+
+    def test_mcp_client_rejects_unexpected_response_id(self) -> None:
+        module = load_assessment_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_mcp = root / ("run-unica.py" if os.name == "nt" else "run-unica")
+            self.write_response_id_mcp(fake_mcp, [999])
+
+            responses, _duration_ms, _stdout, _stderr, _returncode = module.call_mcp(
+                fake_mcp,
+                [module.tool_call_message(1, "unica.cf.info", {})],
+                cwd=root,
+                cache_dir=root / "cache",
+                timeout_seconds=2,
+            )
+
+            self.assertTrue(
+                any("unexpected JSON-RPC response id" in response.get("error", {}).get("message", "") for response in responses)
+            )
+
+    def test_mcp_client_rejects_duplicate_response_id(self) -> None:
+        module = load_assessment_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_mcp = root / ("run-unica.py" if os.name == "nt" else "run-unica")
+            self.write_response_id_mcp(fake_mcp, [1, 1])
+
+            responses, _duration_ms, _stdout, _stderr, _returncode = module.call_mcp(
+                fake_mcp,
+                [module.tool_call_message(1, "unica.cf.info", {})],
+                cwd=root,
+                cache_dir=root / "cache",
+                timeout_seconds=2,
+            )
+
+            self.assertTrue(
+                any("duplicate JSON-RPC response id" in response.get("error", {}).get("message", "") for response in responses)
+            )
+
+    def test_mcp_client_returns_responses_in_request_order(self) -> None:
+        module = load_assessment_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_mcp = root / ("run-unica.py" if os.name == "nt" else "run-unica")
+            self.write_response_id_mcp(fake_mcp, [2, 1])
+
+            responses, _duration_ms, _stdout, _stderr, _returncode = module.call_mcp(
+                fake_mcp,
+                [
+                    module.tool_call_message(1, "unica.project.status", {}),
+                    module.tool_call_message(2, "unica.project.map", {}),
+                ],
+                cwd=root,
+                cache_dir=root / "cache",
+                timeout_seconds=2,
+            )
+
+            self.assertEqual([response.get("id") for response in responses], [1, 2])
+
+    def test_mcp_client_reports_invalid_json_line(self) -> None:
+        module = load_assessment_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_mcp = root / ("run-unica.py" if os.name == "nt" else "run-unica")
+            fake_mcp.write_text(
+                "#!/usr/bin/env python3\nimport sys\nsys.stdin.readline()\nprint('not-json', flush=True)\nfor _raw in sys.stdin: pass\n",
+                encoding="utf-8",
+            )
+            fake_mcp.chmod(fake_mcp.stat().st_mode | stat.S_IXUSR)
+
+            responses, _duration_ms, _stdout, _stderr, _returncode = module.call_mcp(
+                fake_mcp,
+                [module.tool_call_message(1, "unica.cf.info", {})],
+                cwd=root,
+                cache_dir=root / "cache",
+                timeout_seconds=2,
+            )
+
+            self.assertTrue(
+                any("invalid JSON-RPC line" in response.get("error", {}).get("message", "") for response in responses)
+            )
+
+    def test_mcp_client_preserves_early_exit_stderr(self) -> None:
+        module = load_assessment_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_mcp = root / ("run-unica.py" if os.name == "nt" else "run-unica")
+            fake_mcp.write_text(
+                "#!/usr/bin/env python3\nimport sys\nsys.stderr.write('fatal stderr\\n')\nsys.stderr.flush()\nraise SystemExit(7)\n",
+                encoding="utf-8",
+            )
+            fake_mcp.chmod(fake_mcp.stat().st_mode | stat.S_IXUSR)
+
+            responses, _duration_ms, _stdout, stderr, returncode = module.call_mcp(
+                fake_mcp,
+                [module.tool_call_message(1, "unica.cf.info", {})],
+                cwd=root,
+                cache_dir=root / "cache",
+                timeout_seconds=2,
+            )
+
+            self.assertEqual(returncode, 7)
+            self.assertIn("fatal stderr", stderr)
+            self.assertTrue(any("missing JSON-RPC responses" in response.get("error", {}).get("message", "") for response in responses))
+
+    def test_mcp_client_times_out_and_reaps_silent_process(self) -> None:
+        module = load_assessment_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_mcp = root / ("run-unica.py" if os.name == "nt" else "run-unica")
+            fake_mcp.write_text(
+                "#!/usr/bin/env python3\nimport sys\nimport time\nsys.stdin.readline()\ntime.sleep(60)\n",
+                encoding="utf-8",
+            )
+            fake_mcp.chmod(fake_mcp.stat().st_mode | stat.S_IXUSR)
+
+            responses, duration_ms, _stdout, stderr, returncode = module.call_mcp(
+                fake_mcp,
+                [module.tool_call_message(1, "unica.cf.info", {})],
+                cwd=root,
+                cache_dir=root / "cache",
+                timeout_seconds=0.1,
+            )
+
+            self.assertEqual(responses, [])
+            self.assertEqual(returncode, 124)
+            self.assertIn("timed out", stderr)
+            self.assertLess(duration_ms, 2_000)
+
+    def test_mcp_client_closes_and_reaps_process_after_write_error(self) -> None:
+        module = load_assessment_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_mcp = root / ("run-unica.py" if os.name == "nt" else "run-unica")
+            marker = fake_mcp.with_suffix(".closed")
+            fake_mcp.write_text(
+                "#!/usr/bin/env python3\nfrom pathlib import Path\nPath(__file__).with_suffix('.closed').write_text('closed', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            fake_mcp.chmod(fake_mcp.stat().st_mode | stat.S_IXUSR)
+
+            _responses, _duration_ms, _stdout, stderr, returncode = module.call_mcp(
+                fake_mcp,
+                [module.tool_call_message(1, "unica.cf.info", {"value": "Ж" * 1_000_000})],
+                cwd=root,
+                cache_dir=root / "cache",
+                timeout_seconds=2,
+            )
+
+            self.assertNotEqual(returncode, 0)
+            self.assertIn("failed to write MCP request", stderr)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "closed")
 
     def test_report_rendering_escapes_failure_text(self) -> None:
         module = load_assessment_module()
