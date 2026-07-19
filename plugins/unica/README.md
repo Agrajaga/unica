@@ -32,7 +32,8 @@ or
 [`install-unica.ps1`](https://github.com/IngvarConsulting/unica/releases/download/v0.7.7/install-unica.ps1).
 
 Unica `v0.8.0` supports ordinary marketplace updates only from canonical
-`v0.7.5`, `v0.7.6`, `v0.7.7`, and canonical technical `0.7.x` installations.
+`v0.7.5`, canonical `v0.7.6`, canonical `v0.7.7`, and canonical technical
+`0.7.x` installations.
 The version string alone does not make a local or duplicated installation
 canonical.
 

@@ -51,7 +51,8 @@ codex plugin add unica@unica
 | --- | --- | --- |
 | Unica не установлена | Установить плагин из публичного marketplace обычными командами выше. | Установить актуальную версию из публичного marketplace. |
 | Любая локальная, дублированная или иная legacy-установка, включая версии `0.3.x`–`0.7.x` | Запустить замороженный [`install-unica.sh`](https://github.com/IngvarConsulting/unica/releases/download/v0.7.7/install-unica.sh) либо [`install-unica.ps1`](https://github.com/IngvarConsulting/unica/releases/download/v0.7.7/install-unica.ps1) из релиза `v0.7.7`. | Сначала выполнить миграцию через `v0.7.7`, затем обычное обновление marketplace. |
-| Каноническая установка `v0.7.5`, `v0.7.6` или `v0.7.7` из `IngvarConsulting/unica-marketplace` | Выполнить обычное обновление marketplace. | Поддерживается обычное обновление marketplace. |
+| Каноническая установка `v0.7.5` или `v0.7.6` из `IngvarConsulting/unica-marketplace` | Выполнить обычное обновление marketplace. | Поддерживается обычное обновление marketplace. |
+| Каноническая установка `v0.7.7` | Переход не требуется. | Поддерживается обычное обновление marketplace. |
 | Каноническая техническая версия `0.7.x` | При необходимости перейти на стабильную `v0.7.7` обычным обновлением marketplace. | Поддерживается обычное обновление marketplace. |
 
 Номер версии сам по себе не подтверждает возможность прямого обновления.
