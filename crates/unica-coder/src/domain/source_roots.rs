@@ -203,6 +203,8 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::strip_windows_extended_length_prefix;
     use super::{normalize_path_identity, resolve_source_root};
     use crate::domain::workspace::WorkspaceContext;
     use std::fs;
@@ -392,12 +394,12 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn extended_length_unc_paths_use_regular_unc_identity() {
+    fn extended_length_unc_prefix_is_stripped_without_filesystem_access() {
         let extended = PathBuf::from(r"\\?\UNC\server\share\source");
 
         assert_eq!(
             PathBuf::from(r"\\server\share\source"),
-            normalize_path_identity(&extended).unwrap()
+            strip_windows_extended_length_prefix(&extended)
         );
     }
 

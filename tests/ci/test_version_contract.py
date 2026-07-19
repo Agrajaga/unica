@@ -27,9 +27,9 @@ class VersionContractTests(unittest.TestCase):
         self.assertEqual(
             values,
             {
-                "workspace": "0.7.3",
-                "plugin": "0.7.3",
-                "tools-lock-unica": "0.7.3",
+                "workspace": "0.7.4",
+                "plugin": "0.7.4",
+                "tools-lock-unica": "0.7.4",
             },
         )
 

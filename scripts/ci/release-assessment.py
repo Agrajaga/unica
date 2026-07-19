@@ -9,11 +9,13 @@ import html
 import json
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -163,36 +165,180 @@ def call_mcp(
 ) -> tuple[list[dict[str, Any]], int, str, str, int]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     payload = "\n".join(json.dumps(message, ensure_ascii=False) for message in messages) + "\n"
+    payload.encode("utf-8", errors="strict")
     env = os.environ.copy()
     env["UNICA_CACHE_DIR"] = str(cache_dir)
     started = time.perf_counter()
+    command = [sys.executable, str(run_unica)] if run_unica.suffix == ".py" else [str(run_unica)]
+    deadline = time.monotonic() + timeout_seconds
+    expected_ids = [message["id"] for message in messages if "id" in message]
+
+    def rpc_id_key(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    expected_keys = [rpc_id_key(message_id) for message_id in expected_ids]
+    if len(set(expected_keys)) != len(expected_keys):
+        raise ValueError("MCP request IDs must be unique")
+    expected_key_set = set(expected_keys)
+
+    stdout_queue: queue.Queue[str | None] = queue.Queue()
+    stdout_reader_errors: list[str] = []
+    stderr_parts: list[str] = []
+    responses_by_key: dict[str, dict[str, Any]] = {}
+    protocol_errors: list[dict[str, Any]] = []
+    stdout_lines: list[str] = []
+    process: subprocess.Popen[str] | None = None
+    stdout_thread: threading.Thread | None = None
+    stderr_thread: threading.Thread | None = None
+    timed_out = False
+    write_error = ""
+
+    def protocol_error(message: str) -> None:
+        protocol_errors.append(
+            {"jsonrpc": "2.0", "error": {"code": -32603, "message": message}}
+        )
+
+    def consume_stdout_line(line: str) -> None:
+        stdout_lines.append(line)
+        if not line.strip():
+            return
+        try:
+            response = json.loads(line)
+        except json.JSONDecodeError:
+            protocol_error(f"invalid JSON-RPC line: {line.rstrip()}")
+            return
+        if not isinstance(response, dict):
+            protocol_error("JSON-RPC response must be an object")
+            return
+        if "id" not in response:
+            if "method" in response:
+                return
+            protocol_error("JSON-RPC response is missing id")
+            return
+        key = rpc_id_key(response["id"])
+        if key not in expected_key_set:
+            protocol_error(f"unexpected JSON-RPC response id: {response['id']!r}")
+            return
+        if key in responses_by_key:
+            protocol_error(f"duplicate JSON-RPC response id: {response['id']!r}")
+            return
+        responses_by_key[key] = response
+
+    def read_stdout() -> None:
+        assert process is not None
+        assert process.stdout is not None
+        try:
+            for line in process.stdout:
+                stdout_queue.put(line)
+        except (OSError, UnicodeError) as error:
+            stdout_reader_errors.append(f"failed to read MCP stdout: {error}")
+        finally:
+            stdout_queue.put(None)
+
+    def read_stderr() -> None:
+        assert process is not None
+        assert process.stderr is not None
+        try:
+            stderr_parts.append(process.stderr.read())
+        except (OSError, UnicodeError) as error:
+            stderr_parts.append(f"failed to read MCP stderr: {error}")
+
     try:
-        command = [sys.executable, str(run_unica)] if run_unica.suffix == ".py" else [str(run_unica)]
-        result = subprocess.run(
+        process = subprocess.Popen(
             command,
-            input=payload,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             cwd=cwd,
             env=env,
-            timeout=timeout_seconds,
-            check=False,
+            bufsize=1,
         )
-        duration_ms = int((time.perf_counter() - started) * 1000)
-    except subprocess.TimeoutExpired as error:
-        duration_ms = int((time.perf_counter() - started) * 1000)
-        return [], duration_ms, error.stdout or "", error.stderr or f"timed out after {timeout_seconds}s", 124
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
 
-    responses: list[dict[str, Any]] = []
-    for line in result.stdout.splitlines():
-        if not line.strip():
-            continue
+        assert process.stdin is not None
         try:
-            responses.append(json.loads(line))
-        except json.JSONDecodeError:
-            responses.append({"error": {"message": f"invalid JSON-RPC line: {line}"}})
-    return responses, duration_ms, result.stdout, result.stderr, result.returncode
+            process.stdin.write(payload)
+            process.stdin.flush()
+        except (BrokenPipeError, OSError, UnicodeError) as error:
+            write_error = f"failed to write MCP request: {error}"
+
+        while len(responses_by_key) < len(expected_keys) and not protocol_errors:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                line = stdout_queue.get(timeout=min(remaining, 0.05))
+            except queue.Empty:
+                if process.poll() is not None and stdout_thread is not None and not stdout_thread.is_alive():
+                    break
+                continue
+            if line is None:
+                break
+            consume_stdout_line(line)
+    finally:
+        if process is not None:
+            if process.stdin is not None and not process.stdin.closed:
+                try:
+                    process.stdin.close()
+                except (BrokenPipeError, OSError, UnicodeError) as error:
+                    if not write_error:
+                        write_error = f"failed to close MCP stdin: {error}"
+
+            if process.poll() is None:
+                remaining = max(0.0, deadline - time.monotonic())
+                try:
+                    process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    process.kill()
+                    process.wait()
+
+            if stdout_thread is not None:
+                stdout_thread.join(timeout=1)
+            if stderr_thread is not None:
+                stderr_thread.join(timeout=1)
+            while True:
+                try:
+                    line = stdout_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if line is not None:
+                    consume_stdout_line(line)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    stdout = "".join(stdout_lines)
+    stderr = "".join(stderr_parts)
+    if stdout_reader_errors:
+        protocol_error("; ".join(stdout_reader_errors))
+    if write_error:
+        stderr = f"{write_error}\n{stderr}".strip()
+    if timed_out:
+        return [], duration_ms, stdout, stderr or f"timed out after {timeout_seconds}s", 124
+    responses = [responses_by_key[key] for key in expected_keys if key in responses_by_key]
+    responses.extend(protocol_errors)
+    if len(responses_by_key) < len(expected_keys) and not protocol_errors:
+        missing = [
+            message_id
+            for message_id, key in zip(expected_ids, expected_keys, strict=True)
+            if key not in responses_by_key
+        ]
+        protocol_error(f"missing JSON-RPC responses for ids: {missing!r}")
+        responses.extend(protocol_errors)
+    returncode = process.returncode if process is not None and process.returncode is not None else 1
+    if write_error and returncode == 0:
+        returncode = 1
+    return responses, duration_ms, stdout, stderr, returncode
 
 
 def tool_call_message(message_id: int, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
