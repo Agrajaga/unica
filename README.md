@@ -47,36 +47,45 @@ codex plugin add unica@unica
 
 ## Переход со старой установки и откат
 
-| Исходное состояние | Переход на `v0.7.7` | Переход на `v0.8.0` |
-| --- | --- | --- |
-| Unica не установлена | Установить плагин из публичного marketplace обычными командами выше. | Установить актуальную версию из публичного marketplace. |
-| Любая локальная, дублированная или иная legacy-установка, включая версии `0.3.x`–`0.7.x` | Запустить замороженный [`install-unica.sh`](https://github.com/IngvarConsulting/unica/releases/download/v0.7.7/install-unica.sh) либо [`install-unica.ps1`](https://github.com/IngvarConsulting/unica/releases/download/v0.7.7/install-unica.ps1) из релиза `v0.7.7`. | Сначала выполнить миграцию через `v0.7.7`, затем обычное обновление marketplace. |
-| Каноническая установка `v0.7.5` или `v0.7.6` из `IngvarConsulting/unica-marketplace` | Выполнить обычное обновление marketplace. | Поддерживается обычное обновление marketplace. |
-| Каноническая установка `v0.7.7` | Переход не требуется. | Поддерживается обычное обновление marketplace. |
-| Каноническая техническая версия `0.7.x` | При необходимости перейти на стабильную `v0.7.7` обычным обновлением marketplace. | Поддерживается обычное обновление marketplace. |
+Узнайте свою версию:
 
-Номер версии сам по себе не подтверждает возможность прямого обновления.
-Установка считается канонической, только если зарегистрирован публичный
-marketplace `unica`, установлен ровно один `unica@unica` и отсутствуют старые
-локальные регистрации и управляемые legacy-пути.
+```sh
+codex plugin list
+```
 
-Скрипты релиза `v0.7.7` клонируют стабильный Git-каталог, запускают
-`migrate-preflight`, затем общий нативный transactional bootstrap. Bootstrap
-сохраняет резервную копию в `$CODEX_HOME/unica/migration-backups/`, применяет
-только команды Codex CLI и при ошибке восстанавливает точный `config.toml`,
-прежние регистрации и legacy cache в обратном порядке. Старые каталоги
-удаляются только после checksum-проверки runtime, MCP `initialize`,
-обязательного `tools/list` и проверки prompt-visible skills. Путь резервной
-копии печатается в отчёте.
+В строке `unica@...` смотрите столбец `VERSION`.
 
-Если миграция завершилась ошибкой, автоматический откат уже выполнен; не
-удаляйте cache вручную. Для возврата после успешной миграции сначала удалите
-публичную установку командами ниже, затем используйте инструкции и активы того
-предыдущего релиза, к которому возвращаетесь.
+| Ваша версия | Что делать |
+| --- | --- |
+| `0.3.0`–`0.7.4` | Запустите скрипт миграции ниже. |
+| `0.7.5` и новее | Выполните обычное обновление ниже. |
 
-Начиная с `v0.8.0`, текущий пакет не содержит кода прямой legacy-миграции.
-Замороженные ссылки `v0.7.7` выше остаются поддерживаемой точкой входа для
-старых установок.
+Для версий `0.3.0`–`0.7.4` на macOS и Linux:
+
+```sh
+curl -fLO https://github.com/IngvarConsulting/unica/releases/download/v0.7.8/install-unica.sh
+sh install-unica.sh --ref v0.7.8
+```
+
+Для версий `0.3.0`–`0.7.4` в Windows PowerShell:
+
+```powershell
+Invoke-WebRequest https://github.com/IngvarConsulting/unica/releases/download/v0.7.8/install-unica.ps1 -OutFile install-unica.ps1
+.\install-unica.ps1 -Ref v0.7.8
+```
+
+Для версий `0.7.5` и новее:
+
+```sh
+codex plugin marketplace upgrade unica
+codex plugin remove unica@unica
+codex plugin add unica@unica
+```
+
+Если скрипт завершился ошибкой, предыдущая установка уже восстановлена.
+
+Начиная с `v0.8.0`, текущий пакет не содержит исполняемого кода legacy-миграции:
+для старых установок поддерживается только замороженный bridge `v0.7.8` выше.
 
 ## Удаление
 
@@ -108,7 +117,7 @@ scripts/dev/install-local-unica.sh
 
 - `plugins/unica/skills/` — прикладные навыки 1С;
 - `crates/unica-coder/` — единый MCP runtime `unica`;
-- `crates/unica-bootstrap/` — загрузка, проверка, запуск и миграция;
+- `crates/unica-bootstrap/` — загрузка, проверка и запуск runtime;
 - `plugins/unica/third-party/tools.lock.json` — версии внутренних инструментов;
 - `.github/workflows/unica-plugin-release.yml` — runtime-релиз;
 - `.github/workflows/publish-unica-marketplace.yml` — staging и promotion

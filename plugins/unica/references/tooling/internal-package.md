@@ -42,13 +42,13 @@ Runtime stdout is JSON-RPC only.
 
 ## Frozen migration bridge
 
-The immutable `v0.7.7` release is the only supported entry point for local,
+The immutable `v0.7.8` release is the only supported entry point for local,
 duplicated, or otherwise legacy installations. Its published transition assets
 retain the native transaction engine, rollback behavior, and exact historical
 contracts used to produce a canonical marketplace installation.
 
 The current `v0.8.0` source and thin package do not ship that engine, transition
-scripts, legacy discovery models, or migration commands. Once `v0.7.7` has made
+scripts, legacy discovery models, or migration commands. Once `v0.7.8` has made
 the installation canonical, later versions use the ordinary marketplace update
 path.
 

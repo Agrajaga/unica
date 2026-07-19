@@ -28,11 +28,11 @@ After merge and creation of an immutable signed tag, a promotion PR changes only
 the stable `git-subdir` catalog entry. Existing tags and release bytes are never
 moved; changed bytes require a new version.
 
-Legacy migration is frozen in the immutable `v0.7.7` release, where one native
+Legacy migration is frozen in the immutable `v0.7.8` release, where one native
 transaction engine serves every platform and the shell and PowerShell files are
 acquisition shims rather than separate mutation implementations. Starting with
 `v0.8.0`, current source and marketplace packages contain no legacy migration
-engine or acquisition shims; old installations first cross the `v0.7.7` bridge
+engine or acquisition shims; old installations first cross the `v0.7.8` bridge
 and then use the ordinary marketplace update path.
 
 ## Consequences

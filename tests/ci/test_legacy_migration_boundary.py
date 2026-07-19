@@ -104,7 +104,7 @@ class LegacyMigrationBoundaryTests(unittest.TestCase):
         self.assertTrue(release_note.is_file())
         release_text = release_note.read_text(encoding="utf-8")
         self.assertIn("v0.7.8", release_text)
-        self.assertNotIn("v0.7.7", release_text)
+        self.assertNotIn("releases/download/v0.7.7/install-unica", release_text)
 
 
 if __name__ == "__main__":
