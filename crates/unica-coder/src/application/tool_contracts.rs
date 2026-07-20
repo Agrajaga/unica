@@ -367,6 +367,7 @@ const RUNTIME_CONFIG_INIT_ARGS: &[&str] = &[
     "operation",
     "config",
     "workdir",
+    "sourceSet",
     "connection",
     "format",
     "builder",
