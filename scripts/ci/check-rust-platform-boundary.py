@@ -15,11 +15,11 @@ OS_CFG_TERM = re.compile(
     r"\b(?:windows|unix|target_(?:os|arch|family|env|vendor))\b"
 )
 CFG_INVOCATION = re.compile(r"\bcfg(?:_attr)?!?\s*\(")
-STD_OS = re.compile(r"\bstd\s*::\s*os\b")
-WINDOWS_SYS = re.compile(r"\bwindows_sys\b")
-LAYER_REFERENCE = re.compile(
-    r"\b(?P<prefix>crate|super)\s*::\s*"
-    r"(?P<module>application|infrastructure|interfaces)\b"
+WINDOWS_SYS_PATH = re.compile(
+    r"(?<![\w:])(?:::)?(?P<crate>windows_sys)\s*::"
+)
+WINDOWS_SYS_ROOT_IMPORT = re.compile(
+    r"\b(?:use|extern\s+crate)\s+(?:::)?(?P<crate>windows_sys)\b"
 )
 FORBIDDEN_DOMAIN_IMPORTS = ("application", "infrastructure", "interfaces")
 FORBIDDEN_APPLICATION_IMPORTS = ("infrastructure", "interfaces")
@@ -240,11 +240,11 @@ def _platform_diagnostics(path: PurePosixPath, source: str, masked: str) -> list
             )
         )
 
-    for match in WINDOWS_SYS.finditer(masked):
+    for index in _windows_sys_references(masked):
         diagnostics.append(
             _diagnostic(
                 path,
-                _line_number(source, match.start()),
+                _line_number(source, index),
                 "windows_sys is outside a platform facade",
             )
         )
@@ -267,14 +267,12 @@ def _dependency_diagnostics(path: PurePosixPath, source: str, masked: str) -> li
 
     layer = "domain" if "/src/domain/" in path.as_posix() else "application"
     diagnostics: list[str] = []
-    for reference in LAYER_REFERENCE.finditer(masked):
-        module = reference.group("module")
+    for index, prefix, module in _direct_layer_references(masked):
         if module in forbidden_imports:
-            prefix = reference.group("prefix")
             diagnostics.append(
                 _diagnostic(
                     path,
-                    _line_number(source, reference.start()),
+                    _line_number(source, index),
                     f"{layer} must not reference {prefix}::{module}",
                 )
             )
@@ -305,30 +303,37 @@ def _grouped_use_entries(
     entries: list[tuple[int, str]] = []
     for grouped_use in grouped_use_pattern.finditer(masked):
         opening_brace = grouped_use.end() - 1
-        entry_start = opening_brace + 1
-        depth = 1
-        index = entry_start
-        while index < len(masked) and depth:
-            char = masked[index]
-            if char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    entries.append((entry_start, masked[entry_start:index]))
-                    break
-            elif char == "," and depth == 1:
+        entries.extend(_grouped_entries_at(masked, opening_brace))
+    return entries
+
+
+def _grouped_entries_at(masked: str, opening_brace: int) -> list[tuple[int, str]]:
+    entries: list[tuple[int, str]] = []
+    entry_start = opening_brace + 1
+    depth = 1
+    index = entry_start
+    while index < len(masked) and depth:
+        char = masked[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
                 entries.append((entry_start, masked[entry_start:index]))
-                entry_start = index + 1
-            index += 1
+                break
+        elif char == "," and depth == 1:
+            entries.append((entry_start, masked[entry_start:index]))
+            entry_start = index + 1
+        index += 1
     return entries
 
 
 def _grouped_layer_references(masked: str) -> list[tuple[int, str, str]]:
     references: list[tuple[int, str, str]] = []
     for prefix in ("crate", "super"):
+        roots = (prefix, *_root_aliases(masked, prefix))
         for entry_start, entry in _grouped_use_entries(
-            masked, _grouped_use_pattern((prefix,))
+            masked, _grouped_use_pattern(roots)
         ):
             module = re.match(
                 r"\s*(?P<module>application|infrastructure|interfaces)\b", entry
@@ -344,10 +349,29 @@ def _grouped_layer_references(masked: str) -> list[tuple[int, str, str]]:
     return references
 
 
+def _direct_layer_references(masked: str) -> list[tuple[int, str, str]]:
+    references: list[tuple[int, str, str]] = []
+    for prefix in ("crate", "super"):
+        roots = (prefix, *_root_aliases(masked, prefix))
+        root_options = "|".join(_std_root_pattern(root) for root in roots)
+        reference = re.compile(
+            rf"(?:{root_options})\s*::\s*"
+            r"(?P<module>application|infrastructure|interfaces)\b"
+        )
+        references.extend(
+            (match.start(), prefix, match.group("module"))
+            for match in reference.finditer(masked)
+        )
+    return references
+
+
 def _std_os_references(masked: str) -> list[int]:
-    references = {match.start() for match in STD_OS.finditer(masked)}
+    roots = ("std", *_std_root_aliases(masked))
+    root_options = "|".join(_std_root_pattern(root) for root in roots)
+    direct_reference = re.compile(rf"(?:{root_options})\s*::\s*os\b")
+    references = {match.start() for match in direct_reference.finditer(masked)}
     for entry_start, entry in _grouped_use_entries(
-        masked, _grouped_use_pattern(("std",))
+        masked, _grouped_use_pattern(roots)
     ):
         os_entry = re.match(r"\s*(?P<module>os)\b", entry)
         if os_entry is None:
@@ -375,18 +399,89 @@ def _std_os_references(masked: str) -> list[int]:
     return sorted(references)
 
 
-def _std_root_aliases(masked: str) -> tuple[str, ...]:
-    direct_alias = re.compile(
-        rf"\buse\s+(?:::)?std\s+as\s+(?P<alias>{RUST_IDENTIFIER_PATTERN})\s*;"
+def _root_aliases(masked: str, root: str) -> tuple[str, ...]:
+    """Return unambiguous one-hop aliases without guessing across Rust scopes."""
+    return tuple(
+        sorted(
+            alias
+            for alias, sources in _alias_sources(masked).items()
+            if sources == {root}
+        )
     )
-    aliases = {match.group("alias") for match in direct_alias.finditer(masked)}
-    for _, entry in _grouped_use_entries(masked, _grouped_use_pattern(("std",))):
+
+
+def _alias_sources(masked: str) -> dict[str, set[str]]:
+    aliases: dict[str, set[str]] = {}
+
+    def record(source: str, alias: str) -> None:
+        aliases.setdefault(alias, set()).add(_unqualified_root(source))
+
+    use_path = (
+        rf"(?:::)?{RUST_IDENTIFIER_PATTERN}"
+        rf"(?:\s*::\s*{RUST_IDENTIFIER_PATTERN})*"
+    )
+    direct_alias = re.compile(
+        rf"\buse\s+(?P<source>{use_path})\s+as\s+"
+        rf"(?P<alias>{RUST_IDENTIFIER_PATTERN})\s*;"
+    )
+    for match in direct_alias.finditer(masked):
+        record(match.group("source"), match.group("alias"))
+
+    extern_alias = re.compile(
+        rf"\bextern\s+crate\s+(?P<source>{RUST_IDENTIFIER_PATTERN})\s+as\s+"
+        rf"(?P<alias>{RUST_IDENTIFIER_PATTERN})\s*;"
+    )
+    for match in extern_alias.finditer(masked):
+        record(match.group("source"), match.group("alias"))
+
+    grouped_root = re.compile(rf"\buse\s+(?P<source>{use_path})\s*::\s*\{{")
+    for grouped_use in grouped_root.finditer(masked):
+        for _, entry in _grouped_entries_at(masked, grouped_use.end() - 1):
+            alias = re.match(
+                rf"\s*self\s+as\s+(?P<alias>{RUST_IDENTIFIER_PATTERN})\s*$",
+                entry,
+            )
+            if alias is not None:
+                record(grouped_use.group("source"), alias.group("alias"))
+
+    for _, entry in _grouped_use_entries(masked, re.compile(r"\buse\s*\{")):
         alias = re.match(
-            rf"\s*self\s+as\s+(?P<alias>{RUST_IDENTIFIER_PATTERN})\s*$", entry
+            rf"\s*(?P<source>{use_path})\s+as\s+"
+            rf"(?P<alias>{RUST_IDENTIFIER_PATTERN})\s*$",
+            entry,
         )
         if alias is not None:
-            aliases.add(alias.group("alias"))
-    return tuple(sorted(aliases))
+            record(alias.group("source"), alias.group("alias"))
+
+    return aliases
+
+
+def _unqualified_root(root: str) -> str:
+    root = re.sub(r"\s+", "", root)
+    if root.startswith("::"):
+        root = root[2:]
+    return root
+
+
+def _std_root_aliases(masked: str) -> tuple[str, ...]:
+    return _root_aliases(masked, "std")
+
+
+def _windows_sys_references(masked: str) -> list[int]:
+    references = {
+        match.start("crate") for match in WINDOWS_SYS_PATH.finditer(masked)
+    }
+    references.update(
+        match.start("crate") for match in WINDOWS_SYS_ROOT_IMPORT.finditer(masked)
+    )
+    for entry_start, entry in _grouped_use_entries(masked, re.compile(r"\buse\s*\{")):
+        root_import = re.match(
+            r"\s*(?:::)?(?P<crate>windows_sys)\b",
+            entry,
+        )
+        if root_import is not None:
+            references.add(entry_start + root_import.start("crate"))
+    return sorted(references)
 
 
 def _direct_std_io_roots(masked: str, roots: tuple[str, ...]) -> list[tuple[int, str]]:

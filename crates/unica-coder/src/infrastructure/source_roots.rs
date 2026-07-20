@@ -266,33 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_parent_traversal_after_symlink_outside_workspace() {
-        let context = fixture(&[("main", "CONFIGURATION", "src/cf")]);
-        let outside = temp_workspace("unica-source-roots-parent-outside");
-        let Some(symlink_result) =
-            crate::infrastructure::platform::filesystem::create_dir_symlink_for_test(
-                &outside,
-                context.workspace_root.join("external"),
-            )
-        else {
-            cleanup(&context);
-            let _ = fs::remove_dir_all(outside);
-            return;
-        };
-        symlink_result.unwrap();
-        let escaped = fs::canonicalize(&context.workspace_root)
-            .unwrap()
-            .join("external/../escaped-new");
-
-        let error = resolve_source_root(&context, escaped.to_str()).unwrap_err();
-
-        assert!(error.starts_with("invalid_source_root:"));
-        assert!(error.contains("workspace"));
-        cleanup(&context);
-        let _ = fs::remove_dir_all(outside);
-    }
-
-    #[test]
     fn nonexistent_path_uses_canonical_identity_of_existing_parent() {
         let root = temp_workspace("unica-source-roots-nonexistent");
         let expected = normalize_path_identity(&root).unwrap().join("new/source");

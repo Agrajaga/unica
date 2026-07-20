@@ -73,39 +73,6 @@ fn runtime_job_io_error(context: &str, error: &io::Error) -> String {
     runtime_job_error(&format!("{context}: {error}"))
 }
 
-#[cfg(all(test, unix))]
-pub(crate) fn runtime_job_process_tree_test_command() -> Option<(PathBuf, Vec<String>)> {
-    Some((
-        PathBuf::from("/bin/sh"),
-        vec!["-c".to_string(), "sleep 10 & wait".to_string()],
-    ))
-}
-
-#[cfg(all(test, not(unix)))]
-pub(crate) fn runtime_job_process_tree_test_command() -> Option<(PathBuf, Vec<String>)> {
-    None
-}
-
-#[cfg(all(test, unix))]
-pub(crate) fn runtime_job_process_tree_is_alive(process_id: u32) -> io::Result<bool> {
-    let process_group = i32::try_from(process_id)
-        .map_err(|_| io::Error::other("process id is outside Unix pid range"))?;
-    if unsafe { libc::kill(-process_group, 0) } == 0 {
-        return Ok(true);
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(false)
-    } else {
-        Err(error)
-    }
-}
-
-#[cfg(all(test, not(unix)))]
-pub(crate) fn runtime_job_process_tree_is_alive(_process_id: u32) -> io::Result<bool> {
-    Ok(false)
-}
-
 #[derive(Debug, Clone)]
 pub struct ManagedCommand {
     pub program: PathBuf,
@@ -1113,6 +1080,21 @@ mod tests {
         !process_test_support::is_alive(pid)
     }
 
+    #[cfg(unix)]
+    fn process_group_is_alive(process_id: u32) -> std::io::Result<bool> {
+        let process_group = i32::try_from(process_id)
+            .map_err(|_| std::io::Error::other("process id is outside Unix pid range"))?;
+        if unsafe { libc::kill(-process_group, 0) } == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+
     fn run_helper(
         mode: &str,
         timeout: Duration,
@@ -1210,6 +1192,18 @@ mod tests {
         assert!(output.cancelled);
         assert!(!output.timed_out);
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_runtime_job_cancellation_reaps_the_process_group() {
+        crate::infrastructure::runtime_jobs::assert_system_cancellation_reaps_process_tree(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".to_string(), "sleep 10 & wait".to_string()],
+            |process_id| {
+                process_group_is_alive(process_id).expect("probe runtime-job process group")
+            },
+        );
     }
 
     #[test]

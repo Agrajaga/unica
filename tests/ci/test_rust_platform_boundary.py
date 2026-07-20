@@ -104,6 +104,69 @@ class RustPlatformBoundaryTests(unittest.TestCase):
             ],
         )
 
+    def test_rejects_std_os_through_direct_and_grouped_std_aliases(self) -> None:
+        checker = load_checker_module()
+
+        diagnostics = checker.check_source(
+            "crates/unica-coder/src/infrastructure/process.rs",
+            "use std as platform_std;\n"
+            "use self::platform_std::os::unix::fs::PermissionsExt;\n"
+            "use std::{self as grouped_std};\n"
+            "use grouped_std::{os::windows::io::AsRawHandle};\n"
+            "extern crate std as extern_std;\n"
+            "use extern_std::os::linux::fs::MetadataExt;\n"
+            "use {std as outer_std};\n"
+            "use outer_std::os::macos::fs::MetadataExt as MacMetadataExt;\n",
+        )
+
+        self.assertEqual(
+            diagnostics,
+            [
+                "crates/unica-coder/src/infrastructure/process.rs:2: "
+                "std::os platform module is outside a platform facade",
+                "crates/unica-coder/src/infrastructure/process.rs:4: "
+                "std::os platform module is outside a platform facade",
+                "crates/unica-coder/src/infrastructure/process.rs:6: "
+                "std::os platform module is outside a platform facade",
+                "crates/unica-coder/src/infrastructure/process.rs:8: "
+                "std::os platform module is outside a platform facade",
+            ],
+        )
+
+    def test_alias_shadowing_does_not_cross_lexical_scopes(self) -> None:
+        checker = load_checker_module()
+
+        diagnostics = checker.check_source(
+            "crates/unica-coder/src/infrastructure/process.rs",
+            "mod local { pub mod os { pub fn inspect() {} } }\n"
+            "fn first() { use std as scoped; let _ = scoped::mem::size_of::<u8>(); }\n"
+            "fn second() { use crate::local as scoped; scoped::os::inspect(); }\n",
+        )
+
+        self.assertEqual(diagnostics, [])
+
+    def test_windows_sys_detection_requires_a_crate_path(self) -> None:
+        checker = load_checker_module()
+
+        diagnostics = checker.check_source(
+            "crates/unica-coder/src/infrastructure/process.rs",
+            "let windows_sys = 1;\n"
+            "let _ = windows_sys;\n"
+            "use crate::windows_sys::Local;\n"
+            "use windows_sys::Win32::Foundation::HANDLE;\n"
+            "use {windows_sys as windows};\n",
+        )
+
+        self.assertEqual(
+            diagnostics,
+            [
+                "crates/unica-coder/src/infrastructure/process.rs:4: "
+                "windows_sys is outside a platform facade",
+                "crates/unica-coder/src/infrastructure/process.rs:5: "
+                "windows_sys is outside a platform facade",
+            ],
+        )
+
     def test_cfg_parser_masks_non_code_and_handles_cfg_attr(self) -> None:
         checker = load_checker_module()
 
@@ -204,6 +267,27 @@ class RustPlatformBoundaryTests(unittest.TestCase):
             ],
         )
 
+    def test_rejects_layer_references_through_root_aliases(self) -> None:
+        checker = load_checker_module()
+
+        diagnostics = checker.check_source(
+            "crates/unica-coder/src/application/use_case.rs",
+            "use crate as root;\n"
+            "use self::root::infrastructure::Store;\n"
+            "use super::{self as parent};\n"
+            "use parent::{interfaces::Cli};\n",
+        )
+
+        self.assertEqual(
+            diagnostics,
+            [
+                "crates/unica-coder/src/application/use_case.rs:2: "
+                "application must not reference crate::infrastructure",
+                "crates/unica-coder/src/application/use_case.rs:4: "
+                "application must not reference super::interfaces",
+            ],
+        )
+
     def test_rejects_domain_std_io_in_direct_grouped_and_common_alias_forms(self) -> None:
         checker = load_checker_module()
 
@@ -263,7 +347,7 @@ class RustPlatformBoundaryTests(unittest.TestCase):
             ],
         )
 
-    def test_allows_domain_instance_methods_and_pure_path_operations(self) -> None:
+    def test_allows_business_instance_methods_and_pure_path_operations(self) -> None:
         checker = load_checker_module()
 
         diagnostics = checker.check_source(

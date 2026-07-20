@@ -269,4 +269,36 @@ mod tests {
 
         assert_eq!(verbatim, normalize_path_identity(&verbatim).unwrap());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_root_policy_rejects_parent_traversal_after_directory_symlink() {
+        use crate::infrastructure::source_roots::normalize_contained_source_root;
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!(
+            "unica-source-roots-parent-workspace-{}-{nanos}",
+            std::process::id()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "unica-source-roots-parent-outside-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, workspace.join("external")).unwrap();
+
+        let error =
+            normalize_contained_source_root(&workspace, workspace.join("external/../escaped-new"))
+                .unwrap_err();
+
+        assert!(error.contains("sourceDir must be inside workspace root"));
+        let _ = std::fs::remove_dir_all(workspace);
+        let _ = std::fs::remove_dir_all(outside);
+    }
 }

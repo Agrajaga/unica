@@ -1567,6 +1567,9 @@ fn io_error(context: &str, error: &std::io::Error) -> String {
 }
 
 #[cfg(test)]
+pub(crate) use tests::assert_system_cancellation_reaps_process_tree;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::{
@@ -1755,13 +1758,11 @@ mod tests {
         assert!(!store.active_lock_path().exists());
     }
 
-    #[test]
-    fn system_cancellation_reaps_the_runtime_process_tree() {
-        let Some((program, args)) =
-            crate::infrastructure::platform::runtime_job_process_tree_test_command()
-        else {
-            return;
-        };
+    pub(crate) fn assert_system_cancellation_reaps_process_tree(
+        program: PathBuf,
+        args: Vec<String>,
+        process_tree_is_alive: impl FnOnce(u32) -> bool,
+    ) {
         let cache = TestCache::new();
         fs::create_dir_all(cache.path()).expect("create worker cwd");
         let runner = SystemRuntimeJobRunner {
@@ -1780,8 +1781,7 @@ mod tests {
         cancel_and_reap(&mut *process).expect("cancel and reap process group");
 
         assert!(
-            !crate::infrastructure::platform::runtime_job_process_tree_is_alive(process_id)
-                .expect("probe process tree"),
+            !process_tree_is_alive(process_id),
             "the process tree must no longer be alive"
         );
     }
