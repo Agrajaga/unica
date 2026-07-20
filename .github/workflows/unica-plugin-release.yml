@@ -17,7 +17,6 @@ on:
       - "scripts/ci/**"
       - "tests/ci/**"
       - "tests/fixtures/**"
-      - "docs/releases/**"
       - "spec/**"
   push:
     tags:
@@ -272,7 +271,7 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          body_path: docs/releases/${{ github.ref_name }}.md
+          generate_release_notes: true
           files: |
             dist/runtime/unica-runtime-*.tar.gz
             dist/runtime/unica-runtime-*.json

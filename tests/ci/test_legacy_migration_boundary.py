@@ -70,7 +70,7 @@ class LegacyMigrationBoundaryTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertNotIn(marker, release)
 
-    def test_v08x_metadata_and_docs_keep_only_the_frozen_v078_bridge(self) -> None:
+    def test_v08x_metadata_and_guidance_keep_only_the_frozen_v078_bridge(self) -> None:
         metadata = json.loads(
             (REPO_ROOT / "plugins/unica/.codex-plugin/plugin.json").read_text(
                 encoding="utf-8"
@@ -86,8 +86,6 @@ class LegacyMigrationBoundaryTests(unittest.TestCase):
         marketplace_adr = (
             REPO_ROOT / "spec/decisions/0008-public-marketplace-thin-runtime.md"
         ).read_text(encoding="utf-8")
-        release_note = REPO_ROOT / "docs/releases/v0.8.0.md"
-
         self.assertRegex(metadata["version"], r"^0\.8\.\d+$")
         for filename in ("install-unica.sh", "install-unica.ps1"):
             frozen_url = f"releases/download/v0.7.8/{filename}"
@@ -101,10 +99,6 @@ class LegacyMigrationBoundaryTests(unittest.TestCase):
             self.assertIn("v0.7.8", text)
             self.assertIn("v0.8.0", text)
             self.assertIn("ordinary marketplace update", text)
-        self.assertTrue(release_note.is_file())
-        release_text = release_note.read_text(encoding="utf-8")
-        self.assertIn("v0.7.8", release_text)
-        self.assertNotIn("releases/download/v0.7.7/install-unica", release_text)
 
 
 if __name__ == "__main__":

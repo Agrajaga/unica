@@ -9,11 +9,6 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unica-plugin-release.yml"
 PUBLISH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish-unica-marketplace.yml"
 LEGACY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unica-legacy-migration.yml"
-HISTORICAL_PLAN = (
-    REPO_ROOT / "docs" / "superpowers" / "plans" / "2026-07-19-cross-repo-upgrade-regression.md"
-)
-
-
 class UnicaWorkflowGuardrailTests(unittest.TestCase):
     def release_text(self) -> str:
         return RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -98,13 +93,6 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
         self.assertNotIn("unica-legacy-migration.yml", release)
         self.assertEqual({}, violations, f"source workflows own full migration policy: {violations}")
 
-    def test_historical_plan_references_the_actual_workflow_test_module(self) -> None:
-        text = HISTORICAL_PLAN.read_text(encoding="utf-8")
-
-        self.assertIn("tests/ci/test_unica_workflow.py", text)
-        self.assertIn("tests.ci.test_unica_workflow -v", text)
-        self.assertNotIn("test_unica_workflows", text)
-
     def test_release_assets_are_published_without_pages_dependency_and_redownloaded(self) -> None:
         text = self.release_text()
         publish = text[text.index("  publish-release-assets:") : text.index("  verify-published-assets:")]
@@ -118,6 +106,14 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
         self.assertNotIn("install-unica", publish)
         self.assertIn("gh release download", verify)
         self.assertIn("verify-release-assets.py", verify)
+
+    def test_release_notes_are_generated_without_repository_docs(self) -> None:
+        text = self.release_text()
+        publish = text[text.index("  publish-release-assets:") : text.index("  smoke-thin-plugin:")]
+
+        self.assertIn("generate_release_notes: true", publish)
+        self.assertNotIn("body_path:", publish)
+        self.assertNotIn("docs/releases", text)
 
     def test_assessment_is_independent_from_runtime_publication(self) -> None:
         text = self.release_text()

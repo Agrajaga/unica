@@ -51,17 +51,6 @@ class ProductContractTests(unittest.TestCase):
             "https://ingvar.pro/products/unica/terms/en",
         )
 
-    def test_ai_entrypoints_document_source_of_truth_and_ignored_corpus(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
-        entrypoint = repo_root / "AGENTS.md"
-
-        text = entrypoint.read_text(encoding="utf-8")
-
-        self.assertIn("code/tests/package metadata > spec > historical plans", text)
-        for ignored in ["docs/research", "docs/its", "target", ".build", "dist"]:
-            with self.subTest(ignored=ignored):
-                self.assertIn(ignored, text)
-
     def test_readme_documents_public_marketplace_lifecycle(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         readme = (repo_root / "README.md").read_text(encoding="utf-8")
@@ -98,14 +87,6 @@ class ProductContractTests(unittest.TestCase):
         self.assertIn("v0.7.8", readme)
         self.assertIn("v0.8.0", readme)
 
-    def test_v078_release_note_declares_the_legacy_boundary(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
-        note = (repo_root / "docs/releases/v0.7.8.md").read_text(encoding="utf-8")
-
-        for value in ("#90", "v0.7.8", "стабильный мост", "обычный marketplace upgrade"):
-            with self.subTest(value=value):
-                self.assertIn(value, note)
-
     def test_active_consumer_docs_do_not_describe_fat_local_delivery(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         paths = [
@@ -123,30 +104,6 @@ class ProductContractTests(unittest.TestCase):
             if needle in path.read_text(encoding="utf-8")
         ]
         self.assertEqual(matches, [])
-
-        release_notes = [
-            repo_root / "docs/releases/v0.7.1.md",
-            repo_root / "docs/releases/v0.7.2.md",
-            repo_root / "docs/releases/v0.7.5.md",
-            repo_root / "docs/releases/v0.7.6.md",
-            repo_root / "docs/releases/v0.7.7.md",
-            repo_root / "docs/releases/v0.8.0.md",
-        ]
-        fat_archive_mentions = [
-            str(path.relative_to(repo_root))
-            for path in release_notes
-            if "unica-codex-marketplace-" in path.read_text(encoding="utf-8")
-        ]
-        self.assertEqual(fat_archive_mentions, [])
-
-    def test_superpowers_plans_are_marked_historical(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
-        plan_dir = repo_root / "docs" / "superpowers" / "plans"
-
-        for plan in plan_dir.glob("*.md"):
-            with self.subTest(plan=plan.name):
-                head = "\n".join(plan.read_text(encoding="utf-8").splitlines()[:8])
-                self.assertIn("Historical", head)
 
     def test_script_backed_skill_exceptions_are_documented_by_adr(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

@@ -4,17 +4,15 @@
 
 When changing Unica, resolve conflicts in this order:
 
-1. code/tests/package metadata > spec > historical plans
+1. code and tests
 2. `plugins/unica/.mcp.json`, `plugins/unica/.codex-plugin/plugin.json`, and `plugins/unica/third-party/tools.lock.json` are package-contract sources, not background notes.
 3. `spec/` is the active architecture layer unless it contradicts live code, tests, or package metadata.
-4. `docs/superpowers/plans/` is historical execution context. Do not treat old plan text as current requirements without checking code and tests.
+4. `README.md` and skill prose
 
 ## Search Hygiene
 
 Do not scan local ignored corpora as part of normal repo understanding:
 
-- `docs/research`
-- `docs/its`
 - `target`
 - `.build`
 - `dist`
