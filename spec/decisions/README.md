@@ -12,6 +12,7 @@ This directory contains accepted architecture decisions for Unica.
 - [ADR-0006: Workspace-scoped internal services](0006-workspace-scoped-internal-services.md)
 - [ADR-0008: Public marketplace with a thin verified runtime](0008-public-marketplace-thin-runtime.md)
 - [ADR-0009: OS-specific code behind infrastructure platform facades](0009-os-specific-code-behind-platform-facade.md)
+- [ADR-0010: CI build cache and artifact flow](0010-ci-build-cache-and-artifact-flow.md)
 
 ## ADR Status Values
 
