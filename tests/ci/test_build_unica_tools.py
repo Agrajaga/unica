@@ -5,7 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 def load_build_module():
@@ -173,6 +173,10 @@ class BuildUnicaToolsTests(unittest.TestCase):
                     bundle_root=bundle_root,
                     target="win-x64",
                     exe=".exe",
+                    workspace_binary_owners={
+                        "unica": {"unica-coder"},
+                        "unica-bootstrap": {"unica-bootstrap"},
+                    },
                 )
 
             self.assertEqual(built_paths, {"unica": target_bin_dir / "unica.exe"})
@@ -204,6 +208,115 @@ class BuildUnicaToolsTests(unittest.TestCase):
                     str(target_dir),
                 ],
             )
+
+    def test_workspace_binary_pairs_are_rejected_before_build_when_lock_is_malformed(self) -> None:
+        module = load_build_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(module, "run") as cargo_run:
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    "unica-coder does not own binary target unica-bootstrap",
+                ):
+                    module.build_cargo_workspace_binaries(
+                        [
+                            {
+                                "name": "unica",
+                                "binaryName": "unica",
+                                "cargoPackage": "unica-coder",
+                                "cargoBin": "unica-bootstrap",
+                            }
+                        ],
+                        repo_root=root,
+                        target_dir=root / "cargo-target",
+                        target_bin_dir=root / "bundle" / "bin" / "linux-x64",
+                        bundle_root=root / "bundle",
+                        target="linux-x64",
+                        exe="",
+                        workspace_binary_owners={
+                            "unica": {"unica-coder"},
+                            "unica-bootstrap": {"unica-bootstrap"},
+                        },
+                    )
+
+            cargo_run.assert_not_called()
+
+    def test_workspace_binary_owners_come_from_locked_cargo_metadata(self) -> None:
+        module = load_build_module()
+        metadata = {
+            "packages": [
+                {
+                    "name": "unica-coder",
+                    "targets": [
+                        {"name": "unica", "kind": ["bin"]},
+                        {"name": "unica_coder", "kind": ["lib"]},
+                    ],
+                },
+                {
+                    "name": "unica-bootstrap",
+                    "targets": [{"name": "unica-bootstrap", "kind": ["bin"]}],
+                },
+            ]
+        }
+        completed = Mock(stdout=json.dumps(metadata))
+
+        with patch.object(module.subprocess, "run", return_value=completed) as cargo_metadata:
+            owners = module.load_cargo_workspace_binary_owners(Path("/repo"))
+
+        self.assertEqual(
+            owners,
+            {
+                "unica": {"unica-coder"},
+                "unica-bootstrap": {"unica-bootstrap"},
+            },
+        )
+        cargo_metadata.assert_called_once_with(
+            ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+            cwd=Path("/repo"),
+            check=True,
+            text=True,
+            stdout=module.subprocess.PIPE,
+        )
+
+    def test_workspace_binary_name_collision_is_rejected_before_build(self) -> None:
+        module = load_build_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(module, "run") as cargo_run:
+                with self.assertRaisesRegex(
+                    SystemExit,
+                    "shared-bin is ambiguous across selected packages: package-a, package-b",
+                ):
+                    module.build_cargo_workspace_binaries(
+                        [
+                            {
+                                "name": "tool-a",
+                                "binaryName": "tool-a",
+                                "cargoPackage": "package-a",
+                                "cargoBin": "shared-bin",
+                            },
+                            {
+                                "name": "tool-b",
+                                "binaryName": "tool-b",
+                                "cargoPackage": "package-b",
+                                "cargoBin": "shared-bin",
+                            },
+                        ],
+                        repo_root=root,
+                        target_dir=root / "cargo-target",
+                        target_bin_dir=root / "bundle" / "bin" / "linux-x64",
+                        bundle_root=root / "bundle",
+                        target="linux-x64",
+                        exe="",
+                        workspace_binary_owners={
+                            "shared-bin": {"package-a", "package-b"},
+                            "unica-bootstrap": {"unica-bootstrap"},
+                        },
+                    )
+
+            cargo_run.assert_not_called()
 
     def test_build_metrics_have_stable_schema_and_trailing_newline(self) -> None:
         module = load_build_module()

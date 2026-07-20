@@ -29,6 +29,26 @@ def run(args: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(args, cwd=cwd, check=True)
 
 
+def load_cargo_workspace_binary_owners(repo_root: Path) -> dict[str, set[str]]:
+    command = ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"]
+    print("+", " ".join(command), flush=True)
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    metadata = json.loads(completed.stdout)
+    owners: dict[str, set[str]] = {}
+    for package in metadata.get("packages", []):
+        package_name = package["name"]
+        for target in package.get("targets", []):
+            if "bin" in target.get("kind", []):
+                owners.setdefault(target["name"], set()).add(package_name)
+    return owners
+
+
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as stream:
@@ -82,14 +102,29 @@ def build_cargo_workspace_binaries(
     bundle_root: Path,
     target: str,
     exe: str,
+    workspace_binary_owners: dict[str, set[str]],
 ) -> tuple[dict[str, Path], Path, float]:
     """Build runtime and package infrastructure in one locked Cargo invocation."""
-    packages = list(dict.fromkeys([tool["cargoPackage"] for tool in cargo_tools]))
-    packages.append("unica-bootstrap")
+    requested_pairs = [
+        (tool["cargoPackage"], tool.get("cargoBin", tool["binaryName"]))
+        for tool in cargo_tools
+    ]
+    requested_pairs.append(("unica-bootstrap", "unica-bootstrap"))
+    packages = list(dict.fromkeys(package for package, _ in requested_pairs))
+    selected_packages = set(packages)
+    for package, binary_name in requested_pairs:
+        owners = workspace_binary_owners.get(binary_name, set())
+        if package not in owners:
+            raise SystemExit(f"cargo package {package} does not own binary target {binary_name}")
+        selected_owners = owners & selected_packages
+        if selected_owners != {package}:
+            raise SystemExit(
+                f"cargo binary target {binary_name} is ambiguous across selected packages: "
+                f"{', '.join(sorted(selected_owners))}"
+            )
     binary_names = list(
-        dict.fromkeys([tool.get("cargoBin", tool["binaryName"]) for tool in cargo_tools])
+        dict.fromkeys(binary_name for _, binary_name in requested_pairs)
     )
-    binary_names.append("unica-bootstrap")
 
     command = ["cargo", "build", "--release", "--locked"]
     for package in packages:
@@ -232,6 +267,7 @@ def main() -> None:
         bundle_root=args.out_dir,
         target=args.target,
         exe=exe,
+        workspace_binary_owners=load_cargo_workspace_binary_owners(args.repo_root.resolve()),
     )
     built_paths.update(cargo_paths)
     if args.metrics_file is not None:

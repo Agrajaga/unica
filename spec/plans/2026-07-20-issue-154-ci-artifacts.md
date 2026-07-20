@@ -60,6 +60,9 @@ In `build-unica-tools.py`:
   `build_cargo_workspace_binaries(...)`;
 - gather all `cargo-workspace` tools and build their packages/binaries together
   with `unica-bootstrap` using one `cargo build --release --locked` invocation;
+- validate every requested `(cargoPackage, cargoBin)` pair and reject binary-name
+  collisions using locked Cargo workspace metadata before applying Cargo's
+  global package/bin filters;
 - use `.build/tool-work/<target>/cargo-target` as the only target directory for
   both workspace binaries;
 - copy runtime binaries to `bin/<target>/` and bootstrap to
