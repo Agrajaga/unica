@@ -101,6 +101,7 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
         self.assertIn("platform_changed == 'true'", platforms)
         self.assertIn("toolchain_changed == 'true'", platforms)
         self.assertIn("ci_changed == 'true'", platforms)
+        self.assertEqual(2, platforms.count("if: matrix.runner == 'macos-14'"))
 
     def test_package_contour_and_pr_smoke_do_not_publish_release_assets(self) -> None:
         text = self.release_text()
