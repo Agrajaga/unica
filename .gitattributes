@@ -1,5 +1,2 @@
-plugins/unica/skills/web-test/scripts/package.json text eol=lf
-plugins/unica/skills/web-test/scripts/package-lock.json text eol=lf
-
 # BSP parity fixtures preserve harvested bytes, including BOM and CRLF.
 tests/fixtures/unica_mcp_script_parity/bsp/** -text -whitespace

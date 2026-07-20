@@ -519,26 +519,6 @@
           "decisionReason": "Reviewed cbde49 drift as EOL normalization, raw PowerShell wrapper/guidance churn, shared donor docs, or donor-only capabilities outside the current Unica packaged surface; no prompt-visible Unica skill or typed MCP behavior change is required."
         },
         {
-          "skill": "img-grid",
-          "status": "still-local-script",
-          "notes": "2026-07-04 78b5b73 refresh: ported img-grid validation for non-positive dimensions; --cols must be > 0, --rows must be >= 0, and automatic rows are clamped to at least one before rendering.",
-          "upstreamPaths": [
-            ".claude/skills/img-grid/**",
-            "docs/mxl-guide.md",
-            "docs/mxl-dsl-spec.md",
-            "docs/1c-spreadsheet-spec.md"
-          ],
-          "localPaths": [
-            "plugins/unica/skills/img-grid"
-          ],
-          "contractPaths": [
-            "tests/ci/test_unica_skills.py"
-          ],
-          "baselineCommit": "78b5b73fa7f835462dc4073ae7a9fc841e7c62fb",
-          "decision": "script-backed-utility-exception",
-          "decisionReason": "ADR-0007 records img-grid as a permanent script-backed utility exception for non-XML image annotation; donor validation fixes are adapted locally without creating a typed unica.* tool."
-        },
-        {
           "skill": "interface-edit",
           "status": "ported-to-unica",
           "notes": "Reviewed donor support-guard drift through 3d36c2026916d2ae8915f0aca0836d55e1ccaabe; Unica adapts it at the MCP application layer for this mutating tool using the shared ParentConfigurations.bin parser and .v8-project.json editingAllowedCheck deny|warn|off policy. Raw donor script wrapper path changes are not applicable because the prompt-visible skill routes through typed unica.*. 2026-06-26 cbde49 refresh: EOL-only, raw wrapper/guidance, shared docs, or donor-only capability drift reviewed and ignored for current Unica packaged MCP surface.",
@@ -1094,28 +1074,6 @@
           "baselineCommit": "cbde49efdaeec190432fdf4a53201a87e83c69de",
           "decision": "ignored-with-reason",
           "decisionReason": "Reviewed cbde49 drift as EOL normalization, raw PowerShell wrapper/guidance churn, shared donor docs, or donor-only capabilities outside the current Unica packaged surface; no prompt-visible Unica skill or typed MCP behavior change is required."
-        },
-        {
-          "skill": "web-test",
-          "status": "still-local-script",
-          "decision": "script-backed-utility-exception",
-          "baselineCommit": "78b5b73fa7f835462dc4073ae7a9fc841e7c62fb",
-          "notes": "2026-07-04 78b5b73 refresh: ported donor web-test multi-select and headerless-grid fixes while preserving Unica URL/autonomous-server guidance. Scripts now share ROW_CLICK_POINT_FN/HEADERLESS_GRID_FN, expose readCloudDDScript, support selectValue(field, array), fillFields array delegation, checkbox-before-click row fill, and robust headerless read/write mapping.",
-          "upstreamPaths": [
-            ".claude/skills/web-test/**",
-            "docs/web-test-guide.md",
-            "docs/web-test-recording-guide.md",
-            "docs/web-test-regression-guide.md",
-            "docs/web-test-regression-spec.md",
-            "docs/web-spec.md"
-          ],
-          "localPaths": [
-            "plugins/unica/skills/web-test"
-          ],
-          "contractPaths": [
-            "tests/ci/test_unica_skills.py"
-          ],
-          "decisionReason": "ADR-0007 records web-test as a permanent script-backed utility exception for browser automation; donor runtime fixes are adapted locally without creating typed unica.web_test.* tools."
         }
       ],
       "lastAdaptedLocalCommit": "795505f2243cf3c93a95918467f99135af758e1b",
@@ -1292,22 +1250,6 @@
           ],
           "localPaths": [
             "plugins/unica/skills/db-performance"
-          ],
-          "contractPaths": [
-            "tests/ci/test_unica_skills.py"
-          ],
-          "baselineCommit": "a421cf44eb1f5859cf2a2b74884f8fbcaefc4826",
-          "decision": "ported"
-        },
-        {
-          "skill": "img-grid",
-          "status": "adapted",
-          "notes": "Guidance adapted from ai-rules-1c and rewritten for Unica skill routing through public unica.* MCP tools.",
-          "upstreamPaths": [
-            "content/skills/img-grid-analysis/**"
-          ],
-          "localPaths": [
-            "plugins/unica/skills/img-grid"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py"

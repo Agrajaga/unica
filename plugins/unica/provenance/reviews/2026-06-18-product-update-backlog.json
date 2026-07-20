@@ -49,17 +49,6 @@
       "notes": "Updated tools.lock.json to v0.5.1 after reviewing the version command and partial-load/build changes; Unica MCP contract remains typed and unchanged."
     },
     {
-      "id": "playwright",
-      "kind": "npm-package-lock",
-      "locked": "1.61.1",
-      "latest": "1.61.1",
-      "risk": "low",
-      "batch": "low-risk-dependencies",
-      "status": "applied",
-      "contractGate": false,
-      "notes": "package.json/package-lock.json refreshed to 1.61.1. Playwright WebStorage is adopted through web-test getStorage/setStorage/removeStorage/clearStorage helpers after verifying the installed 1.61.1 types expose page.localStorage and page.sessionStorage. Passkeys, APIResponse network details, and video retention modes are not adopted in this batch because the 1C web-test engine has no matching workflow yet."
-    },
-    {
       "id": "lxml",
       "kind": "python-test-dependency",
       "locked": "tests/ci/requirements.txt:6.1.1",
