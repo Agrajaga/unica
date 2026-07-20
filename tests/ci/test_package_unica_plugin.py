@@ -664,6 +664,25 @@ class PackageUnicaPluginTests(unittest.TestCase):
                 module.main()
 
             plugin = out_dir / "marketplace" / "plugins" / "unica"
+            packaged_paths = {
+                path.relative_to(plugin).as_posix()
+                for path in plugin.rglob("*")
+            }
+            forbidden_script_skills = {
+                path
+                for path in packaged_paths
+                if path == "skills/img-grid"
+                or path.startswith("skills/img-grid/")
+                or path == "skills/web-test"
+                or path.startswith("skills/web-test/")
+            }
+            self.assertEqual(forbidden_script_skills, set())
+            self.assertFalse(
+                any(
+                    Path(path).name in {"package.json", "package-lock.json"}
+                    for path in packaged_paths
+                )
+            )
             packaged_mcp = json.loads(
                 (plugin / ".mcp.json").read_text(encoding="utf-8")
             )

@@ -105,15 +105,14 @@ class ProductContractTests(unittest.TestCase):
         ]
         self.assertEqual(matches, [])
 
-    def test_script_backed_skill_exceptions_are_documented_by_adr(self) -> None:
+    def test_removed_script_backed_skills_do_not_leave_architecture_records(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
-        adr = repo_root / "spec" / "decisions" / "0007-script-backed-utility-skill-exceptions.md"
+        decisions = repo_root / "spec" / "decisions"
+        index = (decisions / "README.md").read_text(encoding="utf-8")
 
-        text = adr.read_text(encoding="utf-8")
-
-        self.assertIn("web-test", text)
-        self.assertIn("img-grid", text)
-        self.assertIn("permanent local-tool exception", text)
+        self.assertFalse((decisions / "0007-script-backed-utility-skill-exceptions.md").exists())
+        self.assertFalse((decisions / "0009-remove-script-backed-utility-skills.md").exists())
+        self.assertNotIn("Script-backed utility", index)
 
     def write_executable(self, tools_dir: Path, name: str, body: str) -> None:
         commands = {

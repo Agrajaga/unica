@@ -51,11 +51,6 @@ IN_SCOPE_TOOLS = {
     "role-validate": "unica.role.validate",
 }
 
-OUT_OF_SCOPE = [
-    "web-test",
-    "img-grid",
-]
-
 SCENARIO_SKILLS = {
     "api-design": [
         "unica.code.search",
@@ -239,7 +234,7 @@ SCENARIO_REQUIRED_TOKENS = {
     "platform-help": ["Unica MCP contract gap", "method signatures"],
     "bsp-patterns": ["БСП", "СведенияОВнешнейОбработке"],
     "integration-implement": ["HTTP-сервис", "webhook", "secrets"],
-    "autonomous-server": ["HTTP-сервис", "веб-клиент", "web-test"],
+    "autonomous-server": ["HTTP-сервис", "веб-клиент", "external browser-testing tool"],
     "log-analysis": ["журнала регистрации", "технологического журнала", "ЖР", "ТЖ"],
     "background-jobs": ["Фоновые", "регламентные", "idempotency", "retry"],
     "data-exchange": ["планы обмена", "РИБ", "регистрация изменений", "контракт обмена"],
@@ -780,84 +775,6 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 with self.subTest(path=doc.relative_to(self.repo_root()), token=token):
                     self.assertNotIn(token, text)
 
-    def test_web_test_tracks_upstream_regression_runner_without_legacy_publish_guidance(self) -> None:
-        skill_dir = self.skill_root() / "web-test"
-        skill_doc = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-        regress_doc = (skill_dir / "regress.md").read_text(encoding="utf-8")
-        run_script = (skill_dir / "scripts" / "run.mjs").read_text(encoding="utf-8")
-        browser_facade = (skill_dir / "scripts" / "browser.mjs").read_text(encoding="utf-8")
-        storage_helper = (skill_dir / "scripts" / "engine" / "storage" / "storage.mjs").read_text(
-            encoding="utf-8"
-        )
-        grid_script = (skill_dir / "scripts" / "dom" / "grid.mjs").read_text(encoding="utf-8")
-        select_value = (
-            skill_dir / "scripts" / "engine" / "forms" / "select-value.mjs"
-        ).read_text(encoding="utf-8")
-        row_fill = (
-            skill_dir / "scripts" / "engine" / "table" / "row-fill.mjs"
-        ).read_text(encoding="utf-8")
-
-        required_files = [
-            "scripts/cli/commands/test.mjs",
-            "scripts/cli/test-runner/assertions.mjs",
-            "scripts/cli/test-runner/discover.mjs",
-            "scripts/cli/test-runner/reporters.mjs",
-            "scripts/engine/table/row-fill.mjs",
-            "scripts/engine/spreadsheet/spreadsheet.mjs",
-            "scripts/engine/storage/storage.mjs",
-            "scripts/dom/grid.mjs",
-            "scripts/dom/forms.mjs",
-        ]
-        for relative_path in required_files:
-            with self.subTest(path=relative_path):
-                self.assertTrue((skill_dir / relative_path).is_file())
-
-        self.assertIn("node $RUN test <dir|file>... [flags]", regress_doc)
-        self.assertIn("webtest.config.mjs", regress_doc)
-        self.assertIn("--url=<url>", regress_doc)
-        self.assertIn("--format=allure", regress_doc)
-        self.assertIn("--format=junit", regress_doc)
-        self.assertIn("hasMore", skill_doc)
-        self.assertIn("Picture columns", skill_doc)
-        self.assertIn("row: { col: val }", skill_doc)
-        self.assertIn("getStorage(key?", skill_doc)
-        self.assertIn("setStorage(key, value", skill_doc)
-        self.assertIn("Browser storage", regress_doc)
-        self.assertIn("page.localStorage", storage_helper)
-        self.assertIn("page.sessionStorage", storage_helper)
-        self.assertIn("getStorage, setStorage, removeStorage, clearStorage", browser_facade)
-        self.assertIn("case 'test'", run_script)
-        self.assertIn("visibleSample", grid_script)
-        self.assertIn("rowClickPoint(sel, body)", grid_script)
-        self.assertIn("const isObj = search && typeof search === 'object'", grid_script)
-        self.assertIn("HEADERLESS_GRID_FN", grid_script)
-        self.assertIn("ROW_CLICK_POINT_FN", grid_script)
-        self.assertIn("const isObj = !!search && typeof search === 'object'", select_value)
-        self.assertIn("visibleSample", select_value)
-        self.assertIn("selectValuesMulti", select_value)
-        self.assertIn("dispatchMultiSurface", select_value)
-        self.assertIn("Array.isArray(searchText)", select_value)
-        self.assertIn("readCloudDDScript", select_value)
-        self.assertIn("[...pending.values()].every(p => p.filled)", row_fill)
-        self.assertIn("findCheckboxAtPointScript(cellCoords.x, cellCoords.y)", row_fill)
-        self.assertIn("rowClickPoint(line, body)", (
-            skill_dir / "scripts" / "dom" / "forms.mjs"
-        ).read_text(encoding="utf-8"))
-        self.assertIn("readCloudDDScript", (
-            skill_dir / "scripts" / "dom.mjs"
-        ).read_text(encoding="utf-8"))
-
-        for text in [skill_doc, regress_doc]:
-            self.assertNotIn("CLAUDE_SKILL_DIR", text)
-            self.assertNotIn("/web-publish", text)
-            self.assertIn("autonomous-server", text)
-
-        self.assertIn("Multi-select", skill_doc)
-        self.assertIn("selectValue('Наименование компании', ['Альфа ООО', 'Бета АО'])", skill_doc)
-        self.assertIn("array → multi-select", (
-            skill_dir / "scripts" / "engine" / "forms" / "fill.mjs"
-        ).read_text(encoding="utf-8"))
-
     def test_reference_fixtures_track_upstream_runtime_portability_fixes(self) -> None:
         skd_scripts = [
             self.parity_reference_root()
@@ -885,15 +802,6 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertIn("subprocess.run([sys.executable, validate_script, \"-SubsystemPath\", target_xml])", subsystem_compile)
         self.assertNotIn("powershell.exe", subsystem_compile)
         self.assertNotIn("subsystem-validate.ps1", subsystem_compile)
-
-    def test_img_grid_rejects_non_positive_grid_dimensions_before_rendering(self) -> None:
-        script = (self.skill_root() / "img-grid" / "scripts" / "overlay-grid.py").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn("--cols must be greater than 0", script)
-        self.assertIn("--rows must be greater than or equal to 0", script)
-        self.assertIn("rows = max(1, round(sh / step_x))", script)
 
     def test_skd_skills_track_upstream_dsl_features_through_unica_boundary(self) -> None:
         skd_compile = (self.skill_root() / "skd-compile" / "SKILL.md").read_text(

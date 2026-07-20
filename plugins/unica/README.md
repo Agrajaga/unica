@@ -71,7 +71,7 @@ The `skills/` tree covers configuration and extension metadata, forms, roles,
 SKD/MXL, command interfaces, EPF/ERF and BSP registration, database/build
 workflows, BSL search and diagnostics, integrations, background jobs,
 performance, security, data separation, release support, autonomous runtime,
-web testing, and platform help.
+and platform help.
 
 ## Local development
 

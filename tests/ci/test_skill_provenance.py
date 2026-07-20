@@ -222,7 +222,7 @@ class SkillProvenanceTests(unittest.TestCase):
             "skd-edit",
             "subsystem-compile",
         }
-        script_backed_exceptions = {"img-grid", "web-test"}
+        historical_script_backed_skills = {"img-grid", "web-test"}
         previous_functional_skills = {"cfe-borrow", "cfe-init", "form-validate"}
         decisions = {
             item["skill"]: item
@@ -240,23 +240,31 @@ class SkillProvenanceTests(unittest.TestCase):
             self.assertEqual(decisions[skill]["decision"], "ported")
             self.assertEqual(decisions[skill]["baselineCommit"], previous_target)
 
-        for skill in script_backed_exceptions:
-            self.assertIn(skill, upstreams["cc-1c-skills"]["reviewedEntries"])
-            self.assertEqual(decisions[skill]["decision"], "script-backed-utility-exception")
-            self.assertEqual(decisions[skill]["baselineCommit"], target)
-            self.assertIn("ADR-0007", decisions[skill]["decisionReason"])
-
-        self.assertIn("HEADERLESS_GRID_FN", decisions["web-test"]["evidence"])
-        self.assertIn("selectValuesMulti", decisions["web-test"]["evidence"])
         self.assertIn("Default*Form", decisions["form-remove"]["evidence"])
-        self.assertIn("--cols", decisions["img-grid"]["evidence"])
         self.assertIn("expr_start", decisions["skd-edit"]["evidence"])
         self.assertIn("subprocess.run", decisions["subsystem-compile"]["evidence"])
         self.assertIn("BorrowMainAttribute", decisions["cfe-borrow"]["evidence"])
         self.assertIn("MDClasses format version", decisions["cfe-init"]["evidence"])
         self.assertIn("type_error_count", decisions["form-validate"]["evidence"])
 
-        ignored_skills = set(decisions) - functional_skills - script_backed_exceptions - previous_functional_skills
+        for skill in historical_script_backed_skills:
+            self.assertEqual(decisions[skill]["decision"], "script-backed-utility-exception")
+
+        removal = json.loads(
+            (
+                self.repo_root()
+                / "plugins/unica/provenance/reviews/2026-07-20-script-backed-skill-removal.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(set(removal["removedSkills"]), historical_script_backed_skills)
+        self.assertEqual(removal["decision"], "removed-from-product")
+
+        ignored_skills = (
+            set(decisions)
+            - functional_skills
+            - previous_functional_skills
+            - historical_script_backed_skills
+        )
         self.assertIn("cf-edit", ignored_skills)
         self.assertIn("epf-bsp-init", ignored_skills)
         self.assertIn("help-add", ignored_skills)
@@ -313,8 +321,6 @@ class SkillProvenanceTests(unittest.TestCase):
         self.assertEqual(products["v8-runner"]["locked"], "v0.5.1")
         self.assertEqual(products["v8-runner"]["latest"], "v0.5.1")
         self.assertEqual(products["v8-runner"]["status"], "applied")
-        self.assertEqual(products["playwright"]["locked"], "1.61.1")
-        self.assertEqual(products["playwright"]["latest"], "1.61.1")
         self.assertEqual(products["lxml"]["latest"], "6.1.1")
         self.assertEqual(products["rust-compatible-lock-updates"]["updateCount"], 4)
         self.assertEqual(products["rust-compatible-lock-updates"]["status"], "applied")
@@ -335,7 +341,6 @@ class SkillProvenanceTests(unittest.TestCase):
         roots = [
             self.repo_root() / "tests" / "fixtures" / "unica_mcp_script_parity" / "reference_skills",
             self.repo_root() / "plugins" / "unica" / "skills" / "help-add" / "scripts",
-            self.repo_root() / "plugins" / "unica" / "skills" / "web-test" / "scripts",
         ]
         for root in roots:
             for path in root.rglob("*"):
