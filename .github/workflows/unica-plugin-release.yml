@@ -169,6 +169,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: build-tools
+    if: ${{ always() && needs.build-tools.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -199,6 +200,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: package-runtime
+    if: ${{ always() && needs.package-runtime.result == 'success' }}
     env:
       RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'v0.8.1' }}
     steps:
@@ -236,7 +238,12 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     needs: package-thin
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    if: >-
+      ${{
+        always() &&
+        needs.package-thin.result == 'success' &&
+        (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -299,7 +306,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: package-runtime
-    if: startsWith(github.ref, 'refs/tags/')
+    if: >-
+      ${{
+        always() &&
+        needs.package-runtime.result == 'success' &&
+        startsWith(github.ref, 'refs/tags/')
+      }}
     permissions:
       contents: write
     steps:
@@ -321,7 +333,13 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     needs: [package-thin, publish-release-assets]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: >-
+      ${{
+        always() &&
+        needs.package-thin.result == 'success' &&
+        needs.publish-release-assets.result == 'success' &&
+        startsWith(github.ref, 'refs/tags/')
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -354,7 +372,13 @@ jobs:
     needs:
       - publish-release-assets
       - package-thin
-    if: startsWith(github.ref, 'refs/tags/')
+    if: >-
+      ${{
+        always() &&
+        needs.package-thin.result == 'success' &&
+        needs.publish-release-assets.result == 'success' &&
+        startsWith(github.ref, 'refs/tags/')
+      }}
     permissions:
       contents: read
     steps:

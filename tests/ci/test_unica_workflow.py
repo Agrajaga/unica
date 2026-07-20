@@ -113,7 +113,32 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
         self.assertIn("ci_changed == 'true'", build)
         self.assertIn("github.event_name == 'pull_request'", probe)
         self.assertIn("github.event_name == 'workflow_dispatch'", probe)
-        self.assertIn("if: startsWith(github.ref, 'refs/tags/')", publish)
+        self.assertIn("startsWith(github.ref, 'refs/tags/')", publish)
+
+    def test_conditional_pipeline_breaks_transitive_skip_propagation(self) -> None:
+        text = self.release_text()
+        dependencies = {
+            "package-runtime": ("needs.build-tools.result == 'success'",),
+            "package-thin": ("needs.package-runtime.result == 'success'",),
+            "probe-thin-bootstrap": ("needs.package-thin.result == 'success'",),
+            "release-assessment": ("needs.package-runtime.result == 'success'",),
+            "publish-release-assets": ("needs.package-runtime.result == 'success'",),
+            "smoke-thin-plugin": (
+                "needs.package-thin.result == 'success'",
+                "needs.publish-release-assets.result == 'success'",
+            ),
+            "verify-published-assets": (
+                "needs.package-thin.result == 'success'",
+                "needs.publish-release-assets.result == 'success'",
+            ),
+        }
+
+        for job_id, dependency_results in dependencies.items():
+            with self.subTest(job_id=job_id):
+                job = job_block(text, job_id)
+                self.assertIn("always()", job)
+                for dependency_result in dependency_results:
+                    self.assertIn(dependency_result, job)
 
     def test_javascript_actions_use_node24_compatible_majors(self) -> None:
         release = self.release_text()
