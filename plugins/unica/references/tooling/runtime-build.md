@@ -123,6 +123,13 @@
 
 #### Режимы выгрузки
 
+> Ниже приведён низкоуровневый синтаксис платформы, а не рекомендуемый путь
+> Unica. Не направляй incremental/partial/CDFI-only команды прямо в
+> Git-visible source root: они допустимы только во временный private staging,
+> принадлежащий runtime-слою. Пока `alkoleft/v8-runner-rust#30` не реализован,
+> applied-вызовы Unica разрешают только явный `mode=full`; остальные режимы
+> доступны лишь как `dryRun=true` preview.
+
 **Полная выгрузка** — все объекты конфигурации:
 ```
 1cv8.exe DESIGNER /F <база> /DisableStartupDialogs /DumpConfigToFiles "C:\src\config" /Out log.txt
@@ -130,22 +137,22 @@
 
 **Инкрементальная выгрузка** — только изменённые объекты:
 ```
-1cv8.exe DESIGNER /F <база> /DisableStartupDialogs /DumpConfigToFiles "C:\src\config" -update -force /Out log.txt
+1cv8.exe DESIGNER /F <база> /DisableStartupDialogs /DumpConfigToFiles "C:\runtime\private-staging\config" -update -force /Out log.txt
 ```
 
 Инкрементальная выгрузка с отслеживанием изменений:
 ```
-1cv8.exe DESIGNER /F <база> /DisableStartupDialogs /DumpConfigToFiles "C:\src\config" -update -getChanges "changes.txt" -configDumpInfoForChanges "old\ConfigDumpInfo.xml" /Out log.txt
+1cv8.exe DESIGNER /F <база> /DisableStartupDialogs /DumpConfigToFiles "C:\runtime\private-staging\config" -update -getChanges "changes.txt" -configDumpInfoForChanges "C:\runtime\ib-state\ConfigDumpInfo.xml" /Out log.txt
 ```
 
 **Частичная выгрузка** — выбранные объекты по списку:
 ```
-1cv8.exe DESIGNER /F <база> /DisableStartupDialogs /DumpConfigToFiles "C:\src\config" -listFile "dump_objects.txt" /Out log.txt
+1cv8.exe DESIGNER /F <база> /DisableStartupDialogs /DumpConfigToFiles "C:\runtime\private-staging\config" -listFile "dump_objects.txt" /Out log.txt
 ```
 
 **Обновление ConfigDumpInfo.xml** — без выгрузки файлов:
 ```
-1cv8.exe DESIGNER /F <база> /DisableStartupDialogs /DumpConfigToFiles "C:\src\config" -configDumpInfoOnly /Out log.txt
+1cv8.exe DESIGNER /F <база> /DisableStartupDialogs /DumpConfigToFiles "C:\runtime\ib-state" -configDumpInfoOnly /Out log.txt
 ```
 
 #### Параметры выгрузки
@@ -373,6 +380,14 @@ EPF/ERF workflows в packaged Unica plugin идут через `v8-runner` и MC
 
 `ConfigDumpInfo.xml` — служебный файл, создаваемый при выгрузке конфигурации в файлы (`/DumpConfigToFiles`). Содержит информацию о составе и версиях объектов конфигурации на момент выгрузки.
 
+Platform-generated CDFI sidecar с корнем `<ConfigDumpInfo>` — локальное
+runtime-состояние конкретной ИБ, а не коллективный XML-исходник. Не добавляй
+этот sidecar в Git и не передавай его в `unica.cf.*` или `unica.meta.*`. Чистый
+checkout без него является нормальным состоянием. Unica не считает его
+признаком формата source-set и не включает в mutation targets/receipts.
+Legitimate metadata descriptor (включая external EPF/ERF) объекта с именем
+`ConfigDumpInfo` остаётся исходником и хранится в Git.
+
 **Назначение:**
 - Определение изменений при инкрементальной выгрузке (`-update`, `-configDumpInfoForChanges`)
 - Синхронизация состояния выгрузки с конфигурацией ИБ
@@ -382,7 +397,14 @@ EPF/ERF workflows в packaged Unica plugin идут через `v8-runner` и MC
 - `-configDumpInfoOnly` — обновить только этот файл без выгрузки объектов
 - `-updateConfigDumpInfo` — обновить файл после частичной загрузки (`/LoadConfigFromFiles`)
 
-**Расположение:** корень каталога выгрузки (рядом с `Configuration.xml`).
+Платформа предоставляет параметры для использования вспомогательного CDFI при
+сравнении, но управление приватным CDFI для пары `source-set + ИБ` относится к
+runtime-слою. До реализации private state и shadow publication в
+`alkoleft/v8-runner-rust#30` Unica разрешает применяемый `dump` только с
+`mode=full`. `mode=incremental|partial` доступен лишь с `dryRun=true`: для
+DESIGNER закреплённый runner пишет эти режимы прямо в рабочий source root; EDT
+публикует итог через staging, но ни один путь не возвращает точные processed
+paths/hashes и не выполняет divergence-safe merge.
 
 ## Переменные окружения
 
