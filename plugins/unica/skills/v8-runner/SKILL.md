@@ -148,6 +148,13 @@ allowed-tools:
 
 Для долгих операций меняй `execution_timeout` в `v8project.yaml` (миллисекунды, default `300000`, диапазон `1..=86400000`). Не прокидывай отдельный `timeoutMs` в `unica.runtime.execute`: Unica не владеет таймаутом runner-а.
 
+Если ignored EPF workspace уже содержит основной `v8project.yaml` только с
+`EXTERNAL_DATA_PROCESSORS`, привяжи его к личной локальной ИБ через
+`config-init` с явными `config`, `sourceSet` и `connection`. Unica проверит
+выбранный source-set и создаст рядом только `v8project.local.yaml`; runner не
+запускается, а основной конфиг не меняется. В этом режиме не передавай
+`format`, `builder` или `force`, и не перезаписывай существующий local overlay.
+
 ## Build/load/artifacts
 
 ### Обычный build

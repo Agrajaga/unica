@@ -5,6 +5,7 @@ Use MCP `unica.runtime.execute` and choose `operation` by intent:
 | Intent | Arguments |
 |---|---|
 | Missing project config | `operation=config-init`, optional `config`, `connection`, `format`, `builder` |
+| Bind an existing external EPF config to a local infobase | `operation=config-init`, required `config`, `sourceSet`, `connection`; selected source-set must be `EXTERNAL_DATA_PROCESSORS` |
 | Create runtime state | `operation=init` |
 | Apply source changes to infobase | `operation=build`, optional `sourceSet`, `fullRebuild` |
 | Bring infobase changes back to files | `operation=dump`, optional `mode`, `object`, `objects`, `sourceSet`, `extension` |

@@ -353,6 +353,9 @@ impl<'a> RuntimeAdapter<'a> {
                 "{tool_name} cancelled before adapter work"
             )));
         }
+        if let Some(outcome) = bind_external_processor_config(args, context, dry_run)? {
+            return Ok(outcome);
+        }
         let plugin_root = find_plugin_root(&context.cwd).ok_or_else(|| {
             "could not locate Unica plugin root for internal adapter lookup".to_string()
         })?;
@@ -468,6 +471,193 @@ impl<'a> Default for RuntimeAdapter<'a> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn bind_external_processor_config(
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+    dry_run: bool,
+) -> Result<Option<AdapterOutcome>, String> {
+    if args.get("operation").and_then(Value::as_str) != Some("config-init")
+        || !args.contains_key("sourceSet")
+    {
+        return Ok(None);
+    }
+    validate_runtime_mapper_payload("config-init", args)?;
+    for key in ["format", "builder", "force"] {
+        if args.contains_key(key) {
+            return Err(format!(
+                "operation `config-init` with `sourceSet` does not accept `{key}`"
+            ));
+        }
+    }
+    let source_set_name = required_non_empty_runtime_string(args, "sourceSet")?;
+    let connection = required_non_empty_runtime_string(args, "connection")?;
+    let config_arg = required_non_empty_runtime_string(args, "config")?;
+    let unresolved_config = context.cwd.join(config_arg);
+    let config_path = unresolved_config.canonicalize().map_err(|error| {
+        format!(
+            "external source-set bind requires an existing config `{}`: {error}",
+            unresolved_config.display()
+        )
+    })?;
+    let workspace_root = context.workspace_root.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve workspace root `{}`: {error}",
+            context.workspace_root.display()
+        )
+    })?;
+    if !config_path.starts_with(&workspace_root) {
+        return Err(format!(
+            "external source-set config `{}` is outside workspace root `{}`",
+            config_path.display(),
+            workspace_root.display()
+        ));
+    }
+    let config_text = std::fs::read_to_string(&config_path)
+        .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
+    let config: serde_yaml::Value = serde_yaml::from_str(&config_text)
+        .map_err(|error| format!("failed to parse {}: {error}", config_path.display()))?;
+    validate_external_processor_source_set(&config, source_set_name, &config_path)?;
+
+    let local_path = config_path
+        .parent()
+        .expect("canonical config path has a parent")
+        .join("v8project.local.yaml");
+    if local_path.exists() {
+        return Err(format!(
+            "external source-set bind refuses to overwrite existing local overlay `{}`",
+            local_path.display()
+        ));
+    }
+    let mut infobase = serde_yaml::Mapping::new();
+    infobase.insert(
+        serde_yaml::Value::String("connection".to_string()),
+        serde_yaml::Value::String(connection.to_string()),
+    );
+    let mut overlay = serde_yaml::Mapping::new();
+    overlay.insert(
+        serde_yaml::Value::String("infobase".to_string()),
+        serde_yaml::Value::Mapping(infobase),
+    );
+    let overlay_text = serde_yaml::to_string(&overlay)
+        .map_err(|error| format!("failed to serialize local runtime config: {error}"))?;
+
+    if dry_run {
+        return Ok(Some(AdapterOutcome {
+            ok: true,
+            summary: "dry run: unica.runtime.execute would bind an external processor source-set to a local infobase".to_string(),
+            changes: vec!["no files changed because dryRun is true".to_string()],
+            warnings: Vec::new(),
+            errors: Vec::new(),
+            artifacts: vec![local_path.display().to_string()],
+            stdout: None,
+            stderr: None,
+            command: None,
+        }));
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options.open(&local_path).map_err(|error| {
+        format!(
+            "failed to create local runtime config `{}`: {error}",
+            local_path.display()
+        )
+    })?;
+    use std::io::Write as _;
+    file.write_all(overlay_text.as_bytes()).map_err(|error| {
+        format!(
+            "failed to write local runtime config `{}`: {error}",
+            local_path.display()
+        )
+    })?;
+
+    Ok(Some(AdapterOutcome {
+        ok: true,
+        summary: "unica.runtime.execute bound an external processor source-set to a local infobase"
+            .to_string(),
+        changes: vec![format!("created {}", local_path.display())],
+        warnings: Vec::new(),
+        errors: Vec::new(),
+        artifacts: vec![local_path.display().to_string()],
+        stdout: None,
+        stderr: None,
+        command: None,
+    }))
+}
+
+fn required_non_empty_runtime_string<'a>(
+    args: &'a Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!("operation `config-init` with `sourceSet` requires non-empty `{key}`")
+        })
+}
+
+fn validate_external_processor_source_set(
+    config: &serde_yaml::Value,
+    selected_name: &str,
+    config_path: &Path,
+) -> Result<(), String> {
+    let source_sets = config
+        .as_mapping()
+        .and_then(|mapping| mapping.get(serde_yaml::Value::String("source-set".to_string())))
+        .ok_or_else(|| format!("{} has no `source-set`", config_path.display()))?;
+    let mut matches = Vec::new();
+    match source_sets {
+        serde_yaml::Value::Sequence(entries) => {
+            for entry in entries {
+                let Some(mapping) = entry.as_mapping() else {
+                    continue;
+                };
+                if yaml_mapping_string(mapping, "name") == Some(selected_name) {
+                    matches.push(mapping);
+                }
+            }
+        }
+        serde_yaml::Value::Mapping(entries) => {
+            if let Some(entry) = entries.get(serde_yaml::Value::String(selected_name.to_string())) {
+                if let Some(mapping) = entry.as_mapping() {
+                    matches.push(mapping);
+                }
+            }
+        }
+        _ => {
+            return Err(format!(
+                "{} field `source-set` must be a list or mapping",
+                config_path.display()
+            ));
+        }
+    }
+    if matches.len() != 1 {
+        return Err(format!(
+            "{} must contain exactly one source-set named `{selected_name}`",
+            config_path.display()
+        ));
+    }
+    let source_set = matches[0];
+    if yaml_mapping_string(source_set, "type") != Some("EXTERNAL_DATA_PROCESSORS") {
+        return Err(format!(
+            "source-set `{selected_name}` must have type `EXTERNAL_DATA_PROCESSORS`"
+        ));
+    }
+    if yaml_mapping_string(source_set, "path").is_none_or(|path| path.trim().is_empty()) {
+        return Err(format!(
+            "source-set `{selected_name}` must have a non-empty `path`"
+        ));
+    }
+    Ok(())
+}
+
+fn yaml_mapping_string<'a>(mapping: &'a serde_yaml::Mapping, key: &str) -> Option<&'a str> {
+    mapping
+        .get(serde_yaml::Value::String(key.to_string()))
+        .and_then(serde_yaml::Value::as_str)
 }
 
 impl RuntimeJobAdapter {
@@ -2862,6 +3052,7 @@ const RUNTIME_MAPPER_CONFIG_INIT_ARGS: &[&str] = &[
     "operation",
     "config",
     "workdir",
+    "sourceSet",
     "connection",
     "format",
     "builder",
@@ -3651,6 +3842,185 @@ mod tests {
                 "IBCMD"
             ]
         );
+    }
+
+    #[test]
+    fn runtime_adapter_binds_existing_external_processor_config_without_running_v8_runner() {
+        let context = temp_context("runtime-external-config-bind");
+        let primary = concat!(
+            "format: DESIGNER\n",
+            "source-set:\n",
+            "  - name: external-processors\n",
+            "    type: EXTERNAL_DATA_PROCESSORS\n",
+            "    path: epf\n",
+        );
+        std::fs::write(context.cwd.join("v8project.yaml"), primary).unwrap();
+        let runner = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: "runner must not execute".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: false,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("config-init"));
+        args.insert("config".to_string(), json!("v8project.yaml"));
+        args.insert("sourceSet".to_string(), json!("external-processors"));
+        args.insert(
+            "connection".to_string(),
+            json!("File=/private/local/epf-harness"),
+        );
+
+        let outcome = RuntimeAdapter::with_runner(&runner)
+            .invoke("unica.runtime.execute", &args, &context, false, true)
+            .unwrap();
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert!(runner.commands.borrow().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(context.cwd.join("v8project.local.yaml")).unwrap(),
+            "infobase:\n  connection: File=/private/local/epf-harness\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(context.cwd.join("v8project.yaml")).unwrap(),
+            primary
+        );
+        assert!(!serde_json::to_string(&outcome)
+            .unwrap()
+            .contains("/private/local/epf-harness"));
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn runtime_external_processor_bind_dry_run_validates_without_writing_or_running() {
+        let context = temp_context("runtime-external-config-bind-preview");
+        std::fs::write(
+            context.cwd.join("v8project.yaml"),
+            "source-set:\n  external-processors:\n    type: EXTERNAL_DATA_PROCESSORS\n    path: epf\n",
+        )
+        .unwrap();
+        let runner = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: false,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("config-init"));
+        args.insert("config".to_string(), json!("v8project.yaml"));
+        args.insert("sourceSet".to_string(), json!("external-processors"));
+        args.insert("connection".to_string(), json!("File=build/ib"));
+
+        let outcome = RuntimeAdapter::with_runner(&runner)
+            .invoke("unica.runtime.execute", &args, &context, true, true)
+            .unwrap();
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert!(outcome.summary.contains("dry run"));
+        assert!(outcome.command.is_none());
+        assert!(runner.commands.borrow().is_empty());
+        assert!(!context.cwd.join("v8project.local.yaml").exists());
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn runtime_external_processor_bind_rejects_unsafe_or_ambiguous_inputs() {
+        let context = temp_context("runtime-external-config-bind-guards");
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("config-init"));
+        args.insert("config".to_string(), json!("v8project.yaml"));
+        args.insert("sourceSet".to_string(), json!("external-processors"));
+        args.insert("connection".to_string(), json!("File=build/ib"));
+
+        for (config, expected) in [
+            (
+                "source-set:\n  - name: external-processors\n    type: CONFIGURATION\n    path: src\n",
+                "must have type `EXTERNAL_DATA_PROCESSORS`",
+            ),
+            (
+                "source-set:\n  - name: external-processors\n    type: EXTERNAL_DATA_PROCESSORS\n    path: ''\n",
+                "must have a non-empty `path`",
+            ),
+            (
+                "source-set:\n  - name: external-processors\n    type: EXTERNAL_DATA_PROCESSORS\n    path: one\n  - name: external-processors\n    type: EXTERNAL_DATA_PROCESSORS\n    path: two\n",
+                "exactly one source-set",
+            ),
+        ] {
+            std::fs::write(context.cwd.join("v8project.yaml"), config).unwrap();
+            let error = RuntimeAdapter::new()
+                .invoke("unica.runtime.execute", &args, &context, false, true)
+                .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert!(!context.cwd.join("v8project.local.yaml").exists());
+        }
+
+        std::fs::write(
+            context.cwd.join("v8project.yaml"),
+            "source-set:\n  - name: external-processors\n    type: EXTERNAL_DATA_PROCESSORS\n    path: epf\n",
+        )
+        .unwrap();
+        for key in ["format", "builder", "force"] {
+            args.insert(
+                key.to_string(),
+                if key == "force" {
+                    json!(false)
+                } else {
+                    json!("x")
+                },
+            );
+            let error = RuntimeAdapter::new()
+                .invoke("unica.runtime.execute", &args, &context, false, true)
+                .unwrap_err();
+            assert!(
+                error.contains(&format!("does not accept `{key}`")),
+                "{error}"
+            );
+            args.remove(key);
+        }
+        std::fs::write(context.cwd.join("v8project.local.yaml"), "infobase: {}\n").unwrap();
+        let error = RuntimeAdapter::new()
+            .invoke("unica.runtime.execute", &args, &context, false, true)
+            .unwrap_err();
+        assert!(error.contains("refuses to overwrite"), "{error}");
+        cleanup_context(&context);
+    }
+
+    #[test]
+    fn runtime_ordinary_config_init_does_not_read_existing_config() {
+        let context = temp_context("runtime-ordinary-config-init-delegation");
+        std::fs::write(context.cwd.join("v8project.yaml"), "not: [valid").unwrap();
+        let runner = RecordingProcessRunner {
+            commands: RefCell::new(Vec::new()),
+            output: ProcessOutput {
+                status_success: true,
+                status: "exit status: 0".to_string(),
+                stdout: "created".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: false,
+            },
+        };
+        let mut args = Map::new();
+        args.insert("operation".to_string(), json!("config-init"));
+        args.insert("config".to_string(), json!("v8project.yaml"));
+        args.insert("connection".to_string(), json!("File=build/ib"));
+
+        let outcome = RuntimeAdapter::with_runner(&runner)
+            .invoke("unica.runtime.execute", &args, &context, false, true)
+            .unwrap();
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert_eq!(runner.commands.borrow().len(), 1);
+        cleanup_context(&context);
     }
 
     #[test]

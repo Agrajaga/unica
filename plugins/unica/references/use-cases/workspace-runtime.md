@@ -29,6 +29,7 @@ source-set path itself has no stronger structural evidence.
 | Intent | MCP arguments |
 | --- | --- |
 | Create config | `operation=config-init`, optional `connection`, `format`, `builder` |
+| Bind external EPF config locally | `operation=config-init`, required `config`, `sourceSet`, `connection`; creates only adjacent `v8project.local.yaml` |
 | Prepare runtime state | `operation=init` |
 | Apply sources to the infobase | `operation=build`, optional `sourceSet`, `fullRebuild` |
 | Export infobase state to files | `operation=dump`, optional `mode`, `object`, `sourceSet`, `extension` |
