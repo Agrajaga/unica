@@ -255,4 +255,3 @@ claim the performance acceptance evidence locally: cold/warm cache outcomes,
 runner time, network volume, and real artifact sizes require GitHub Actions
 runs of the implementation commit. Record that evidence in the implementation
 PR after the branch is published and rerun unchanged for the warm sample.
-
