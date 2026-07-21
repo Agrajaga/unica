@@ -311,7 +311,7 @@ pub fn tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "unica.code.patch",
-            description: "Insert content into one selected existing BSL Module.bsl file.",
+            description: "Insert content into one selected existing BSL *Module.bsl file.",
             mutating: true,
             cache_access: cache_access_for("code-patch", Some(DomainEventKind::ModuleChanged)),
             handler: ToolHandler::NativeOperation {
@@ -537,6 +537,9 @@ fn should_emit_events(
     outcome: &AdapterOutcome,
 ) -> bool {
     if !spec.mutating || !outcome.ok {
+        return false;
+    }
+    if dry_run && spec.name == "unica.code.patch" {
         return false;
     }
     if !dry_run {
@@ -1566,6 +1569,23 @@ mod tests {
             &args,
             true,
             &AdapterOutcome::ok("generic dry run")
+        ));
+
+        let code_patch_spec = ToolSpec {
+            name: "unica.code.patch",
+            description: "test",
+            mutating: true,
+            cache_access: cache_access_for("code-patch", Some(DomainEventKind::ModuleChanged)),
+            handler: ToolHandler::NativeOperation {
+                operation: "code-patch",
+                event: Some(DomainEventKind::ModuleChanged),
+            },
+        };
+        assert!(!should_emit_events(
+            code_patch_spec,
+            &args,
+            true,
+            &AdapterOutcome::ok("code patch preview")
         ));
 
         let form_edit_spec = ToolSpec {

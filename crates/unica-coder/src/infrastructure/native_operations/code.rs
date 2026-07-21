@@ -17,18 +17,25 @@ pub(crate) fn invoke_mutation(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
 ) -> Option<AdapterOutcome> {
-    (operation == "code-patch").then(|| patch_inner(args, context, false))
+    (operation == "code-patch").then(|| patch_inner(args, context, PatchMode::Apply))
 }
 
 pub(crate) fn preview(args: &Map<String, Value>, context: &WorkspaceContext) -> AdapterOutcome {
-    patch_inner(args, context, true)
+    patch_inner(args, context, PatchMode::Preview)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PatchMode {
+    Apply,
+    Preview,
 }
 
 fn patch_inner(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
-    dry_run: bool,
+    mode: PatchMode,
 ) -> AdapterOutcome {
+    let dry_run = mode == PatchMode::Preview;
     let result: Result<AdapterOutcome, String> = (|| {
         let target = resolve_target(args, context)?;
         let before = fs::read(&target.path)
@@ -101,7 +108,7 @@ fn patch_inner(
             } else {
                 "unica.code.patch applied one insertion".to_string()
             },
-            changes: (!no_op)
+            changes: (!dry_run && !no_op)
                 .then(|| format!("{}: inserted BSL content", target.path.display()))
                 .into_iter()
                 .collect(),
@@ -397,9 +404,10 @@ fn unified_diff(path: &str, before: &[u8], offset: usize, insertion: &[u8], no_o
 mod tests {
     use super::{
         insertion_is_present, line_column, locate_insertion, methods, normalized_content,
-        patch_inner, unified_diff,
+        patch_inner, unified_diff, PatchMode,
     };
     use crate::domain::workspace::WorkspaceContext;
+    use crate::infrastructure::native_operations::single_file_publisher::with_before_commit_hook;
     use serde_json::{json, Map, Value};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -510,7 +518,7 @@ mod tests {
             "Message(\"ok\");",
         );
 
-        let applied = patch_inner(&args, &context, false);
+        let applied = patch_inner(&args, &context, PatchMode::Apply);
         assert!(applied.ok, "{:?}", applied.errors);
         let details: Value = serde_json::from_str(applied.stdout.as_deref().unwrap()).unwrap();
         assert_eq!(details["sourceSet"], "main");
@@ -518,12 +526,61 @@ mod tests {
         assert_eq!(details["changedRanges"][0]["startLine"], 3);
         assert!(details["diff"].as_str().unwrap().starts_with("--- a/"));
 
-        let repeated = patch_inner(&args, &context, false);
+        let repeated = patch_inner(&args, &context, PatchMode::Apply);
         assert!(repeated.ok, "{:?}", repeated.errors);
         assert!(repeated.changes.is_empty());
         let details: Value = serde_json::from_str(repeated.stdout.as_deref().unwrap()).unwrap();
         assert_eq!(details["preHash"], details["postHash"]);
         assert!(details["changedRanges"].as_array().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&context.workspace_root);
+    }
+
+    #[test]
+    fn dry_run_reports_a_plan_without_a_source_change_event() {
+        let context = temp_context("dry-run");
+        let module = context
+            .workspace_root
+            .join("src/CommonModules/Sample/Ext/Module.bsl");
+        fs::create_dir_all(module.parent().unwrap()).unwrap();
+        fs::write(&module, "Procedure Run()\nEndProcedure\n").unwrap();
+        let args = patch_args(
+            "src/CommonModules/Sample/Ext/Module.bsl",
+            "Run",
+            "Message(\"ok\");",
+        );
+
+        let preview = patch_inner(&args, &context, PatchMode::Preview);
+
+        assert!(preview.ok, "{:?}", preview.errors);
+        assert!(preview.changes.is_empty());
+        assert!(!preview.stdout.as_deref().unwrap().contains("noOp\": true"));
+        assert!(!fs::read_to_string(&module).unwrap().contains("Message"));
+        let _ = fs::remove_dir_all(&context.workspace_root);
+    }
+
+    #[test]
+    fn patch_refuses_a_stale_preimage_without_overwriting_concurrent_change() {
+        let context = temp_context("stale-preimage");
+        let module = context
+            .workspace_root
+            .join("src/CommonModules/Sample/Ext/Module.bsl");
+        fs::create_dir_all(module.parent().unwrap()).unwrap();
+        fs::write(&module, "Procedure Run()\nEndProcedure\n").unwrap();
+        let args = patch_args(
+            "src/CommonModules/Sample/Ext/Module.bsl",
+            "Run",
+            "Message(\"ok\");",
+        );
+        let replacement = "Procedure Run()\n    Message(\"concurrent\");\nEndProcedure\n";
+
+        let outcome = with_before_commit_hook(
+            move |path| fs::write(path, replacement).unwrap(),
+            || patch_inner(&args, &context, PatchMode::Apply),
+        );
+
+        assert!(!outcome.ok);
+        assert!(outcome.errors[0].contains("publish BSL module"));
+        assert_eq!(fs::read_to_string(&module).unwrap(), replacement);
         let _ = fs::remove_dir_all(&context.workspace_root);
     }
 

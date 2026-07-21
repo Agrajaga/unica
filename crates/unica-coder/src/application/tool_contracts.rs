@@ -1744,6 +1744,36 @@ mod tests {
     }
 
     #[test]
+    fn code_patch_json_schema_accepts_each_documented_selector_variant() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.code.patch")
+            .unwrap();
+        let schema = input_schema_for_tool(&tool);
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let base = json!({
+            "path": "src/CommonModules/X/Ext/Module.bsl",
+            "operation": "insert",
+            "content": "Сообщить(\"ok\");",
+            "position": "after",
+            "sourceDir": "src",
+        });
+
+        for selector in [
+            json!({"method": "ПриСоздании"}),
+            json!({"anchor": "Сообщить"}),
+        ] {
+            let mut instance = base.clone();
+            instance["selector"] = selector;
+            assert!(validator.is_valid(&instance), "{instance}");
+        }
+
+        let mut invalid = base;
+        invalid["selector"] = json!({"method": "A", "anchor": "B"});
+        assert!(!validator.is_valid(&invalid));
+    }
+
+    #[test]
     fn mutating_dry_run_does_not_require_payload() {
         let tool = tools()
             .into_iter()
