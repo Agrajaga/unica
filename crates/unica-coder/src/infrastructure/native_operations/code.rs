@@ -3,7 +3,7 @@ use crate::domain::project_sources::{SourceFormat, SourceSetKind};
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::path_policy::WorkspacePathPolicy;
 use crate::infrastructure::project_sources::discover_project_source_map;
-use crate::infrastructure::source_roots::resolve_source_root;
+use crate::infrastructure::source_roots::{normalize_path_identity, resolve_source_root};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -170,7 +170,8 @@ fn resolve_target(
             "unica.code.patch v1 requires a platform XML Configuration source set".to_string(),
         );
     }
-    if !target.starts_with(&source_root.path) {
+    let target_identity = normalize_path_identity(&target)?;
+    if !target_identity.starts_with(&source_root.path) {
         return Err("Module.bsl is outside the selected Configuration source set".to_string());
     }
     let module_role = target
