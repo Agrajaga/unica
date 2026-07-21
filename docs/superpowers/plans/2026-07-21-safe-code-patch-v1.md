@@ -139,4 +139,3 @@ git diff --check upstream/main...HEAD
 ```
 
 Expected: every command exits 0.
-
