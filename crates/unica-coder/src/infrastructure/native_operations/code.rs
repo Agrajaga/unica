@@ -5,10 +5,10 @@ use crate::infrastructure::path_policy::WorkspacePathPolicy;
 use crate::infrastructure::project_sources::discover_project_source_map;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::single_file_publisher::{publish, PublishMode, PublishRequest};
 
 pub(crate) fn invoke_mutation(
     operation: &str,
@@ -57,10 +57,17 @@ fn patch_inner(
             "postHash": hash(&after),
             "noOp": no_op,
             "changedRanges": if no_op { Vec::<Value>::new() } else { vec![json!({"startByte": offset, "endByte": offset + insertion.len()})] },
-            "diff": unified_diff(&relative, &insertion, no_op),
+            "diff": unified_diff(&relative, &before, offset, &insertion, no_op),
         });
         if !dry_run && !no_op {
-            atomic_replace(&target, &after)?;
+            publish(PublishRequest {
+                target: &target,
+                replacement: &after,
+                mode: PublishMode::ReplaceExisting {
+                    expected_preimage: &before,
+                },
+            })
+            .map_err(|error| format!("publish BSL module: {error}"))?;
         }
         Ok(AdapterOutcome {
             ok: true,
@@ -101,9 +108,13 @@ fn resolve_target(
     context: &WorkspaceContext,
 ) -> Result<PathBuf, String> {
     let target = WorkspacePathPolicy::new(context).resolve_write(string_arg(args, "path")?)?;
-    if target.file_name().and_then(|name| name.to_str()) != Some("Module.bsl") || !target.is_file()
+    if !target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with("Module.bsl"))
+        || !target.is_file()
     {
-        return Err("unica.code.patch v1 accepts only an existing Module.bsl".to_string());
+        return Err("unica.code.patch v1 accepts only an existing *Module.bsl".to_string());
     }
     let source_map = discover_project_source_map(&context.workspace_root)?;
     let source_name = source_map
@@ -200,10 +211,12 @@ fn methods(text: &str) -> Vec<Method<'_>> {
     let mut open: Option<(&str, usize)> = None;
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_start();
+        let trimmed = line.trim_start().trim_start_matches('\u{feff}');
         if let Some(rest) = trimmed
             .strip_prefix("Процедура ")
             .or_else(|| trimmed.strip_prefix("Функция "))
+            .or_else(|| trimmed.strip_prefix("Procedure "))
+            .or_else(|| trimmed.strip_prefix("Function "))
         {
             if open.is_none() {
                 let name = rest
@@ -214,7 +227,10 @@ fn methods(text: &str) -> Vec<Method<'_>> {
                     open = Some((name, offset));
                 }
             }
-        } else if (trimmed.starts_with("КонецПроцедуры") || trimmed.starts_with("КонецФункции"))
+        } else if (trimmed.starts_with("КонецПроцедуры")
+            || trimmed.starts_with("КонецФункции")
+            || trimmed.starts_with("EndProcedure")
+            || trimmed.starts_with("EndFunction"))
             && open.is_some()
         {
             let (name, start) = open.take().expect("checked");
@@ -279,46 +295,27 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn unified_diff(path: &str, insertion: &[u8], no_op: bool) -> String {
+fn unified_diff(path: &str, before: &[u8], offset: usize, insertion: &[u8], no_op: bool) -> String {
     if no_op {
         return String::new();
     }
-    format!(
-        "--- a/{path}\n+++ b/{path}\n@@ insertion @@\n+{}",
-        String::from_utf8_lossy(insertion)
-    )
-}
-
-fn atomic_replace(target: &Path, bytes: &[u8]) -> Result<(), String> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    let staged = target.with_file_name(format!(
-        ".{}.unica-stage-{}-{nonce}",
-        target
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("Module.bsl"),
-        std::process::id()
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staged)
-        .map_err(|error| format!("create staging file: {error}"))?;
-    file.write_all(bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("write staging file: {error}"))?;
-    fs::rename(&staged, target).map_err(|error| {
-        let _ = fs::remove_file(&staged);
-        format!("replace BSL module: {error}")
-    })
+    let line = before[..offset]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        + 1;
+    let added = String::from_utf8_lossy(insertion)
+        .lines()
+        .map(|line| format!("+{line}\n"))
+        .collect::<String>();
+    let added_lines = insertion.iter().filter(|byte| **byte == b'\n').count()
+        + usize::from(!insertion.ends_with(b"\n"));
+    format!("--- a/{path}\n+++ b/{path}\n@@ -{line},0 +{line},{added_lines} @@\n{added}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{insertion_is_present, locate_insertion, normalized_content};
+    use super::{insertion_is_present, locate_insertion, normalized_content, unified_diff};
     use serde_json::{json, Map, Value};
 
     const MODULE: &str = "Процедура Первая()\n    Сообщить(\"один\");\nКонецПроцедуры\n\nФункция Вторая()\n    Возврат Истина;\nКонецФункции\n";
@@ -360,6 +357,28 @@ mod tests {
             b"\n// marker\n",
             "after"
         ));
+    }
+
+    #[test]
+    fn method_selector_accepts_bom_prefixed_english_bsl() {
+        let module = "\u{feff}Procedure Run()\n    Message(\"ok\");\nEndProcedure\n";
+        let args = arguments(json!({"method": "Run"}), "after");
+
+        assert!(locate_insertion(module, &args).is_ok());
+    }
+
+    #[test]
+    fn diff_uses_a_valid_insertion_hunk() {
+        let diff = unified_diff(
+            "CommonModules/X/Ext/Module.bsl",
+            b"one\ntwo\n",
+            4,
+            b"insert\n",
+            false,
+        );
+
+        assert!(diff.contains("@@ -2,0 +2,1 @@"));
+        assert!(diff.contains("+insert\n"));
     }
 
     fn arguments(selector: Value, position: &str) -> Map<String, Value> {

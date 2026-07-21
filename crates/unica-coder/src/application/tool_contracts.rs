@@ -2194,9 +2194,9 @@ mod tests {
         assert_eq!(selector["properties"]["anchor"]["type"], "string");
         assert_eq!(selector["oneOf"].as_array().map(Vec::len), Some(2));
         for required in ["path", "operation", "selector", "content", "position"] {
-            assert!(schema["required"].as_array().is_some_and(|items| {
-                items.iter().any(|value| value == required)
-            }));
+            assert!(schema["required"]
+                .as_array()
+                .is_some_and(|items| { items.iter().any(|value| value == required) }));
         }
     }
 
