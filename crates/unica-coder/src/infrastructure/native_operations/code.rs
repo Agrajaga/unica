@@ -31,8 +31,8 @@ fn patch_inner(
 ) -> AdapterOutcome {
     let result: Result<AdapterOutcome, String> = (|| {
         let target = resolve_target(args, context)?;
-        let before = fs::read(&target)
-            .map_err(|error| format!("failed to read {}: {error}", target.display()))?;
+        let before = fs::read(&target.path)
+            .map_err(|error| format!("failed to read {}: {error}", target.path.display()))?;
         let text =
             std::str::from_utf8(&before).map_err(|_| "Module.bsl must be UTF-8".to_string())?;
         let offset = locate_insertion(text, args)?;
@@ -53,12 +53,14 @@ fn patch_inner(
         let (start_line, start_column) = line_column(postimage, offset);
         let (end_line, end_column) = line_column(postimage, offset + insertion.len());
         let relative = target
+            .path
             .strip_prefix(&context.workspace_root)
-            .unwrap_or(&target)
+            .unwrap_or(&target.path)
             .display()
             .to_string();
         let details = json!({
             "path": relative,
+            "sourceSet": target.source_set,
             "preHash": hash(&before),
             "postHash": hash(&after),
             "noOp": no_op,
@@ -71,10 +73,16 @@ fn patch_inner(
                 "endColumn": end_column,
             })] },
             "diff": unified_diff(&relative, &before, offset, &insertion, no_op),
+            "affectedTarget": {
+                "path": relative,
+                "sourceSet": target.source_set,
+                "moduleRole": target.module_role,
+                "rawHash": hash(&after),
+            },
         });
         if !dry_run && !no_op {
             publish(PublishRequest {
-                target: &target,
+                target: &target.path,
                 replacement: &after,
                 mode: PublishMode::ReplaceExisting {
                     expected_preimage: &before,
@@ -94,12 +102,12 @@ fn patch_inner(
                 "unica.code.patch applied one insertion".to_string()
             },
             changes: (!no_op)
-                .then(|| format!("{}: inserted BSL content", target.display()))
+                .then(|| format!("{}: inserted BSL content", target.path.display()))
                 .into_iter()
                 .collect(),
             warnings: Vec::new(),
             errors: Vec::new(),
-            artifacts: vec![target.display().to_string()],
+            artifacts: vec![target.path.display().to_string()],
             stdout: Some(stdout),
             stderr: None,
             command: None,
@@ -118,10 +126,16 @@ fn patch_inner(
     })
 }
 
+struct ResolvedTarget {
+    path: PathBuf,
+    source_set: String,
+    module_role: String,
+}
+
 fn resolve_target(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
-) -> Result<PathBuf, String> {
+) -> Result<ResolvedTarget, String> {
     let target = WorkspacePathPolicy::new(context).resolve_write(string_arg(args, "path")?)?;
     if !target
         .file_name()
@@ -152,7 +166,16 @@ fn resolve_target(
     if !target.starts_with(&source_root.path) {
         return Err("Module.bsl is outside the selected Configuration source set".to_string());
     }
-    Ok(target)
+    let module_role = target
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Module.bsl filename is not valid UTF-8".to_string())?
+        .to_string();
+    Ok(ResolvedTarget {
+        path: target,
+        source_set: source_name.to_string(),
+        module_role,
+    })
 }
 
 fn locate_insertion(text: &str, args: &Map<String, Value>) -> Result<usize, String> {
