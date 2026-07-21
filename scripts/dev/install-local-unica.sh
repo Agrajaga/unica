@@ -18,6 +18,25 @@ Options:
 EOF
 }
 
+target_for_host() {
+  local host_os="$1"
+  local host_arch="$2"
+  case "${host_os}-${host_arch}" in
+    Darwin-arm64) printf '%s\n' "darwin-arm64" ;;
+    Linux-x86_64|Linux-amd64) printf '%s\n' "linux-x64" ;;
+    MINGW*_NT-*-x86_64|MINGW*_NT-*-amd64) printf '%s\n' "win-x64" ;;
+    *)
+      echo "Unsupported local Unica tool target: ${host_os}-${host_arch}" >&2
+      return 78
+      ;;
+  esac
+}
+
+detect_target() {
+  target_for_host "$(uname -s)" "$(uname -m)"
+}
+
+main() {
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MARKETPLACE_NAME="${UNICA_CODEX_MARKETPLACE_NAME:-unica-dev}"
 BUILD_ROOT="${UNICA_LOCAL_BUILD_DIR:-$REPO_ROOT/.build/local-codex-unica}"
@@ -60,7 +79,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 select_python() {
-  for candidate in "${PYTHON:-}" python3.12 python3.11 python3.10 python3; do
+  for candidate in "${PYTHON:-}" python3.12 python3.11 python3.10 python3 python; do
     if [ -z "$candidate" ]; then
       continue
     fi
@@ -80,20 +99,6 @@ PY
   return 69
 }
 
-detect_target() {
-  local host_os host_arch
-  host_os="$(uname -s)"
-  host_arch="$(uname -m)"
-  case "${host_os}-${host_arch}" in
-    Darwin-arm64) printf '%s\n' "darwin-arm64" ;;
-    Linux-x86_64|Linux-amd64) printf '%s\n' "linux-x64" ;;
-    *)
-      echo "Unsupported local Unica tool target: ${host_os}-${host_arch}" >&2
-      return 78
-      ;;
-  esac
-}
-
 tool_binary() {
   local tool="$1"
   local suffix=""
@@ -108,7 +113,8 @@ TARGET="$(detect_target)"
 BUILD_ROOT="$(cd "$REPO_ROOT" && mkdir -p "$BUILD_ROOT" && cd "$BUILD_ROOT" && pwd)"
 TOOLS_ROOT="$BUILD_ROOT/tool-artifacts"
 TOOL_BUNDLE="$TOOLS_ROOT/unica-tools-$TARGET"
-WORK_DIR="$BUILD_ROOT/tool-work/$TARGET"
+WORK_DIR="$BUILD_ROOT/tool-work"
+METRICS_FILE="$BUILD_ROOT/cargo-metrics/$TARGET.json"
 PACKAGE_OUT="$BUILD_ROOT/package"
 MARKETPLACE_DIR="$PACKAGE_OUT/marketplace"
 PROMPT_PROOF="$BUILD_ROOT/prompt-input.json"
@@ -169,12 +175,13 @@ echo "==> Build root: $BUILD_ROOT"
 echo "==> Marketplace: $MARKETPLACE_NAME"
 
 if [ "$DO_BUILD" -eq 1 ]; then
-  rm -rf "$TOOL_BUNDLE" "$WORK_DIR"
+  rm -rf "$TOOL_BUNDLE"
   "$PYTHON_BIN" scripts/ci/build-unica-tools.py \
     --target "$TARGET" \
     --lock-file plugins/unica/third-party/tools.lock.json \
     --out-dir "$TOOL_BUNDLE" \
-    --work-dir "$WORK_DIR"
+    --work-dir "$WORK_DIR" \
+    --metrics-file "$METRICS_FILE"
 else
   if [ ! -f "$TOOL_BUNDLE/tools.json" ]; then
     echo "--skip-build requested, but bundle is missing: $TOOL_BUNDLE/tools.json" >&2
@@ -185,7 +192,7 @@ fi
 rm -rf "$PACKAGE_OUT"
 "$PYTHON_BIN" scripts/ci/package-unica-plugin.py \
   --repo-root "$REPO_ROOT" \
-  --tools-root "$TOOLS_ROOT" \
+  --tools-root "$TOOL_BUNDLE" \
   --lock-file plugins/unica/third-party/tools.lock.json \
   --out-dir "$PACKAGE_OUT" \
   --marketplace-name "$MARKETPLACE_NAME" \
@@ -207,6 +214,7 @@ if [ "$DO_INSTALL" -eq 1 ]; then
     exit 69
   fi
 
+  mkdir -p "$CODEX_HOME_DIR"
   codex plugin marketplace remove "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
   if [ -d "$CODEX_PLUGIN_CACHE_DIR" ]; then
     echo "==> Removing stale Codex plugin cache: $CODEX_PLUGIN_CACHE_DIR"
@@ -236,4 +244,9 @@ if [ "$DO_INSTALL" -eq 1 ]; then
   if [ "$DO_VERIFY" -eq 1 ]; then
     echo "==> Fresh prompt proof: $PROMPT_PROOF"
   fi
+fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
