@@ -5,7 +5,14 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 const COMMON_ARGS: &[&str] = &["cwd", "dryRun", "confirm"];
-const CODE_PATCH_ARGS: &[&str] = &["path", "operation", "selector", "content", "position"];
+const CODE_PATCH_ARGS: &[&str] = &[
+    "path",
+    "operation",
+    "selector",
+    "content",
+    "position",
+    "sourceDir",
+];
 const RUNTIME_JOB_STATUS_ARGS: &[&str] = &["jobId"];
 const RUNTIME_JOB_WAIT_ARGS: &[&str] = &["jobId", "timeoutSeconds"];
 const RUNTIME_JOB_LOGS_ARGS: &[&str] = &["jobId", "tailChars"];
@@ -1724,6 +1731,7 @@ mod tests {
         args.insert("selector".to_string(), json!({"method": "ПриСоздании"}));
         args.insert("content".to_string(), json!("Сообщить(\"ok\");"));
         args.insert("position".to_string(), json!("after"));
+        args.insert("sourceDir".to_string(), json!("src"));
         validate_tool_arguments(tool, &args, false).unwrap();
 
         args.insert(

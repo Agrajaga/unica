@@ -3,10 +3,11 @@ use crate::domain::project_sources::{SourceFormat, SourceSetKind};
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::path_policy::WorkspacePathPolicy;
 use crate::infrastructure::project_sources::discover_project_source_map;
+use crate::infrastructure::source_roots::resolve_source_root;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::single_file_publisher::{publish, PublishMode, PublishRequest};
 
@@ -46,6 +47,9 @@ fn patch_inner(
         if !no_op {
             after.splice(offset..offset, insertion.iter().copied());
         }
+        let postimage = std::str::from_utf8(&after)
+            .map_err(|_| "patched Module.bsl must remain UTF-8".to_string())?;
+        methods(postimage).map_err(|error| format!("validate patched Module.bsl: {error}"))?;
         let relative = target
             .strip_prefix(&context.workspace_root)
             .unwrap_or(&target)
@@ -69,6 +73,8 @@ fn patch_inner(
             })
             .map_err(|error| format!("publish BSL module: {error}"))?;
         }
+        let stdout = serde_json::to_string_pretty(&details)
+            .map_err(|error| format!("serialize code patch details: {error}"))?;
         Ok(AdapterOutcome {
             ok: true,
             summary: if no_op {
@@ -85,7 +91,7 @@ fn patch_inner(
             warnings: Vec::new(),
             errors: Vec::new(),
             artifacts: vec![target.display().to_string()],
-            stdout: Some(serde_json::to_string_pretty(&details).expect("details serialize")),
+            stdout: Some(stdout),
             stderr: None,
             command: None,
         })
@@ -116,15 +122,12 @@ fn resolve_target(
     {
         return Err("unica.code.patch v1 accepts only an existing *Module.bsl".to_string());
     }
+    let source_root = resolve_source_root(context, args.get("sourceDir").and_then(Value::as_str))?;
+    let source_name = source_root
+        .source_set
+        .as_deref()
+        .ok_or_else(|| "sourceDir must select a configured Configuration source set".to_string())?;
     let source_map = discover_project_source_map(&context.workspace_root)?;
-    let source_name = source_map
-        .effective_source_set
-        .as_deref()
-        .ok_or_else(|| "no unambiguous Configuration source set is available".to_string())?;
-    let source_root = source_map
-        .effective_source_root
-        .as_deref()
-        .ok_or_else(|| "no unambiguous Configuration source set is available".to_string())?;
     let source_set = source_map
         .source_sets
         .iter()
@@ -137,7 +140,7 @@ fn resolve_target(
             "unica.code.patch v1 requires a platform XML Configuration source set".to_string(),
         );
     }
-    if !target.starts_with(Path::new(source_root)) {
+    if !target.starts_with(&source_root.path) {
         return Err("Module.bsl is outside the selected Configuration source set".to_string());
     }
     Ok(target)
@@ -155,7 +158,7 @@ fn locate_insertion(text: &str, args: &Map<String, Value>) -> Result<usize, Stri
     if selector.len() != 1 {
         return Err("selector must contain exactly one of method or anchor".to_string());
     }
-    let methods = methods(text);
+    let methods = methods(text)?;
     let (start, end) = if let Some(name) = selector.get("method").and_then(Value::as_str) {
         let found = methods
             .iter()
@@ -199,6 +202,12 @@ fn locate_insertion(text: &str, args: &Map<String, Value>) -> Result<usize, Stri
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MethodKind {
+    Procedure,
+    Function,
+}
+
 #[derive(Debug)]
 struct Method<'a> {
     name: &'a str,
@@ -206,43 +215,70 @@ struct Method<'a> {
     end: usize,
 }
 
-fn methods(text: &str) -> Vec<Method<'_>> {
+fn methods(text: &str) -> Result<Vec<Method<'_>>, String> {
     let mut result = Vec::new();
-    let mut open: Option<(&str, usize)> = None;
+    let mut open: Option<(&str, usize, MethodKind)> = None;
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim_start().trim_start_matches('\u{feff}');
-        if let Some(rest) = trimmed
+        let declaration = trimmed
             .strip_prefix("Процедура ")
-            .or_else(|| trimmed.strip_prefix("Функция "))
-            .or_else(|| trimmed.strip_prefix("Procedure "))
-            .or_else(|| trimmed.strip_prefix("Function "))
-        {
+            .map(|rest| (rest, MethodKind::Procedure))
+            .or_else(|| {
+                trimmed
+                    .strip_prefix("Функция ")
+                    .map(|rest| (rest, MethodKind::Function))
+            })
+            .or_else(|| {
+                trimmed
+                    .strip_prefix("Procedure ")
+                    .map(|rest| (rest, MethodKind::Procedure))
+            })
+            .or_else(|| {
+                trimmed
+                    .strip_prefix("Function ")
+                    .map(|rest| (rest, MethodKind::Function))
+            });
+        if let Some((rest, kind)) = declaration {
             if open.is_none() {
                 let name = rest
                     .split(|ch: char| ch == '(' || ch.is_whitespace())
                     .next()
                     .unwrap_or("");
                 if !name.is_empty() {
-                    open = Some((name, offset));
+                    open = Some((name, offset, kind));
                 }
             }
-        } else if (trimmed.starts_with("КонецПроцедуры")
-            || trimmed.starts_with("КонецФункции")
-            || trimmed.starts_with("EndProcedure")
-            || trimmed.starts_with("EndFunction"))
-            && open.is_some()
-        {
-            let (name, start) = open.take().expect("checked");
-            result.push(Method {
-                name,
-                start,
-                end: offset + line.len(),
-            });
+        } else if let Some(closing_kind) = closing_kind(trimmed) {
+            if let Some((name, start, opening_kind)) = open.take() {
+                if closing_kind != opening_kind {
+                    return Err(
+                        "BSL method closing token does not match its declaration".to_string()
+                    );
+                }
+                result.push(Method {
+                    name,
+                    start,
+                    end: offset + line.len(),
+                });
+            }
         }
         offset += line.len();
     }
-    result
+    if open.is_some() {
+        return Err("BSL method declaration has no closing token".to_string());
+    }
+    Ok(result)
+}
+
+fn closing_kind(line: &str) -> Option<MethodKind> {
+    if line.starts_with("КонецПроцедуры") || line.starts_with("EndProcedure") {
+        Some(MethodKind::Procedure)
+    } else if line.starts_with("КонецФункции") || line.starts_with("EndFunction") {
+        Some(MethodKind::Function)
+    } else {
+        None
+    }
 }
 
 fn line_end(text: &str, from: usize) -> usize {
@@ -315,7 +351,9 @@ fn unified_diff(path: &str, before: &[u8], offset: usize, insertion: &[u8], no_o
 
 #[cfg(test)]
 mod tests {
-    use super::{insertion_is_present, locate_insertion, normalized_content, unified_diff};
+    use super::{
+        insertion_is_present, locate_insertion, methods, normalized_content, unified_diff,
+    };
     use serde_json::{json, Map, Value};
 
     const MODULE: &str = "Процедура Первая()\n    Сообщить(\"один\");\nКонецПроцедуры\n\nФункция Вторая()\n    Возврат Истина;\nКонецФункции\n";
@@ -379,6 +417,11 @@ mod tests {
 
         assert!(diff.contains("@@ -2,0 +2,1 @@"));
         assert!(diff.contains("+insert\n"));
+    }
+
+    #[test]
+    fn index_rejects_an_unclosed_method() {
+        assert!(methods("Procedure Run()\n").is_err());
     }
 
     fn arguments(selector: Value, position: &str) -> Map<String, Value> {
