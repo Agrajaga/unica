@@ -902,6 +902,59 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertIn("unica.form.info", form_edit)
         self.assertIn("unica.form.validate", form_edit)
 
+    def test_form_patterns_ux_guidance_is_mirrored_and_uses_supported_dsl(self) -> None:
+        heading = "## UX-правила для элементов и компоновки форм"
+        legacy_heading = "## UX-правила для элементов форм"
+
+        def ux_section(path: Path) -> str:
+            text = path.read_text(encoding="utf-8")
+            start = text.index(heading if heading in text else legacy_heading)
+            end = text.index("\n---", start)
+            return text[start:end]
+
+        reference_path = self.reference_root() / "specs" / "form-patterns.md"
+        skill_path = self.skill_root() / "form-patterns" / "SKILL.md"
+        reference_section = ux_section(reference_path)
+        skill_section = ux_section(skill_path)
+
+        self.assertIn(heading, reference_path.read_text(encoding="utf-8"))
+        self.assertIn(heading, skill_path.read_text(encoding="utf-8"))
+        self.assertEqual(skill_section, reference_section)
+        self.assertIn(
+            "https://github.com/Oxotka/1CDesignGuide/tree/edc05eaf5c191250a184b0e185006bf4b412f7a5",
+            reference_section,
+        )
+        for token in [
+            "Обычная группа",
+            "Сворачиваемая группа",
+            "Всплывающая группа",
+            "Командная панель",
+            "Команды формы",
+            "Шапка формы",
+            "Подвал формы",
+            "достаточно длинное название",
+            "двойное отрицание",
+            "Проводить документ при записи",
+            '"tooltip": "Пояснение"',
+            '"tooltipRepresentation": "Button"',
+            '"checkBoxType": "switcher"',
+            "3–5 значений",
+            "на весь экран",
+            "слева вверху",
+            "модальной",
+            "справа внизу",
+            '"font": { "bold": true }',
+            '"backColor": "#FFFF00"',
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, reference_section)
+
+        self.assertEqual(reference_section.count("defaultButton"), 1)
+        self.assertNotIn("buttonHint", reference_section)
+        self.assertNotIn("RGB(", reference_section)
+        self.assertNotRegex(reference_section, r'"radio"\s*:')
+        self.assertNotIn("Кнопки действий внизу", reference_section)
+
     def test_meta_info_tracks_upstream_type_presentation_through_unica_boundary(self) -> None:
         meta_info = (self.skill_root() / "meta-info" / "SKILL.md").read_text(encoding="utf-8")
 
