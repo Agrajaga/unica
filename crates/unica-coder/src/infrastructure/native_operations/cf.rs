@@ -1,7 +1,9 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::application::AdapterOutcome;
-use crate::domain::format_profile::ACTIVE_FORMAT_PROFILE;
+use crate::domain::format_profile::{
+    classify_root_version, FormatCompatibility, ACTIVE_FORMAT_PROFILE,
+};
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::metadata_kinds::{
     metadata_kind, metadata_kind_by_directory, metadata_kind_index, METADATA_KIND_TAGS,
@@ -190,12 +192,12 @@ pub(crate) fn validate_cf(args: &Map<String, Value>, context: &WorkspaceContext)
             ));
             check1_ok = false;
         }
-        let version = root.attribute("version").unwrap_or("");
-        if version.is_empty() {
-            report.warn("1. Missing version attribute on MetaDataObject");
-        } else if version != "2.20" {
-            report.warn(format!("1. Unusual version '{version}' (expected 2.20)"));
+        match classify_root_version(root.attribute("version")) {
+            Ok(FormatCompatibility::Supported { .. }) => report.ok("Export format: 2.20"),
+            Ok(compatibility) => report.warn(format_compatibility_warning(&compatibility)),
+            Err(error) => report.error(error.to_string()),
         }
+        let version = root.attribute("version").unwrap_or("");
 
         let Some(cfg_node) = root
             .children()

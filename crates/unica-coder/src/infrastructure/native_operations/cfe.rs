@@ -1503,14 +1503,7 @@ pub(crate) fn cfe_borrow_form_xml(
     stdout: &mut String,
 ) -> String {
     let source = source_form_content.trim_start_matches('\u{feff}');
-    let version = Document::parse(source)
-        .ok()
-        .and_then(|doc| {
-            doc.root_element()
-                .attribute("version")
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| format_version.to_string());
+    let version = ACTIVE_FORMAT_PROFILE.export_format.to_string();
     let blocks = cfe_borrow_form_top_level_blocks(source);
     if blocks.is_empty() {
         return cfe_borrow_form_xml_fallback(source, type_name, object_name, borrow_main_attr);
@@ -1690,14 +1683,7 @@ pub(crate) fn cfe_borrow_form_xml_fallback(
     object_name: &str,
     borrow_main_attr: bool,
 ) -> String {
-    let version = Document::parse(source)
-        .ok()
-        .and_then(|doc| {
-            doc.root_element()
-                .attribute("version")
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| ACTIVE_FORMAT_PROFILE.export_format.to_string());
+    let version = ACTIVE_FORMAT_PROFILE.export_format.to_string();
     let mut content = source.to_string();
     if !borrow_main_attr {
         content = cfe_borrow_strip_simple_data_paths(&content);
@@ -2956,12 +2942,12 @@ pub(crate) fn validate_cfe(
             ));
             check1_ok = false;
         }
-        let version = root.attribute("version").unwrap_or("");
-        if version.is_empty() {
-            report.warn("1. Missing version attribute on MetaDataObject");
-        } else if version != "2.20" {
-            report.warn(format!("1. Unusual version '{version}' (expected 2.20)"));
+        match classify_root_version(root.attribute("version")) {
+            Ok(FormatCompatibility::Supported { .. }) => report.ok("Export format: 2.20"),
+            Ok(compatibility) => report.warn(format_compatibility_warning(&compatibility)),
+            Err(error) => report.error(error.to_string()),
         }
+        let version = root.attribute("version").unwrap_or("");
 
         let Some(cfg_node) = root
             .children()
@@ -3983,6 +3969,34 @@ pub(crate) fn create_extension_scaffold(
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| context.cwd.clone());
+            let base_text = fs::read_to_string(&config_path).map_err(|error| {
+                format!(
+                    "failed to read base config {}: {error}",
+                    config_path.display()
+                )
+            })?;
+            let base_document =
+                Document::parse(base_text.trim_start_matches('\u{feff}')).map_err(|error| {
+                    format!(
+                        "failed to parse base config {}: {error}",
+                        config_path.display()
+                    )
+                })?;
+            let base_root = base_document.root_element();
+            if base_root.tag_name().name() != "MetaDataObject" {
+                return Err(format!(
+                    "base config root must be MetaDataObject, got {}",
+                    base_root.tag_name().name()
+                ));
+            }
+            if base_root.tag_name().namespace() != Some("http://v8.1c.ru/8.3/MDClasses") {
+                return Err("base config root must use the MDClasses namespace".to_string());
+            }
+            match classify_root_version(base_root.attribute("version")) {
+                Ok(FormatCompatibility::Supported { .. }) => {}
+                Ok(compatibility) => return Err(format_compatibility_warning(&compatibility)),
+                Err(error) => return Err(error.to_string()),
+            }
             let base_lang_file = cfg_dir.join("Languages").join("Русский.xml");
             if base_lang_file.exists() {
                 match fs::read_to_string(&base_lang_file) {
@@ -4666,6 +4680,38 @@ mod tests {
             assert!(
                 !context.cwd.join("ext").exists(),
                 "base {version} must be rejected before creating output"
+            );
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn cfe_init_rejects_invalid_base_before_writing_output() {
+        for (name, xml) in [
+            ("malformed", "<MetaDataObject"),
+            ("wrong-root", "<Configuration version=\"2.20\"/>"),
+            (
+                "wrong-namespace",
+                "<MetaDataObject xmlns=\"urn:wrong\" version=\"2.20\"/>",
+            ),
+            (
+                "missing-version",
+                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\"/>",
+            ),
+        ] {
+            let context = temp_context(&format!("init-invalid-base-{name}"));
+            write_file(&context.cwd.join("src/Configuration.xml"), xml);
+            let mut args = Map::new();
+            args.insert("Name".to_string(), json!("RejectedExtension"));
+            args.insert("OutputDir".to_string(), json!("ext"));
+            args.insert("ConfigPath".to_string(), json!("src"));
+
+            let outcome = create_extension_scaffold(&args, &context);
+
+            assert!(!outcome.ok, "base {name} must be rejected");
+            assert!(
+                !context.cwd.join("ext").exists(),
+                "base {name} must be rejected before creating output"
             );
             let _ = fs::remove_dir_all(&context.cwd);
         }

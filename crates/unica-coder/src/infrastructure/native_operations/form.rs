@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::application::AdapterOutcome;
+use crate::domain::format_profile::{classify_root_version, FormatCompatibility};
 use crate::domain::workspace::WorkspaceContext;
 use roxmltree::Document;
 use serde_json::{json, Map, Value};
@@ -145,13 +146,10 @@ pub(crate) fn validate_form(
                 root.tag_name().name()
             ));
         } else {
-            let version = root.attribute("version").unwrap_or("");
-            if version == "2.20" {
-                report.ok(format!("Root element: Form version={version}"));
-            } else if version.is_empty() {
-                report.warn("Form version attribute missing");
-            } else {
-                report.warn(format!("Form version='{version}' (expected 2.20)"));
+            match classify_root_version(root.attribute("version")) {
+                Ok(FormatCompatibility::Supported { .. }) => report.ok("Export format: 2.20"),
+                Ok(compatibility) => report.warn(format_compatibility_warning(&compatibility)),
+                Err(error) => report.error(error.to_string()),
             }
         }
 
@@ -2017,7 +2015,8 @@ pub(crate) fn add_form(args: &Map<String, Value>, context: &WorkspaceContext) ->
         let mut object_text = object_source_text.clone();
         let (object_type, object_name) = detect_form_add_object(&object_text)?;
         let format_version =
-            detect_format_version(object_xml_full.parent().unwrap_or(context.cwd.as_path()));
+            detect_format_version(object_xml_full.parent().unwrap_or(context.cwd.as_path()))?
+                .to_string();
 
         let purpose = normalize_form_purpose(purpose_raw);
         validate_form_purpose(&object_type, &purpose)?;
@@ -3626,7 +3625,8 @@ fn plan_form_compile(
             .map_err(|err| format!("failed to parse Form JSON: {err}"))?
     };
 
-    let format_version = detect_format_version(output_path.parent().unwrap_or(&context.cwd));
+    let format_version =
+        detect_format_version(output_path.parent().unwrap_or(&context.cwd))?.to_string();
     let (xml, stats) = form_compile_xml(&defn, &format_version)?;
     Ok(FormCompilePlan {
         output_label,

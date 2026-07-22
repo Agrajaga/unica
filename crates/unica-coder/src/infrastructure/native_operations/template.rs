@@ -89,7 +89,7 @@ pub(crate) fn add_template(
         fs::create_dir_all(&template_ext_dir)
             .map_err(|err| format!("failed to create {}: {err}", template_ext_dir.display()))?;
 
-        let format_version = detect_format_version(&src_dir_abs);
+        let format_version = detect_format_version(&src_dir_abs)?.to_string();
         let template_uuid = fresh_uuid();
         let template_meta_xml = template_metadata_xml(
             template_name,

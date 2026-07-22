@@ -1,7 +1,9 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::application::{AdapterOutcome, SupportGuardRequirement};
-use crate::domain::format_profile::ACTIVE_FORMAT_PROFILE;
+use crate::domain::format_profile::{
+    classify_root_version, ExportFormatVersion, FormatCompatibility, ACTIVE_FORMAT_PROFILE,
+};
 use crate::domain::workspace::WorkspaceContext;
 use roxmltree::Document;
 use serde_json::{json, Map, Value};
@@ -1571,20 +1573,42 @@ pub(crate) fn extension_name_prefix(config: &Path) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-pub(crate) fn detect_format_version(start: &Path) -> String {
+pub(crate) fn detect_format_version(start: &Path) -> Result<ExportFormatVersion, String> {
     let mut current = Some(start);
     while let Some(dir) = current {
         let cfg_path = dir.join("Configuration.xml");
         if cfg_path.is_file() {
-            if let Ok(head) = fs::read_to_string(&cfg_path) {
-                if let Some(version) = extract_xml_attr(&head, "MetaDataObject", "version") {
-                    return version;
-                }
-            }
+            let text = fs::read_to_string(&cfg_path)
+                .map_err(|error| format!("failed to read {}: {error}", cfg_path.display()))?;
+            let document = Document::parse(text.trim_start_matches('\u{feff}'))
+                .map_err(|error| format!("failed to parse {}: {error}", cfg_path.display()))?;
+            return match classify_root_version(document.root_element().attribute("version")) {
+                Ok(FormatCompatibility::Supported { actual }) => Ok(actual),
+                Ok(compatibility) => Err(format_compatibility_warning(&compatibility)),
+                Err(error) => Err(error.to_string()),
+            };
         }
         current = dir.parent();
     }
-    ACTIVE_FORMAT_PROFILE.export_format.to_string()
+    ExportFormatVersion::parse(ACTIVE_FORMAT_PROFILE.export_format)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn format_compatibility_warning(compatibility: &FormatCompatibility) -> String {
+    match compatibility {
+        FormatCompatibility::Older { actual } => format!(
+            "Export format {actual} is older than supported {}; migrate the configuration before writing.",
+            ACTIVE_FORMAT_PROFILE.export_format
+        ),
+        FormatCompatibility::Newer { actual } => format!(
+            "Export format {actual} is newer than supported {}; platform 1C 8.5 support is planned in upcoming releases.",
+            ACTIVE_FORMAT_PROFILE.export_format
+        ),
+        FormatCompatibility::Supported { .. } => format!(
+            "Export format is supported ({})",
+            ACTIVE_FORMAT_PROFILE.export_format
+        ),
+    }
 }
 
 pub(crate) fn support_state_lines_for_configuration(

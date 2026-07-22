@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::application::AdapterOutcome;
+use crate::domain::format_profile::{classify_root_version, FormatCompatibility};
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::metadata_kinds::metadata_kind;
 use roxmltree::Document;
@@ -2036,12 +2037,12 @@ pub(crate) fn meta_validate_one(
         check1_ok = false;
     }
 
-    let version = root.attribute("version").unwrap_or("");
-    if version.is_empty() {
-        report.warn("1. Missing version attribute on MetaDataObject");
-    } else if version != "2.20" {
-        report.warn(format!("1. Unusual version '{version}' (expected 2.20)"));
+    match classify_root_version(root.attribute("version")) {
+        Ok(FormatCompatibility::Supported { .. }) => report.ok("Export format: 2.20"),
+        Ok(compatibility) => report.warn(format_compatibility_warning(&compatibility)),
+        Err(error) => report.error(error.to_string()),
     }
+    let version = root.attribute("version").unwrap_or("");
 
     let child_elements = root
         .children()
@@ -6311,7 +6312,7 @@ fn compile_meta_object(
             ));
         }
     }
-    let format_version = detect_format_version(output_dir);
+    let format_version = detect_format_version(output_dir)?.to_string();
     let (metadata_xml, uid) =
         meta_compile_object_xml(object, &obj_type, obj_name, &format_version)?;
     transaction.create_utf8_bom_text(&main_xml_path, &metadata_xml)?;

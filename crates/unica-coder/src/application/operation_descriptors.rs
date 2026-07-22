@@ -17,6 +17,7 @@ pub(crate) struct OperationDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FormatGuardPolicy {
     ExistingDump,
+    OptionalExistingBase,
     NewDump,
     None,
 }
@@ -43,6 +44,7 @@ const OUTPUT_DIR: &[&str] = &["OutputDir", "outputDir"];
 const OUT_FILE: &[&str] = &["OutFile", "outFile"];
 const EXTENSION_PATH: &[&str] = &["ExtensionPath", "extensionPath"];
 const CFE_BORROW_SOURCE: &[&str] = &["ExtensionPath", "ConfigPath", "extensionPath", "configPath"];
+const CFE_INIT_BASE: &[&str] = &["ConfigPath", "configPath"];
 const OBJECT_PATH: &[&str] = &["ObjectPath", "objectPath", "Path", "path"];
 const OBJECT_PATH_REQUIRED: &[&str] = &["ObjectPath"];
 const SRC_DIR: &[&str] = &["SrcDir", "srcDir"];
@@ -134,8 +136,8 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         "cfe-init",
         EMPTY,
         OUTPUT_DIR,
-        OUTPUT_DIR,
-        FormatGuardPolicy::NewDump,
+        CFE_INIT_BASE,
+        FormatGuardPolicy::OptionalExistingBase,
         None,
     ),
     descriptor_with_format(

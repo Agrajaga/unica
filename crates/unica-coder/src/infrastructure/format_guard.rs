@@ -21,7 +21,10 @@ pub(crate) fn evaluate_format_guard(
     let Some(descriptor) = native_operation_descriptor(operation) else {
         return Ok(FormatGuardCheck::Allow);
     };
-    if descriptor.format_guard != FormatGuardPolicy::ExistingDump {
+    if !matches!(
+        descriptor.format_guard,
+        FormatGuardPolicy::ExistingDump | FormatGuardPolicy::OptionalExistingBase
+    ) {
         return Ok(FormatGuardCheck::Allow);
     }
     for name in descriptor.source_path_args {
@@ -260,6 +263,35 @@ mod tests {
             .warnings
             .join("\n")
             .contains("unica.cfe.migrate_format"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cfe_init_preflights_its_optional_cf_base_with_cf_migration() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-format-guard-cfe-init-{}",
+            std::process::id()
+        ));
+        let path = config(&root, Some("2.19"));
+        let mut args = Map::new();
+        args.insert(
+            "ConfigPath".into(),
+            Value::String(path.display().to_string()),
+        );
+
+        let check = evaluate_format_guard(spec("unica.cfe.init"), &args, &context(&root)).unwrap();
+        let FormatGuardCheck::Block {
+            outcome,
+            diagnostic,
+        } = check
+        else {
+            panic!("older optional CF base must block CFE init");
+        };
+        assert_eq!(diagnostic["code"], "formatMigrationAvailable");
+        assert!(outcome
+            .warnings
+            .join("\n")
+            .contains("unica.cf.migrate_format"));
         let _ = std::fs::remove_dir_all(root);
     }
 

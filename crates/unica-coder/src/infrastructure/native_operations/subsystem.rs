@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::application::AdapterOutcome;
+use crate::domain::format_profile::{classify_root_version, FormatCompatibility};
 use crate::domain::workspace::WorkspaceContext;
 use roxmltree::Document;
 use serde_json::{json, Map, Value};
@@ -532,6 +533,11 @@ pub(crate) fn validate_subsystem(
 
         let root = doc.root_element();
         let version = root.attribute("version").unwrap_or("");
+        match classify_root_version(root.attribute("version")) {
+            Ok(FormatCompatibility::Supported { .. }) => report.ok("Export format: 2.20"),
+            Ok(compatibility) => report.warn(format_compatibility_warning(&compatibility)),
+            Err(error) => report.error(error.to_string()),
+        }
         let Some(sub) = root.children().find(|node| {
             role_info_element(*node, "Subsystem", Some("http://v8.1c.ru/8.3/MDClasses"))
         }) else {
@@ -1368,7 +1374,7 @@ fn compile_subsystem_internal(
 
         let output_dir = required_path(args, &["outputDir", "OutputDir"], "OutputDir")
             .map(|path| absolutize(path, &context.cwd))?;
-        let format_version = detect_format_version(&output_dir);
+        let format_version = detect_format_version(&output_dir)?.to_string();
 
         let synonym = json_string_field(&defn, "synonym")
             .filter(|value| !value.is_empty())
@@ -1980,7 +1986,7 @@ mod tests {
             &config_path,
             concat!(
                 "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n",
-                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\">\r\n",
+                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\">\r\n",
                 "\t<Configuration>\r\n",
                 "\t\t<ChildObjects>\r\n",
                 "\t\t\t<Language>Russian</Language>\r\n",
@@ -2040,7 +2046,7 @@ mod tests {
             &parent_path,
             concat!(
                 "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n",
-                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\">\r\n",
+                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\">\r\n",
                 "\t<Subsystem>\r\n",
                 "\t\t<ChildObjects>\r\n",
                 "\t\t\t<Subsystem>alpha</Subsystem>\r\n",
@@ -2122,7 +2128,7 @@ mod tests {
         let config_path = context.cwd.join("Configuration.xml");
         let config_before = concat!(
             "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n",
-            "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\">\r\n",
+            "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\">\r\n",
             "\t<Configuration><ChildObjects/></Configuration>\r\n",
             "</MetaDataObject>"
         )
