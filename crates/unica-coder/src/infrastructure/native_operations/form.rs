@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
 
+use crate::application::operation_descriptors::{FORM_PATH, OBJECT_PATH};
 use crate::application::AdapterOutcome;
 use crate::domain::format_profile::{classify_root_version, FormatCompatibility};
 use crate::domain::workspace::WorkspaceContext;
@@ -109,7 +110,7 @@ pub(crate) fn validate_form(
     context: &WorkspaceContext,
 ) -> AdapterOutcome {
     let result = (|| -> Result<(bool, String, PathBuf, Vec<String>), String> {
-        let raw_path = required_path(args, &["formPath", "FormPath", "path", "Path"], "FormPath")?;
+        let raw_path = required_path(args, FORM_PATH, "FormPath")?;
         let form_path = resolve_form_info_path(absolutize(raw_path, &context.cwd));
         if !form_path.is_file() {
             return Err(format!("File not found: {}", form_path.display()));
@@ -1210,7 +1211,7 @@ pub(crate) fn analyze_form_info(
     context: &WorkspaceContext,
 ) -> AdapterOutcome {
     let result = (|| -> Result<(String, PathBuf), String> {
-        let raw_path = required_path(args, &["formPath", "FormPath", "path", "Path"], "FormPath")?;
+        let raw_path = required_path(args, FORM_PATH, "FormPath")?;
         let form_path = resolve_form_info_path(absolutize(raw_path, &context.cwd));
         if !form_path.is_file() {
             return Err(format!("File not found: {}", form_path.display()));
@@ -2000,7 +2001,7 @@ pub(crate) fn form_format_type(type_node: roxmltree::Node<'_, '_>) -> String {
 
 pub(crate) fn add_form(args: &Map<String, Value>, context: &WorkspaceContext) -> AdapterOutcome {
     let result = (|| -> Result<(String, Vec<PathBuf>), String> {
-        let object_path_raw = required_path(args, &["objectPath", "ObjectPath"], "ObjectPath")?;
+        let object_path_raw = required_path(args, OBJECT_PATH, "ObjectPath")?;
         let form_name = required_string(args, &["formName", "FormName"], "FormName")?;
         let synonym = string_arg(args, &["synonym", "Synonym"]).unwrap_or(form_name);
         let purpose_raw = string_arg(args, &["purpose", "Purpose"]).unwrap_or("Object");
@@ -3690,8 +3691,7 @@ pub(crate) fn edit_form_with_mode(
     mode: FormEditMode,
 ) -> AdapterOutcome {
     let edit_result = (|| -> Result<(String, PathBuf, bool), String> {
-        let form_path_raw =
-            required_path(args, &["formPath", "FormPath", "path", "Path"], "FormPath")?;
+        let form_path_raw = required_path(args, FORM_PATH, "FormPath")?;
         let form_path = absolutize(form_path_raw.clone(), &context.cwd);
         if !form_path.exists() {
             return Err(format!("File not found: {}", form_path_raw.display()));

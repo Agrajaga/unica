@@ -3861,15 +3861,143 @@ mod tests {
 
     #[test]
     fn mutating_platform_xml_operations_declare_effective_format_paths() {
-        use operation_descriptors::{FormatGuardPolicy, FormatPathPolicy};
+        use operation_descriptors::FormatGuardPolicy;
 
-        let specialized = [
-            ("help-add", FormatPathPolicy::DefaultSrcObject),
-            ("form-compile", FormatPathPolicy::FormCompile),
-            ("form-remove", FormatPathPolicy::DefaultSrcObject),
-            ("template-add", FormatPathPolicy::DefaultSrcObject),
-            ("template-remove", FormatPathPolicy::DefaultSrcObject),
+        let expected = [
+            (
+                "cf-edit",
+                &["ConfigPath", "configPath", "Path", "path"][..],
+                "HandlerResolved",
+            ),
+            ("cf-init", &["OutputDir", "outputDir"][..], "DeclaredArgs"),
+            (
+                "support-edit",
+                &["Path", "path", "TargetPath", "targetPath"][..],
+                "DeclaredArgs",
+            ),
+            (
+                "cfe-borrow",
+                &["ExtensionPath", "ConfigPath", "extensionPath", "configPath"][..],
+                "DeclaredArgs",
+            ),
+            (
+                "cfe-init",
+                &["ConfigPath", "configPath"][..],
+                "DeclaredArgs",
+            ),
+            ("epf-init", &["OutputDir", "outputDir"][..], "DeclaredArgs"),
+            ("erf-init", &["OutputDir", "outputDir"][..], "DeclaredArgs"),
+            (
+                "cfe-patch-method",
+                &["ExtensionPath", "extensionPath"][..],
+                "DeclaredArgs",
+            ),
+            (
+                "meta-compile",
+                &["OutputDir", "outputDir"][..],
+                "DeclaredArgs",
+            ),
+            (
+                "meta-edit",
+                &["ObjectPath", "objectPath", "Path", "path"][..],
+                "HandlerResolved",
+            ),
+            (
+                "meta-remove",
+                &["ConfigDir", "configDir"][..],
+                "DeclaredArgs",
+            ),
+            ("help-add", &["SrcDir", "srcDir"][..], "DefaultSrcObject"),
+            (
+                "form-add",
+                &["ObjectPath", "objectPath", "Path", "path"][..],
+                "HandlerResolved",
+            ),
+            (
+                "form-compile",
+                &["OutputPath", "outputPath"][..],
+                "FormCompile",
+            ),
+            (
+                "form-edit",
+                &["FormPath", "formPath", "Path", "path"][..],
+                "DeclaredArgs",
+            ),
+            ("form-remove", &["SrcDir", "srcDir"][..], "DefaultSrcObject"),
+            (
+                "interface-edit",
+                &["CIPath", "ciPath", "path", "Path"][..],
+                "DeclaredArgs",
+            ),
+            (
+                "subsystem-compile",
+                &["OutputDir", "outputDir", "Parent", "parent"][..],
+                "DeclaredArgs",
+            ),
+            (
+                "subsystem-edit",
+                &["SubsystemPath", "subsystemPath", "Path", "path"][..],
+                "HandlerResolved",
+            ),
+            (
+                "template-add",
+                &["SrcDir", "srcDir"][..],
+                "DefaultSrcObject",
+            ),
+            (
+                "template-remove",
+                &["SrcDir", "srcDir"][..],
+                "DefaultSrcObject",
+            ),
+            (
+                "dcs-compile",
+                &["OutputPath", "outputPath"][..],
+                "DeclaredArgs",
+            ),
+            (
+                "dcs-edit",
+                &["TemplatePath", "templatePath", "Path", "path"][..],
+                "HandlerResolved",
+            ),
+            (
+                "mxl-compile",
+                &["OutputPath", "outputPath"][..],
+                "DeclaredArgs",
+            ),
+            (
+                "role-compile",
+                &["OutputDir", "outputDir"][..],
+                "DeclaredArgs",
+            ),
         ];
+
+        let actual_operations = tools()
+            .into_iter()
+            .filter(|tool| tool.mutating)
+            .filter_map(|tool| {
+                let ToolHandler::NativeOperation { operation, .. } = tool.handler else {
+                    return None;
+                };
+                let descriptor = operation_descriptors::native_operation_descriptor(operation)?;
+                (!matches!(descriptor.format_guard, FormatGuardPolicy::None)).then_some(operation)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_operations,
+            expected.iter().map(|(operation, _, _)| *operation).collect::<Vec<_>>(),
+            "the handler-path contract table must cover every mutating platform-XML operation exactly once"
+        );
+
+        for (operation, aliases, policy) in expected {
+            let descriptor = operation_descriptors::native_operation_descriptor(operation).unwrap();
+            assert_eq!(descriptor.source_path_args, aliases, "{operation} aliases");
+            assert_eq!(
+                format!("{:?}", descriptor.format_path_policy),
+                policy,
+                "{operation} effective path policy"
+            );
+        }
+
         for tool in tools().into_iter().filter(|tool| tool.mutating) {
             let ToolHandler::NativeOperation { operation, .. } = tool.handler else {
                 continue;
@@ -3882,11 +4010,6 @@ mod tests {
                 !descriptor.source_path_args.is_empty(),
                 "{operation} must declare its platform-XML read/target path arguments"
             );
-            let expected = specialized
-                .iter()
-                .find_map(|(name, policy)| (*name == operation).then_some(*policy))
-                .unwrap_or(FormatPathPolicy::DeclaredArgs);
-            assert_eq!(descriptor.format_path_policy, expected, "{operation}");
         }
         assert_eq!(
             operation_descriptors::native_operation_descriptor("mxl-compile")

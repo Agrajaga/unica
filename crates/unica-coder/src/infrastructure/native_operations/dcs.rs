@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
 
+use crate::application::operation_descriptors::TEMPLATE_PATH;
 use crate::application::AdapterOutcome;
 use crate::domain::workspace::WorkspaceContext;
 use roxmltree::Document;
@@ -1384,11 +1385,7 @@ pub(crate) fn resolve_dcs_info_path_for_script(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
 ) -> Result<PathBuf, String> {
-    let raw_path = required_path(
-        args,
-        &["templatePath", "TemplatePath", "path", "Path"],
-        "TemplatePath",
-    )?;
+    let raw_path = required_path(args, TEMPLATE_PATH, "TemplatePath")?;
     let original_path = raw_path.clone();
     let mut template_path = raw_path.clone();
     if template_path
@@ -2727,11 +2724,7 @@ pub(crate) fn resolve_dcs_validate_path(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
 ) -> Result<PathBuf, String> {
-    let raw_path = required_path(
-        args,
-        &["templatePath", "TemplatePath", "path", "Path"],
-        "TemplatePath",
-    )?;
+    let raw_path = required_path(args, TEMPLATE_PATH, "TemplatePath")?;
     let mut display_path = raw_path.clone();
     let mut template_path = absolutize(raw_path, &context.cwd);
 

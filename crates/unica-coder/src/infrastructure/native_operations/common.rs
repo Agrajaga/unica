@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
 
+use crate::application::operation_descriptors::CF_PATH;
 use crate::application::{AdapterOutcome, SupportGuardRequirement};
 use crate::domain::format_profile::{
     classify_root_version, ExportFormatVersion, FormatCompatibility, ACTIVE_FORMAT_PROFILE,
@@ -1166,12 +1167,8 @@ pub(crate) fn resolve_cf_edit_config_path(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
 ) -> Result<PathBuf, String> {
-    let mut config_path = required_path(
-        args,
-        &["configPath", "ConfigPath", "path", "Path"],
-        "ConfigPath",
-    )
-    .map(|path| absolutize(path, &context.cwd))?;
+    let mut config_path =
+        required_path(args, CF_PATH, "ConfigPath").map(|path| absolutize(path, &context.cwd))?;
     if config_path.is_dir() {
         let candidate = config_path.join("Configuration.xml");
         if candidate.is_file() {

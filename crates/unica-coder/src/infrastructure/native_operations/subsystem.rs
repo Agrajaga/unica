@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
 
+use crate::application::operation_descriptors::SUBSYSTEM_PATH;
 use crate::application::AdapterOutcome;
 use crate::domain::format_profile::{classify_root_version, FormatCompatibility};
 use crate::domain::workspace::WorkspaceContext;
@@ -119,11 +120,7 @@ pub(crate) fn edit_subsystem(
             return Err("Either -DefinitionFile or -Operation is required".to_string());
         }
 
-        let raw_path = required_path(
-            args,
-            &["subsystemPath", "SubsystemPath", "path", "Path"],
-            "SubsystemPath",
-        )?;
+        let raw_path = required_path(args, SUBSYSTEM_PATH, "SubsystemPath")?;
         let resolved_path = resolve_subsystem_edit_xml(absolutize(raw_path, &context.cwd))?;
         let mut model = load_subsystem_edit_model(&resolved_path)?;
         let obj_name = model.name.clone();
@@ -497,11 +494,7 @@ pub(crate) fn validate_subsystem(
     context: &WorkspaceContext,
 ) -> AdapterOutcome {
     let result = (|| -> Result<(bool, String, PathBuf, Option<PathBuf>, String), String> {
-        let raw_path = required_path(
-            args,
-            &["subsystemPath", "SubsystemPath", "path", "Path"],
-            "SubsystemPath",
-        )?;
+        let raw_path = required_path(args, SUBSYSTEM_PATH, "SubsystemPath")?;
         let path = absolutize(raw_path, &context.cwd);
         let detailed = bool_arg(args, &["detailed", "Detailed"]);
         let out_file =
@@ -923,11 +916,7 @@ pub(crate) fn analyze_subsystem_info(
     context: &WorkspaceContext,
 ) -> AdapterOutcome {
     let result = (|| -> Result<(String, Option<PathBuf>, PathBuf), String> {
-        let raw_path = required_path(
-            args,
-            &["subsystemPath", "SubsystemPath", "path", "Path"],
-            "SubsystemPath",
-        )?;
+        let raw_path = required_path(args, SUBSYSTEM_PATH, "SubsystemPath")?;
         let path = absolutize(raw_path, &context.cwd);
         let mode = string_arg(args, &["mode", "Mode"]).unwrap_or("overview");
         let name_filter = string_arg(args, &["name", "Name"]).unwrap_or("");

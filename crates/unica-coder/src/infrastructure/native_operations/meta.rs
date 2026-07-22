@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
 
+use crate::application::operation_descriptors::OBJECT_PATH;
 use crate::application::AdapterOutcome;
 use crate::domain::format_profile::{classify_root_version, FormatCompatibility};
 use crate::domain::workspace::WorkspaceContext;
@@ -9831,11 +9832,7 @@ pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -
         if definition_file.is_none() && operation.is_none() {
             return Err("Either -DefinitionFile or -Operation is required".to_string());
         }
-        let object_path_raw = required_path(
-            args,
-            &["objectPath", "ObjectPath", "path", "Path"],
-            "ObjectPath",
-        )?;
+        let object_path_raw = required_path(args, OBJECT_PATH, "ObjectPath")?;
         let object_path = resolve_meta_edit_object_path(&object_path_raw, &context.cwd)?;
         let value = string_arg(args, &["value", "Value"]).unwrap_or_default();
 

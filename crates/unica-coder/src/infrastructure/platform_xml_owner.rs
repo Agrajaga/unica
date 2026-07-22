@@ -114,7 +114,11 @@ pub(crate) fn resolve_platform_xml_owner(
             }
         })?;
         let root = document.root_element();
-        if root.attribute("version").is_some() || root.tag_name().name() == "MetaDataObject" {
+        let root_qname = (root.tag_name().namespace(), root.tag_name().name());
+        if root.attribute("version").is_some()
+            || root.tag_name().name() == "MetaDataObject"
+            || known_standalone_root(root_qname)
+        {
             return read_platform_xml_owner(&target, OwnerExpectation::Standalone).map(Some);
         }
     }

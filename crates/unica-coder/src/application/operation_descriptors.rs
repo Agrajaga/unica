@@ -18,6 +18,7 @@ pub(crate) struct OperationDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FormatPathPolicy {
     DeclaredArgs,
+    HandlerResolved,
     DefaultSrcObject,
     FormCompile,
 }
@@ -45,7 +46,7 @@ pub(crate) enum SupportGuardPolicy {
 }
 
 const EMPTY: &[&str] = &[];
-const CF_PATH: &[&str] = &["ConfigPath", "configPath", "Path", "path"];
+pub(crate) const CF_PATH: &[&str] = &["ConfigPath", "configPath", "Path", "path"];
 const CONFIG_PATH: &[&str] = &["ConfigPath", "configPath"];
 const CONFIG_DIR: &[&str] = &["ConfigDir", "configDir"];
 const OUTPUT_DIR: &[&str] = &["OutputDir", "outputDir"];
@@ -53,18 +54,18 @@ const OUT_FILE: &[&str] = &["OutFile", "outFile"];
 const EXTENSION_PATH: &[&str] = &["ExtensionPath", "extensionPath"];
 const CFE_BORROW_SOURCE: &[&str] = &["ExtensionPath", "ConfigPath", "extensionPath", "configPath"];
 const CFE_INIT_BASE: &[&str] = &["ConfigPath", "configPath"];
-const OBJECT_PATH: &[&str] = &["ObjectPath", "objectPath", "Path", "path"];
+pub(crate) const OBJECT_PATH: &[&str] = &["ObjectPath", "objectPath", "Path", "path"];
 const OBJECT_PATH_REQUIRED: &[&str] = &["ObjectPath"];
 const SRC_DIR: &[&str] = &["SrcDir", "srcDir"];
-const FORM_PATH: &[&str] = &["FormPath", "formPath"];
+pub(crate) const FORM_PATH: &[&str] = &["FormPath", "formPath", "Path", "path"];
 const FORM_PATH_REQUIRED: &[&str] = &["FormPath"];
 const CI_PATH: &[&str] = &["CIPath", "ciPath", "path", "Path"];
 const CI_PATH_REQUIRED: &[&str] = &["CIPath"];
-const SUBSYSTEM_PATH: &[&str] = &["SubsystemPath", "subsystemPath"];
+pub(crate) const SUBSYSTEM_PATH: &[&str] = &["SubsystemPath", "subsystemPath", "Path", "path"];
 const SUBSYSTEM_PATH_REQUIRED: &[&str] = &["SubsystemPath"];
 const SUBSYSTEM_COMPILE_WRITE: &[&str] = &["OutputDir", "outputDir", "Parent", "parent"];
 const OUTPUT_PATH: &[&str] = &["OutputPath", "outputPath"];
-const TEMPLATE_PATH: &[&str] = &["TemplatePath", "templatePath"];
+pub(crate) const TEMPLATE_PATH: &[&str] = &["TemplatePath", "templatePath", "Path", "path"];
 const TEMPLATE_PATH_REQUIRED: &[&str] = &["TemplatePath"];
 const RIGHTS_PATH: &[&str] = &["RightsPath", "rightsPath"];
 const RIGHTS_PATH_REQUIRED: &[&str] = &["RightsPath"];
@@ -108,11 +109,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
             SupportGuardRequirement::Editable,
         )),
     ),
-    descriptor(
+    descriptor_with_paths(
         "cf-edit",
         EMPTY,
         CF_PATH,
         CF_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
         Some(path_guard(CF_PATH, SupportGuardRequirement::Editable)),
     ),
     descriptor("cf-info", &["ConfigPath"], OUT_FILE, CONFIG_PATH, None),
@@ -185,11 +188,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         OUTPUT_DIR,
         Some(path_guard(OUTPUT_DIR, SupportGuardRequirement::Editable)),
     ),
-    descriptor(
+    descriptor_with_paths(
         "meta-edit",
         OBJECT_PATH_REQUIRED,
         OBJECT_PATH,
         OBJECT_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
         Some(path_guard(OBJECT_PATH, SupportGuardRequirement::Editable)),
     ),
     descriptor(
@@ -222,11 +227,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         FormatPathPolicy::DefaultSrcObject,
         Some(object_name_guard(SupportGuardRequirement::Editable)),
     ),
-    descriptor(
+    descriptor_with_paths(
         "form-add",
         EMPTY,
         OBJECT_PATH,
         OBJECT_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
         Some(path_guard(OBJECT_PATH, SupportGuardRequirement::Editable)),
     ),
     descriptor_with_paths(
@@ -277,11 +284,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         SUBSYSTEM_COMPILE_WRITE,
         Some(path_guard(OUTPUT_DIR, SupportGuardRequirement::Editable)),
     ),
-    descriptor(
+    descriptor_with_paths(
         "subsystem-edit",
         SUBSYSTEM_PATH_REQUIRED,
         SUBSYSTEM_PATH,
         SUBSYSTEM_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
         Some(path_guard(
             SUBSYSTEM_PATH,
             SupportGuardRequirement::Editable,
@@ -326,11 +335,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         OUTPUT_PATH,
         Some(path_guard(OUTPUT_PATH, SupportGuardRequirement::Editable)),
     ),
-    descriptor(
+    descriptor_with_paths(
         "dcs-edit",
         TEMPLATE_PATH_REQUIRED,
         TEMPLATE_PATH,
         TEMPLATE_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
         Some(path_guard(TEMPLATE_PATH, SupportGuardRequirement::Editable)),
     ),
     descriptor(

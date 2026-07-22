@@ -7,9 +7,14 @@ use crate::domain::format_profile::{
     classify_root_version, FormatCompatibility, ACTIVE_FORMAT_PROFILE,
 };
 use crate::domain::workspace::WorkspaceContext;
+use crate::infrastructure::native_operations::common::{
+    resolve_cf_edit_config_path, resolve_form_add_object_path, resolve_subsystem_edit_xml,
+};
+use crate::infrastructure::native_operations::dcs::resolve_dcs_validate_path;
 use crate::infrastructure::native_operations::form::{
     form_compile_infer_from_object_target, form_compile_normalize_from_object_output_label,
 };
+use crate::infrastructure::native_operations::meta::resolve_meta_edit_object_path;
 use crate::infrastructure::platform_xml_owner::{resolve_platform_xml_owner, PlatformXmlOwnerKind};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
@@ -161,6 +166,9 @@ fn effective_format_paths(
             .filter_map(|name| args.get(*name).and_then(Value::as_str))
             .map(|raw| absolutize(raw, &context.cwd))
             .collect(),
+        FormatPathPolicy::HandlerResolved => {
+            handler_resolved_format_paths(descriptor, args, context)
+        }
         FormatPathPolicy::DefaultSrcObject => {
             let src = ["SrcDir", "srcDir"]
                 .iter()
@@ -180,6 +188,32 @@ fn effective_format_paths(
         }
         FormatPathPolicy::FormCompile => form_compile_format_paths(args, context),
     }
+}
+
+fn handler_resolved_format_paths(
+    descriptor: &crate::application::operation_descriptors::OperationDescriptor,
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+) -> Vec<PathBuf> {
+    let raw = descriptor
+        .source_path_args
+        .iter()
+        .find_map(|name| args.get(*name).and_then(Value::as_str));
+    let fallback = raw.map(|path| absolutize(path, &context.cwd));
+    let resolved =
+        match descriptor.operation {
+            "cf-edit" => resolve_cf_edit_config_path(args, context).ok(),
+            "meta-edit" => raw
+                .and_then(|path| resolve_meta_edit_object_path(Path::new(path), &context.cwd).ok()),
+            "form-add" => raw
+                .and_then(|path| resolve_form_add_object_path(absolutize(path, &context.cwd)).ok()),
+            "subsystem-edit" => {
+                raw.and_then(|path| resolve_subsystem_edit_xml(absolutize(path, &context.cwd)).ok())
+            }
+            "dcs-edit" => resolve_dcs_validate_path(args, context).ok(),
+            _ => None,
+        };
+    resolved.or(fallback).into_iter().collect()
 }
 
 fn form_compile_format_paths(
@@ -233,7 +267,8 @@ fn absolutize(raw: &str, cwd: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::evaluate_format_guard;
+    use super::{effective_format_paths, evaluate_format_guard};
+    use crate::application::operation_descriptors::native_operation_descriptor;
     use crate::application::ports::FormatGuardCheck;
     use crate::application::tools;
     use crate::domain::workspace::WorkspaceContext;
@@ -446,6 +481,211 @@ mod tests {
             panic!("missing root version must be old-format warning");
         };
         assert_eq!(diagnostic["actualFormat"], "1.0");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn versionless_known_standalone_form_is_classified_as_1_0_owner() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-format-guard-versionless-standalone-form-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("Form.xml");
+        std::fs::write(
+            &target,
+            r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform"/>"#,
+        )
+        .unwrap();
+        let mut args = Map::new();
+        args.insert(
+            "FormPath".into(),
+            Value::String(target.display().to_string()),
+        );
+
+        let check = evaluate_format_guard(spec("unica.form.edit"), &args, &context(&root)).unwrap();
+        let FormatGuardCheck::Block { diagnostic, .. } = check else {
+            panic!("a versionless standalone Form is a 1.0 owner and must block mutation");
+        };
+        assert_eq!(diagnostic["actualFormat"], "1.0");
+        assert_eq!(diagnostic["ownerKind"], "standalone");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn effective_format_paths_match_mutating_handler_directory_and_alias_resolution() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-format-guard-handler-paths-{}",
+            std::process::id()
+        ));
+        let config_path = config(&root, Some("2.19"));
+        let src = config_path.parent().unwrap();
+
+        let object_dir = src.join("Catalogs/Items");
+        std::fs::create_dir_all(&object_dir).unwrap();
+        let object_xml = src.join("Catalogs/Items.xml");
+        std::fs::write(&object_xml, "object bytes").unwrap();
+
+        let subsystem_dir = src.join("Subsystems/Sales");
+        std::fs::create_dir_all(&subsystem_dir).unwrap();
+        let subsystem_xml = src.join("Subsystems/Sales.xml");
+        std::fs::write(&subsystem_xml, "subsystem bytes").unwrap();
+
+        let template_dir = src.join("Reports/Sales/Templates/Print");
+        let template_xml = template_dir.join("Ext/Template.xml");
+        std::fs::create_dir_all(template_xml.parent().unwrap()).unwrap();
+        std::fs::write(&template_xml, "template bytes").unwrap();
+
+        let form_xml = src.join("Catalogs/Items/Forms/Main/Ext/Form.xml");
+        std::fs::create_dir_all(form_xml.parent().unwrap()).unwrap();
+        std::fs::write(&form_xml, "form bytes").unwrap();
+
+        let protected_paths = [
+            config_path.clone(),
+            object_xml.clone(),
+            subsystem_xml.clone(),
+            template_xml.clone(),
+            form_xml.clone(),
+        ];
+        let before = protected_paths
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+
+        let cases = [
+            ("cf-edit", "path", src.to_path_buf(), config_path),
+            ("meta-edit", "Path", object_dir.clone(), object_xml.clone()),
+            (
+                "form-add",
+                "path",
+                object_dir,
+                object_xml.canonicalize().unwrap(),
+            ),
+            (
+                "subsystem-edit",
+                "Path",
+                subsystem_dir,
+                subsystem_xml.canonicalize().unwrap(),
+            ),
+            ("dcs-edit", "path", template_dir, template_xml),
+            ("form-edit", "Path", form_xml.clone(), form_xml),
+        ];
+
+        for (operation, alias, raw, expected) in cases {
+            let mut args = Map::new();
+            args.insert(alias.into(), Value::String(raw.display().to_string()));
+            let descriptor = native_operation_descriptor(operation).unwrap();
+            assert_eq!(
+                effective_format_paths(descriptor, &args, &context(&root)),
+                vec![expected.clone()],
+                "{operation} must guard the same effective XML path as its handler"
+            );
+            assert!(
+                matches!(
+                    evaluate_format_guard(
+                        spec(&format!("unica.{}", operation.replace('-', "."))),
+                        &args,
+                        &context(&root)
+                    )
+                    .unwrap(),
+                    FormatGuardCheck::Block { .. }
+                ),
+                "{operation} alias {alias} must be blocked before its handler can write"
+            );
+        }
+        for (path, expected) in protected_paths.iter().zip(before) {
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                expected,
+                "format preflight must not mutate {}",
+                path.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn specialized_format_path_policies_resolve_representative_defaults() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-format-guard-specialized-paths-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let context = context(&root);
+
+        for operation in ["help-add", "form-remove", "template-add", "template-remove"] {
+            let mut args = Map::new();
+            args.insert("ObjectName".into(), Value::String("Reports/Sales".into()));
+            let descriptor = native_operation_descriptor(operation).unwrap();
+            assert_eq!(
+                effective_format_paths(descriptor, &args, &context),
+                vec![root.join("src/Reports/Sales.xml")],
+                "{operation} must compose its handler default SrcDir=src with ObjectName"
+            );
+        }
+
+        let mut form_compile_args = Map::new();
+        form_compile_args.insert(
+            "OutputPath".into(),
+            Value::String("src/Catalogs/Items/Forms/Main/Ext/Form.xml".into()),
+        );
+        form_compile_args.insert("FromObject".into(), Value::Bool(true));
+        form_compile_args.insert(
+            "ObjectPath".into(),
+            Value::String("src/Catalogs/Items".into()),
+        );
+        let descriptor = native_operation_descriptor("form-compile").unwrap();
+        assert_eq!(
+            effective_format_paths(descriptor, &form_compile_args, &context),
+            vec![
+                root.join("src/Catalogs/Items/Forms/Main/Ext/Form.xml"),
+                root.join("src/Catalogs/Items.xml"),
+            ],
+            "form-compile must guard both its normalized output and from-object input"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_only_path_aliases_still_reach_the_format_warning() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-format-guard-read-aliases-{}",
+            std::process::id()
+        ));
+        let config_path = config(&root, Some("2.19"));
+        let src = config_path.parent().unwrap();
+        let cases = [
+            (
+                "unica.form.info",
+                "Path",
+                src.join("Catalogs/Items/Forms/Main/Ext/Form.xml"),
+            ),
+            (
+                "unica.dcs.info",
+                "path",
+                src.join("Reports/Sales/Templates/Main/Ext/Template.xml"),
+            ),
+            (
+                "unica.mxl.info",
+                "Path",
+                src.join("Reports/Sales/Templates/Print/Ext/Template.xml"),
+            ),
+            (
+                "unica.subsystem.info",
+                "path",
+                src.join("Subsystems/Sales.xml"),
+            ),
+        ];
+
+        for (tool, alias, path) in cases {
+            let mut args = Map::new();
+            args.insert(alias.into(), Value::String(path.display().to_string()));
+            let check = evaluate_format_guard(spec(tool), &args, &context(&root)).unwrap();
+            let FormatGuardCheck::Warn { diagnostic, .. } = check else {
+                panic!("{tool} alias {alias} must resolve the old owner and warn");
+            };
+            assert_eq!(diagnostic["actualFormat"], "2.19", "{tool}");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
