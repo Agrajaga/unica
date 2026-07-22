@@ -128,9 +128,9 @@ fn read_root_info(path: &Path) -> Result<RootInfo, String> {
     let root = document.root_element();
     Ok(RootInfo {
         version: root.attribute("version").map(str::to_string),
-        is_extension: document
-            .descendants()
-            .any(|node| node.is_element() && node.tag_name().name() == "ConfigurationExtension"),
+        is_extension: document.descendants().any(|node| {
+            node.is_element() && node.tag_name().name() == "ConfigurationExtensionPurpose"
+        }),
     })
 }
 
@@ -230,6 +230,36 @@ mod tests {
             .join("\n")
             .contains("unica.cf.migrate_format"));
         assert_eq!(std::fs::read(path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn older_extension_dump_offers_extension_migration() {
+        let root =
+            std::env::temp_dir().join(format!("unica-format-guard-old-cfe-{}", std::process::id()));
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let path = src.join("Configuration.xml");
+        std::fs::write(
+            &path,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.19"><Configuration><Properties><ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose></Properties></Configuration></MetaDataObject>"#,
+        )
+        .unwrap();
+        let mut args = Map::new();
+        args.insert(
+            "ExtensionPath".into(),
+            Value::String(path.display().to_string()),
+        );
+
+        let check =
+            evaluate_format_guard(spec("unica.cfe.patch_method"), &args, &context(&root)).unwrap();
+        let FormatGuardCheck::Block { outcome, .. } = check else {
+            panic!("older extension mutation must be blocked");
+        };
+        assert!(outcome
+            .warnings
+            .join("\n")
+            .contains("unica.cfe.migrate_format"));
         let _ = std::fs::remove_dir_all(root);
     }
 

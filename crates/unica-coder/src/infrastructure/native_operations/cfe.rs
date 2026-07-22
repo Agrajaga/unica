@@ -1,7 +1,9 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::application::AdapterOutcome;
-use crate::domain::format_profile::ACTIVE_FORMAT_PROFILE;
+use crate::domain::format_profile::{
+    classify_root_version, FormatCompatibility, ACTIVE_FORMAT_PROFILE,
+};
 use crate::domain::workspace::WorkspaceContext;
 use roxmltree::Document;
 use serde_json::{json, Map, Value};
@@ -3958,7 +3960,6 @@ pub(crate) fn create_extension_scaffold(
         let mut compatibility = string_arg(args, &["compatibilityMode", "CompatibilityMode"])
             .unwrap_or("Version8_3_24")
             .to_string();
-        let mut format_version = ACTIVE_FORMAT_PROFILE.export_format.to_string();
         let interface_mode = if let Some(config_path) =
             path_arg(args, &["configPath", "ConfigPath"])
         {
@@ -4024,11 +4025,21 @@ pub(crate) fn create_extension_scaffold(
             match fs::read_to_string(&config_path) {
                 Ok(text) => match Document::parse(text.trim_start_matches('\u{feff}')) {
                     Ok(doc) => {
-                        if let Some(value) = doc.root_element().attribute("version") {
-                            format_version = value.to_string();
-                            stdout_prefix.push_str(&format!(
-                                "[INFO] Base config MDClasses format version: {format_version}\n"
-                            ));
+                        match classify_root_version(doc.root_element().attribute("version")) {
+                            Ok(FormatCompatibility::Supported { .. }) => {
+                                stdout_prefix.push_str(&format!(
+                                    "[INFO] Base config MDClasses format version: {}\n",
+                                    ACTIVE_FORMAT_PROFILE.export_format
+                                ));
+                            }
+                            Ok(compatibility) => {
+                                return Err(format!(
+                                    "Base config export format {} is unsupported; expected {}",
+                                    compatibility.actual(),
+                                    ACTIVE_FORMAT_PROFILE.export_format
+                                ));
+                            }
+                            Err(error) => return Err(error.to_string()),
                         }
                         if let Some(value) = first_text(&doc, "CompatibilityMode") {
                             compatibility = value;
@@ -4078,7 +4089,7 @@ pub(crate) fn create_extension_scaffold(
         let contained_object_ids = (23..30).map(stable_uuid).collect::<Vec<_>>();
         let contained_objects = contained_objects_xml(&contained_object_ids);
         let purpose = string_arg(args, &["purpose", "Purpose"]).unwrap_or("Customization");
-        let format_version_xml = escape_xml(&format_version);
+        let format_version_xml = ACTIVE_FORMAT_PROFILE.export_format;
         let vendor_xml = string_arg(args, &["vendor", "Vendor"])
             .map(escape_xml)
             .unwrap_or_default();
@@ -4545,7 +4556,7 @@ mod tests {
     }
 
     #[test]
-    fn cfe_init_inherits_mdclasses_format_version_from_base_config() {
+    fn cfe_init_uses_active_format_with_supported_base_config() {
         let context = temp_context("init-format-version");
         let src = context.cwd.join("src");
         write_file(
@@ -4595,12 +4606,69 @@ mod tests {
             let text = fs::read_to_string(&path).unwrap();
             assert!(
                 text.contains(r#"version="2.20""#),
-                "{} did not inherit base MDClasses format version:\n{text}",
+                "{} did not use the active MDClasses format version:\n{text}",
                 path.display()
             );
+            assert!(!text.contains(r#"version="2.17""#), "{text}");
         }
 
         let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn cfe_init_without_base_emits_only_active_format() {
+        let context = temp_context("init-active-format-without-base");
+        let mut args = Map::new();
+        args.insert("Name".to_string(), json!("NoBaseExtension"));
+        args.insert("OutputDir".to_string(), json!("ext"));
+
+        let outcome = create_extension_scaffold(&args, &context);
+
+        assert!(outcome.ok, "{:?}", outcome.errors);
+        for path in [
+            context.cwd.join("ext/Configuration.xml"),
+            context.cwd.join("ext/Languages/Русский.xml"),
+            context
+                .cwd
+                .join("ext/Roles/NoBaseExtension_ОсновнаяРоль.xml"),
+        ] {
+            let generated = fs::read_to_string(&path).unwrap();
+            assert!(generated.contains(r#"version="2.20""#), "{generated}");
+            assert!(!generated.contains(r#"version="2.17""#), "{generated}");
+        }
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn cfe_init_rejects_unsupported_base_format_before_writing_output() {
+        for version in ["2.19", "2.21"] {
+            let context = temp_context(&format!("init-reject-base-{version}"));
+            write_file(
+                &context.cwd.join("src/Configuration.xml"),
+                &format!(
+                    r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="{version}"><Configuration/></MetaDataObject>"#
+                ),
+            );
+            let mut args = Map::new();
+            args.insert("Name".to_string(), json!("RejectedExtension"));
+            args.insert("OutputDir".to_string(), json!("ext"));
+            args.insert("ConfigPath".to_string(), json!("src"));
+
+            let outcome = create_extension_scaffold(&args, &context);
+
+            assert!(!outcome.ok, "base {version} must be rejected");
+            assert!(
+                outcome.errors.join("\n").contains(version),
+                "{:?}",
+                outcome.errors
+            );
+            assert!(
+                !context.cwd.join("ext").exists(),
+                "base {version} must be rejected before creating output"
+            );
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
     }
 
     #[test]
