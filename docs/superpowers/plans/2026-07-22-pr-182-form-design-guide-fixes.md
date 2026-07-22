@@ -262,10 +262,11 @@ git -c commit.gpgsign=false commit -m "fix: emit documented input column propert
 
 ---
 
-### Task 3c: Reconcile global commands and object tooltips
+### Task 3c: Reconcile global commands and multilingual tooltips
 
 **Files:**
 - Modify: `crates/unica-coder/src/infrastructure/native_operations/form.rs`
+- Modify: `plugins/unica/references/specs/form-dsl-spec.md`
 - Modify: `plugins/unica/references/specs/form-patterns.md`
 - Modify: `plugins/unica/skills/form-patterns/SKILL.md`
 - Modify: `tests/ci/test_unica_skills.py`
@@ -275,9 +276,10 @@ git -c commit.gpgsign=false commit -m "fix: emit documented input column propert
   `command` is absent; existing `command` precedence is preserved.
 - Standalone command-bar `commandSource` emits `<CommandSource>` before
   `<Autofill>` and child items.
-- Element tooltip accepts string, `{ru, en}`, and `{text, formatted}` values;
-  language/content values are XML-escaped and explicit formatted state is
-  preserved on `<ToolTip>`.
+- Element tooltip accepts string and `{ru, en}` values; language/content values
+  are XML-escaped. The DSL spec is narrowed explicitly: ordinary `<ToolTip>` is
+  multilingual but has no `formatted` attribute, while `{text, formatted}` is
+  reserved for decoration/extended-tooltip `<Title formatted="...">`.
 - Mirrored guidance uses `titleLocation: "top"` for multiline fields and
   distinguishes supported command source/global-command keys from the current
   inability to deduplicate standard commands automatically when a table is
@@ -286,9 +288,9 @@ git -c commit.gpgsign=false commit -m "fix: emit documented input column propert
 - [ ] **Step 1: Add failing Rust regressions**
 
 Add exact tests for a command bar with both supported source values and global
-buttons, including local-command precedence and escaping. Add tooltip cases
-for multilingual and formatted object values on supported element kinds. Run
-the exact tests and confirm the documented properties are currently dropped.
+buttons, including local-command precedence and escaping. Add multilingual
+tooltip cases on supported element kinds. Run the exact tests and confirm the
+documented properties are currently dropped.
 
 - [ ] **Step 2: Implement narrow native support**
 
@@ -309,6 +311,7 @@ PR-base diff-check. Commit as:
 
 ```bash
 git add crates/unica-coder/src/infrastructure/native_operations/form.rs \
+  plugins/unica/references/specs/form-dsl-spec.md \
   plugins/unica/references/specs/form-patterns.md \
   plugins/unica/skills/form-patterns/SKILL.md tests/ci/test_unica_skills.py
 git -c commit.gpgsign=false commit -m "fix: emit documented form command and tooltip values"
