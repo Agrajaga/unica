@@ -6093,10 +6093,18 @@ pub(crate) fn emit_form_element_tooltip(
     element: &Map<String, Value>,
     indent: &str,
 ) {
-    if let Some(tooltip) = element.get("tooltip").and_then(Value::as_str) {
+    if let Some(tooltip) = element
+        .get("tooltip")
+        .and_then(Value::as_str)
+        .filter(|tooltip| !tooltip.is_empty())
+    {
         emit_form_mltext(lines, indent, "ToolTip", tooltip);
     }
-    if let Some(representation) = element.get("tooltipRepresentation").and_then(Value::as_str) {
+    if let Some(representation) = element
+        .get("tooltipRepresentation")
+        .and_then(Value::as_str)
+        .filter(|representation| !representation.is_empty())
+    {
         lines.push(format!(
             "{indent}<ToolTipRepresentation>{}</ToolTipRepresentation>",
             escape_xml(representation)
@@ -6656,7 +6664,11 @@ pub(crate) fn emit_form_button(
             escape_xml(location)
         ));
     }
-    if let Some(back_color) = element.get("backColor").and_then(Value::as_str) {
+    if let Some(back_color) = element
+        .get("backColor")
+        .and_then(Value::as_str)
+        .filter(|back_color| !back_color.is_empty())
+    {
         lines.push(format!(
             "{inner}<BackColor>{}</BackColor>",
             escape_xml(back_color)
@@ -9637,6 +9649,30 @@ mod tests {
             )),
             "{xml}"
         );
+    }
+
+    #[test]
+    fn form_compile_omits_empty_tooltip_and_button_appearance_values() {
+        let definition = json!({
+            "elements": [{
+                "button": "NoAppearance",
+                "tooltip": "",
+                "tooltipRepresentation": "",
+                "backColor": "",
+                "font": ""
+            }]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+        let button_start = xml.find("<Button name=\"NoAppearance\"").unwrap();
+        let button_end = button_start + xml[button_start..].find("</Button>").unwrap();
+        let button = &xml[button_start..button_end];
+
+        assert!(!button.contains("<ToolTip>"), "{button}");
+        assert!(!button.contains("<ToolTip/>"), "{button}");
+        assert!(!button.contains("<ToolTipRepresentation>"), "{button}");
+        assert!(!button.contains("<BackColor>"), "{button}");
+        assert!(!button.contains("<Font"), "{button}");
     }
 
     #[test]
