@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::application::AdapterOutcome;
+use crate::domain::format_profile::ACTIVE_FORMAT_PROFILE;
 use crate::domain::workspace::WorkspaceContext;
 use roxmltree::Document;
 use serde_json::{json, Map, Value};
@@ -166,7 +167,7 @@ pub(crate) fn borrow_cfe(args: &Map<String, Value>, context: &WorkspaceContext) 
         let format_version = ext_doc
             .root_element()
             .attribute("version")
-            .unwrap_or("2.17")
+            .unwrap_or(ACTIVE_FORMAT_PROFILE.export_format)
             .to_string();
 
         let items = object_spec
@@ -1694,7 +1695,7 @@ pub(crate) fn cfe_borrow_form_xml_fallback(
                 .attribute("version")
                 .map(ToOwned::to_owned)
         })
-        .unwrap_or_else(|| "2.17".to_string());
+        .unwrap_or_else(|| ACTIVE_FORMAT_PROFILE.export_format.to_string());
     let mut content = source.to_string();
     if !borrow_main_attr {
         content = cfe_borrow_strip_simple_data_paths(&content);
@@ -2956,10 +2957,8 @@ pub(crate) fn validate_cfe(
         let version = root.attribute("version").unwrap_or("");
         if version.is_empty() {
             report.warn("1. Missing version attribute on MetaDataObject");
-        } else if !matches!(version, "2.17" | "2.20" | "2.21") {
-            report.warn(format!(
-                "1. Unusual version '{version}' (expected 2.17, 2.20 or 2.21)"
-            ));
+        } else if version != "2.20" {
+            report.warn(format!("1. Unusual version '{version}' (expected 2.20)"));
         }
 
         let Some(cfg_node) = root
@@ -3959,7 +3958,7 @@ pub(crate) fn create_extension_scaffold(
         let mut compatibility = string_arg(args, &["compatibilityMode", "CompatibilityMode"])
             .unwrap_or("Version8_3_24")
             .to_string();
-        let mut format_version = "2.17".to_string();
+        let mut format_version = ACTIVE_FORMAT_PROFILE.export_format.to_string();
         let interface_mode = if let Some(config_path) =
             path_arg(args, &["configPath", "ConfigPath"])
         {

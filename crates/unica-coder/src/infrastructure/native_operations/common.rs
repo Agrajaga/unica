@@ -1,6 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::application::{AdapterOutcome, SupportGuardRequirement};
+use crate::domain::format_profile::ACTIVE_FORMAT_PROFILE;
 use crate::domain::workspace::WorkspaceContext;
 use roxmltree::Document;
 use serde_json::{json, Map, Value};
@@ -451,7 +452,10 @@ pub(crate) fn load_subsystem_edit_model(path: &Path) -> Result<SubsystemEditMode
         .collect::<Vec<_>>();
 
     Ok(SubsystemEditModel {
-        version: root.attribute("version").unwrap_or("2.17").to_string(),
+        version: root
+            .attribute("version")
+            .unwrap_or(ACTIVE_FORMAT_PROFILE.export_format)
+            .to_string(),
         uuid: sub
             .attribute("uuid")
             .map(ToOwned::to_owned)
@@ -1580,7 +1584,7 @@ pub(crate) fn detect_format_version(start: &Path) -> String {
         }
         current = dir.parent();
     }
-    "2.17".to_string()
+    ACTIVE_FORMAT_PROFILE.export_format.to_string()
 }
 
 pub(crate) fn support_state_lines_for_configuration(

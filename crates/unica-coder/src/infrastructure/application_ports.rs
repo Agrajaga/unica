@@ -1,4 +1,6 @@
-use crate::application::ports::{ApplicationPorts, HandlerOutcome, SupportGuardCheck};
+use crate::application::ports::{
+    ApplicationPorts, FormatGuardCheck, HandlerOutcome, SupportGuardCheck,
+};
 use crate::application::{project_map, project_status, AdapterOutcome, ToolHandler, ToolSpec};
 use crate::domain::cache::{CacheAccess, CacheReport};
 use crate::domain::cancellation::CancellationToken;
@@ -41,6 +43,15 @@ impl ApplicationPorts for InfrastructureApplicationPorts {
         context: &WorkspaceContext,
     ) -> Result<SupportGuardCheck, String> {
         crate::infrastructure::support_guard::evaluate_support_guard(spec, args, context)
+    }
+
+    fn evaluate_format_guard(
+        &self,
+        spec: ToolSpec,
+        args: &Map<String, Value>,
+        context: &WorkspaceContext,
+    ) -> Result<FormatGuardCheck, String> {
+        crate::infrastructure::format_guard::evaluate_format_guard(spec, args, context)
     }
 
     fn invoke_handler(

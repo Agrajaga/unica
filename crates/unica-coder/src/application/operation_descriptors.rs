@@ -10,7 +10,15 @@ pub(crate) struct OperationDescriptor {
     pub required_args: &'static [&'static str],
     pub write_path_args: &'static [&'static str],
     pub source_path_args: &'static [&'static str],
+    pub format_guard: FormatGuardPolicy,
     pub support_guard: Option<SupportGuardPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FormatGuardPolicy {
+    ExistingDump,
+    NewDump,
+    None,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -79,11 +87,12 @@ pub(crate) fn native_operation_descriptor(operation: &str) -> Option<&'static Op
 }
 
 pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
-    descriptor(
+    descriptor_with_format(
         "code-patch",
         CODE_PATCH_REQUIRED,
         CODE_PATCH_PATH,
         CODE_PATCH_PATH,
+        FormatGuardPolicy::None,
         Some(path_guard(
             CODE_PATCH_PATH,
             SupportGuardRequirement::Editable,
@@ -97,7 +106,14 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         Some(path_guard(CF_PATH, SupportGuardRequirement::Editable)),
     ),
     descriptor("cf-info", &["ConfigPath"], OUT_FILE, CONFIG_PATH, None),
-    descriptor("cf-init", EMPTY, OUTPUT_DIR, OUTPUT_DIR, None),
+    descriptor_with_format(
+        "cf-init",
+        EMPTY,
+        OUTPUT_DIR,
+        OUTPUT_DIR,
+        FormatGuardPolicy::NewDump,
+        None,
+    ),
     descriptor("cf-validate", &["ConfigPath"], OUT_FILE, CONFIG_PATH, None),
     descriptor("support-edit", EMPTY, SUPPORT_PATH, SUPPORT_PATH, None),
     descriptor(
@@ -114,19 +130,28 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         &["ExtensionPath", "ConfigPath", "extensionPath", "configPath"],
         None,
     ),
-    descriptor("cfe-init", EMPTY, OUTPUT_DIR, OUTPUT_DIR, None),
-    descriptor(
+    descriptor_with_format(
+        "cfe-init",
+        EMPTY,
+        OUTPUT_DIR,
+        OUTPUT_DIR,
+        FormatGuardPolicy::NewDump,
+        None,
+    ),
+    descriptor_with_format(
         "epf-init",
         EXTERNAL_INIT_REQUIRED,
         OUTPUT_DIR,
         OUTPUT_DIR,
+        FormatGuardPolicy::NewDump,
         None,
     ),
-    descriptor(
+    descriptor_with_format(
         "erf-init",
         EXTERNAL_INIT_REQUIRED,
         OUTPUT_DIR,
         OUTPUT_DIR,
+        FormatGuardPolicy::NewDump,
         None,
     ),
     descriptor(
@@ -302,11 +327,12 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         TEMPLATE_PATH,
         None,
     ),
-    descriptor(
+    descriptor_with_format(
         "mxl-compile",
         MXL_COMPILE_REQUIRED,
         OUTPUT_PATH,
         OUTPUT_PATH,
+        FormatGuardPolicy::NewDump,
         Some(path_guard(OUTPUT_PATH, SupportGuardRequirement::Editable)),
     ),
     descriptor(
@@ -365,6 +391,25 @@ const fn descriptor(
         required_args,
         write_path_args,
         source_path_args,
+        format_guard: FormatGuardPolicy::ExistingDump,
+        support_guard,
+    }
+}
+
+const fn descriptor_with_format(
+    operation: &'static str,
+    required_args: &'static [&'static str],
+    write_path_args: &'static [&'static str],
+    source_path_args: &'static [&'static str],
+    format_guard: FormatGuardPolicy,
+    support_guard: Option<SupportGuardPolicy>,
+) -> OperationDescriptor {
+    OperationDescriptor {
+        operation,
+        required_args,
+        write_path_args,
+        source_path_args,
+        format_guard,
         support_guard,
     }
 }

@@ -2,13 +2,14 @@ use super::cf::cf_validate_identifier;
 use super::common::{escape_xml, path_arg, string_arg, write_utf8_bom};
 use super::form::{form_add_content_xml, form_add_metadata_xml, form_add_module_bsl};
 use crate::application::AdapterOutcome;
+use crate::domain::format_profile::ACTIVE_FORMAT_PROFILE;
 use crate::domain::workspace::WorkspaceContext;
 use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
-const FORMAT_VERSION: &str = "2.17";
+const FORMAT_VERSION: &str = ACTIVE_FORMAT_PROFILE.export_format;
 const OBJECT_MODULE_STUB: &str = "#Область ПрограммныйИнтерфейс\n\n#КонецОбласти\n";
 
 #[derive(Debug, Clone, Copy)]

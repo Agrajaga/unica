@@ -192,10 +192,8 @@ pub(crate) fn validate_cf(args: &Map<String, Value>, context: &WorkspaceContext)
         let version = root.attribute("version").unwrap_or("");
         if version.is_empty() {
             report.warn("1. Missing version attribute on MetaDataObject");
-        } else if !matches!(version, "2.17" | "2.20" | "2.21") {
-            report.warn(format!(
-                "1. Unusual version '{version}' (expected 2.17, 2.20 or 2.21)"
-            ));
+        } else if version != "2.20" {
+            report.warn(format!("1. Unusual version '{version}' (expected 2.20)"));
         }
 
         let Some(cfg_node) = root

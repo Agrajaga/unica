@@ -4,7 +4,7 @@ use crate::domain::events::{runtime_event_kind, DomainEvent, DomainEventKind};
 use crate::domain::workspace::WorkspaceContext;
 pub(crate) use operation_descriptors::SupportGuardRequirement;
 pub(crate) use outcome::AdapterOutcome;
-use ports::{ApplicationPorts, SupportGuardCheck};
+use ports::{ApplicationPorts, FormatGuardCheck, SupportGuardCheck};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -382,6 +382,39 @@ fn call_tool(
     let cwd = args.get("cwd").and_then(Value::as_str).map(PathBuf::from);
     let context = ports.discover_workspace(cwd)?;
     ports.validate_tool_context(spec, args, dry_run, &context)?;
+    let mut format_guard_warning = None;
+    let mut format_diagnostic = None;
+    match ports.evaluate_format_guard(spec, args, &context)? {
+        FormatGuardCheck::Allow => {}
+        FormatGuardCheck::Warn {
+            warning,
+            diagnostic,
+        } => {
+            format_guard_warning = Some(warning);
+            format_diagnostic = Some(diagnostic);
+        }
+        FormatGuardCheck::Block {
+            outcome,
+            diagnostic,
+        } => {
+            let cache = ports.cache_report(&context, &[], dry_run, spec.cache_access)?;
+            return Ok(OperationResult {
+                ok: outcome.ok,
+                summary: outcome.summary,
+                changes: outcome.changes,
+                warnings: outcome.warnings,
+                errors: outcome.errors,
+                artifacts: outcome.artifacts,
+                cache,
+                stdout: outcome.stdout,
+                stderr: outcome.stderr,
+                command: outcome.command,
+                diagnostics: Some(json!({"formatCompatibility": diagnostic})),
+                data: None,
+                job: None,
+            });
+        }
+    }
     if let Some(outcome) = source_sync_dump_guard(spec, args, dry_run, cancellation) {
         let cache = ports.cache_report(&context, &[], dry_run, spec.cache_access)?;
         return Ok(OperationResult {
@@ -456,6 +489,9 @@ fn call_tool(
     if let Some(warning) = support_guard_warning {
         outcome.warnings.insert(0, warning);
     }
+    if let Some(warning) = format_guard_warning {
+        outcome.warnings.insert(0, warning);
+    }
     let events = if should_emit_events(spec, args, dry_run, &outcome) {
         domain_events(spec, args)
     } else {
@@ -465,12 +501,15 @@ fn call_tool(
     if spec.mutating && !dry_run && outcome.ok && !events.is_empty() {
         ports.notify_invalidation(&context, &events);
     }
-    let diagnostics = runtime_result_diagnostics(
-        spec,
-        args,
-        &context,
-        &outcome,
-        handler_outcome.data.as_ref(),
+    let diagnostics = merge_diagnostics(
+        runtime_result_diagnostics(
+            spec,
+            args,
+            &context,
+            &outcome,
+            handler_outcome.data.as_ref(),
+        ),
+        format_diagnostic,
     );
 
     Ok(OperationResult {
@@ -488,6 +527,25 @@ fn call_tool(
         data: handler_outcome.data,
         job: handler_outcome.job,
     })
+}
+
+fn merge_diagnostics(runtime: Option<Value>, format: Option<Value>) -> Option<Value> {
+    match (runtime, format) {
+        (None, None) => None,
+        (Some(runtime), None) => Some(runtime),
+        (None, Some(format)) => Some(json!({"formatCompatibility": format})),
+        (Some(mut runtime), Some(format)) => {
+            if let Some(object) = runtime.as_object_mut() {
+                object.insert("formatCompatibility".to_string(), format);
+                Some(runtime)
+            } else {
+                Some(json!({
+                    "runtime": runtime,
+                    "formatCompatibility": format,
+                }))
+            }
+        }
+    }
 }
 
 fn source_sync_dump_guard(
@@ -3275,7 +3333,7 @@ mod tests {
         format!(
             concat!(
                 "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n",
-                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.17\">\r\n",
+                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\">\r\n",
                 "\t<Configuration uuid=\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\">\r\n",
                 "\t\t<Properties>\r\n",
                 "\t\t\t<Name>Issue55</Name>\r\n",
@@ -3315,6 +3373,7 @@ mod tests {
             "../../../../tests/fixtures/unica_mcp_script_parity/cf-validate/Configuration.xml"
         )
         .replace("\r\n", "\n")
+        .replace("version=\"2.17\"", "version=\"2.20\"")
         .replace("\t\t\t<Language>Русский</Language>", children)
     }
 
@@ -3798,6 +3857,43 @@ mod tests {
                 "{operation} mutates workspace but has no descriptor write_path_args"
             );
         }
+    }
+
+    #[test]
+    fn incompatible_format_blocks_before_native_handler() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-application-format-guard-{}",
+            std::process::id()
+        ));
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            root.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        )
+        .unwrap();
+        let config = src.join("Configuration.xml");
+        let before = r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.19"/>"#;
+        std::fs::write(&config, before).unwrap();
+        let mut args = Map::new();
+        args.insert("cwd".into(), Value::String(root.display().to_string()));
+        args.insert(
+            "ConfigPath".into(),
+            Value::String(config.display().to_string()),
+        );
+        args.insert("dryRun".into(), Value::Bool(false));
+
+        let result = UnicaApplication::new()
+            .call_tool("unica.cf.edit", &args)
+            .unwrap();
+
+        assert!(!result.ok, "{result:?}");
+        assert_eq!(
+            result.diagnostics.as_ref().unwrap()["formatCompatibility"]["code"],
+            "formatMigrationAvailable"
+        );
+        assert_eq!(std::fs::read_to_string(config).unwrap(), before);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4385,7 +4481,7 @@ mod tests {
         let config_path = src.join("Configuration.xml");
         let config_before = concat!(
             "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n",
-            "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.17\">\r\n",
+            "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\">\r\n",
             "\t<Configuration uuid=\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\">\r\n",
             "\t\t<Properties><Name>Demo</Name></Properties>\r\n",
             "\t\t<ChildObjects><Catalog>Items</Catalog></ChildObjects>\r\n",
@@ -4565,7 +4661,7 @@ mod tests {
             &config_path,
             concat!(
                 "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n",
-                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.17\">\r\n",
+                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\">\r\n",
                 "\t<Configuration uuid=\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\">\r\n",
                 "\t\t<Properties>\r\n",
                 "\t\t\t<Name>Demo</Name>\r\n",
@@ -4998,7 +5094,7 @@ mod tests {
             &config_path,
             concat!(
                 "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n",
-                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\">\r\n",
+                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\">\r\n",
                 "\t<Configuration>\r\n",
                 "\t\t<ChildObjects>\r\n",
                 "\t\t\t<SessionParameter>CurrentUser</SessionParameter>\r\n",
@@ -6516,7 +6612,7 @@ mod tests {
     fn support_test_configuration_xml(uuid: &str) -> String {
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
-<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.17">
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
   <Configuration uuid="{uuid}">
     <Properties>
       <Name>Demo</Name>
@@ -6540,7 +6636,7 @@ mod tests {
     fn support_test_catalog_xml(uuid: &str) -> String {
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
-<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.17">
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
   <Catalog uuid="{uuid}">
     <Properties>
       <Name>Items</Name>
@@ -6554,7 +6650,7 @@ mod tests {
 
     fn support_test_form_xml() -> &'static str {
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.17">
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
   <Form uuid="dddddddd-dddd-dddd-dddd-dddddddddddd">
     <Properties>
       <Name>Main</Name>

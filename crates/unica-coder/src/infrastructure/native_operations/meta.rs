@@ -2039,10 +2039,8 @@ pub(crate) fn meta_validate_one(
     let version = root.attribute("version").unwrap_or("");
     if version.is_empty() {
         report.warn("1. Missing version attribute on MetaDataObject");
-    } else if !matches!(version, "2.17" | "2.20") {
-        report.warn(format!(
-            "1. Unusual version '{version}' (expected 2.17 or 2.20)"
-        ));
+    } else if version != "2.20" {
+        report.warn(format!("1. Unusual version '{version}' (expected 2.20)"));
     }
 
     let child_elements = root

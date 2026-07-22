@@ -146,12 +146,12 @@ pub(crate) fn validate_form(
             ));
         } else {
             let version = root.attribute("version").unwrap_or("");
-            if matches!(version, "2.17" | "2.20") {
+            if version == "2.20" {
                 report.ok(format!("Root element: Form version={version}"));
             } else if version.is_empty() {
                 report.warn("Form version attribute missing");
             } else {
-                report.warn(format!("Form version='{version}' (expected 2.17 or 2.20)"));
+                report.warn(format!("Form version='{version}' (expected 2.20)"));
             }
         }
 
