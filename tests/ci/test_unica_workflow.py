@@ -91,10 +91,7 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
 
         self.assertIn("fetch-depth: 0", classifier)
         self.assertIn('git fetch --no-tags origin "${{ github.base_ref }}"', classifier)
-        fetch_lines = [line for line in classifier.splitlines() if "git fetch" in line]
-        for fetch_line in fetch_lines:
-            with self.subTest(fetch_line=fetch_line):
-                self.assertNotRegex(fetch_line, r"(?:^|\s)--depth(?:=|\s|$)")
+        self.assertNotIn("--depth", classifier)
         self.assertIn("FORCE_FULL", classifier)
         self.assertIn("git diff --name-only FETCH_HEAD...HEAD", classifier)
 
