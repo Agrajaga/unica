@@ -498,13 +498,21 @@ else:
 
     # Synonym
     syn_node = find(props_node, "md:Synonym")
-    syn_present = False
+    syn_text = ""
     if syn_node is not None:
         syn_item = find(syn_node, "v8:item")
         if syn_item is not None:
             syn_content = find(syn_item, "v8:content")
-            if syn_content is not None and inner_text(syn_content):
-                syn_present = True
+            if syn_content is not None:
+                syn_text = inner_text(syn_content)
+    syn_present = bool(syn_text)
+
+    if not syn_present:
+        report_warn("3. Properties: Synonym is empty (fill it in, v8std 474)")
+    elif len(syn_text) > 38:
+        report_warn(
+            f"3. Properties: Synonym '{syn_text}' is longer than 38 characters ({len(syn_text)}) for the command interface"
+        )
 
     if check3_ok:
         syn_info = "Synonym present" if syn_present else "no Synonym"

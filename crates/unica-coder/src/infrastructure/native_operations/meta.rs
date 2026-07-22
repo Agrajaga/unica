@@ -1583,6 +1583,45 @@ mod edit_tests {
         let _ = fs::remove_dir_all(&context.cwd);
     }
 
+    fn validate_stdout_with_synonym(test_name: &str, synonym_xml: &str) -> String {
+        let context = temp_context(test_name);
+        let object_path = context.cwd.join("Documents").join("SampleShipment.xml");
+        let xml = sample_document_xml("<RegisterRecords/>").replace("<Synonym/>", synonym_xml);
+        write_file(&object_path, &xml);
+
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "ObjectPath".to_string(),
+            json!(object_path.to_string_lossy().to_string()),
+        );
+        let outcome = validate_meta(&args, &context);
+        let stdout = outcome.stdout.clone().unwrap_or_default();
+
+        let _ = fs::remove_dir_all(&context.cwd);
+        stdout
+    }
+
+    #[test]
+    fn validate_meta_warns_on_empty_synonym() {
+        let stdout = validate_stdout_with_synonym("validate-empty-synonym", "<Synonym/>");
+        assert!(stdout.contains("Synonym is empty"), "{stdout}");
+    }
+
+    #[test]
+    fn validate_meta_accepts_filled_short_synonym() {
+        let synonym = "<Synonym><v8:item><v8:lang>ru</v8:lang><v8:content>Отгрузка</v8:content></v8:item></Synonym>";
+        let stdout = validate_stdout_with_synonym("validate-filled-synonym", synonym);
+        assert!(!stdout.contains("Synonym is empty"), "{stdout}");
+        assert!(!stdout.contains("longer than 38 characters"), "{stdout}");
+    }
+
+    #[test]
+    fn validate_meta_warns_on_long_synonym() {
+        let synonym = "<Synonym><v8:item><v8:lang>ru</v8:lang><v8:content>Очень длинное наименование для командного интерфейса</v8:content></v8:item></Synonym>";
+        let stdout = validate_stdout_with_synonym("validate-long-synonym", synonym);
+        assert!(stdout.contains("longer than 38 characters"), "{stdout}");
+    }
+
     #[test]
     fn edit_meta_rejects_unknown_modify_attribute_key() {
         let context = temp_context("modify-attribute-unknown-key");
@@ -2421,11 +2460,20 @@ pub(crate) fn meta_validate_check_properties(
             ));
         }
     }
-    let syn_present = meta_info_child(props_node, "Synonym")
+    let syn_text = meta_info_child(props_node, "Synonym")
         .and_then(|node| meta_info_child(node, "item"))
         .and_then(|node| meta_info_child(node, "content"))
         .map(meta_info_inner_text)
-        .is_some_and(|value| !value.is_empty());
+        .unwrap_or_default();
+    let syn_present = !syn_text.is_empty();
+    if !syn_present {
+        report.warn("3. Properties: Synonym is empty (fill it in, v8std 474)");
+    } else if syn_text.chars().count() > 38 {
+        report.warn(format!(
+            "3. Properties: Synonym '{syn_text}' is longer than 38 characters ({}) for the command interface",
+            syn_text.chars().count()
+        ));
+    }
     if check_ok {
         let syn_info = if syn_present {
             "Synonym present"
