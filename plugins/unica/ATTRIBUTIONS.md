@@ -120,6 +120,18 @@ Unica адаптирует применимые рекомендации по UX
 `form-patterns`; адаптированная инструкция остаётся в составе Unica и работает
 только с типизированными инструментами `unica.form.*`.
 
+### Шаблоны новых объектов 1С
+
+<!-- unica-attribution: upstream templates-new-object-1c -->
+
+- Репозиторий: [Oxotka/TemplatesNewObject1C](https://github.com/Oxotka/TemplatesNewObject1C)
+- Автор: [Nikita Aripov](https://github.com/Oxotka)
+- Проверенный baseline: `751a51610d97079b77df71b780c3110ec7507558`
+- Лицензия: [MIT](third-party/licenses/templates-new-object-1c/LICENSE)
+
+Unica адаптирует соглашения по именам, синонимам, представлениям и проверке
+заполнения из чек-листа TemplatesNewObject1C в reference `metadata-conventions`.
+
 ### v8-runner-rust как источник runtime-контракта
 
 <!-- unica-attribution: upstream v8-runner-rust -->

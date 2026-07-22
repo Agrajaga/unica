@@ -1461,6 +1461,31 @@
       "baselineSelection": "pinned source for the adapted form UX guidance"
     },
     {
+      "id": "templates-new-object-1c",
+      "repository": "https://github.com/Oxotka/TemplatesNewObject1C",
+      "trackingRef": "main",
+      "role": "guidance",
+      "baselineCommit": "751a51610d97079b77df71b780c3110ec7507558",
+      "entries": [
+        {
+          "skill": "meta-validate",
+          "status": "adapted",
+          "notes": "Unica adapts the naming, synonym, representation and fill-check conventions from the TemplatesNewObject1C checklist into its metadata-conventions reference.",
+          "upstreamPaths": [
+            "README.md"
+          ],
+          "localPaths": [
+            "plugins/unica/references/platform/metadata-conventions.md"
+          ],
+          "contractPaths": [
+            "tests/ci/test_unica_skills.py"
+          ],
+          "decision": "ported"
+        }
+      ],
+      "baselineSelection": "pinned source for the adapted metadata conventions"
+    },
+    {
       "id": "v8-runner-rust",
       "repository": "https://github.com/alkoleft/v8-runner-rust",
       "trackingRef": "master",

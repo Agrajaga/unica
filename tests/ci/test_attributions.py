@@ -84,6 +84,7 @@ class AttributionTests(unittest.TestCase):
                 ("upstream", "cc-1c-skills"),
                 ("upstream", "ai-rules-1c"),
                 ("upstream", "1c-design-guide"),
+                ("upstream", "templates-new-object-1c"),
                 ("upstream", "v8-runner-rust"),
             },
         )
