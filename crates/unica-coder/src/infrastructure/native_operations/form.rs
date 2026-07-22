@@ -6299,6 +6299,12 @@ pub(crate) fn emit_form_group(
         ));
     }
     emit_form_common_flags(lines, element, &inner);
+    if let Some(value) = element.get("showLeftMargin").and_then(Value::as_bool) {
+        lines.push(format!(
+            "{inner}<ShowLeftMargin>{}</ShowLeftMargin>",
+            if value { "true" } else { "false" }
+        ));
+    }
     emit_form_companion(
         lines,
         "ExtendedTooltip",
@@ -9648,6 +9654,50 @@ mod tests {
                 "\t\t\t<ContextMenu"
             )),
             "{xml}"
+        );
+    }
+
+    #[test]
+    fn form_compile_emits_group_show_left_margin() {
+        let definition = json!({
+            "elements": [
+                {
+                    "group": "vertical",
+                    "name": "NoLeftMargin",
+                    "disabled": true,
+                    "showLeftMargin": false,
+                    "children": []
+                },
+                {
+                    "group": "vertical",
+                    "name": "WithLeftMargin",
+                    "showLeftMargin": true,
+                    "children": []
+                }
+            ]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+
+        assert!(
+            xml.contains(concat!(
+                "<Group>Vertical</Group>\n",
+                "\t\t\t<Enabled>false</Enabled>\n",
+                "\t\t\t<ShowLeftMargin>false</ShowLeftMargin>\n",
+                "\t\t\t<ExtendedTooltip name=\"NoLeftMarginРасширеннаяПодсказка\""
+            )),
+            "{xml}"
+        );
+        let with_left_margin = &xml[xml
+            .find("<UsualGroup name=\"WithLeftMargin\"")
+            .expect("group should be emitted")..];
+        assert!(
+            with_left_margin.contains(concat!(
+                "<Group>Vertical</Group>\n",
+                "\t\t\t<ShowLeftMargin>true</ShowLeftMargin>\n",
+                "\t\t\t<ExtendedTooltip name=\"WithLeftMarginРасширеннаяПодсказка\""
+            )),
+            "{with_left_margin}"
         );
     }
 

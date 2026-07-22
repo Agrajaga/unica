@@ -932,7 +932,7 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             "Слабое",
             "Сворачиваемая группа",
             "не отображайте отступ слева",
-            "нет нативного DSL-ключа для левого отступа",
+            '"showLeftMargin": false',
             "`collapsed` задаёт начальное состояние",
             "`Группа.Показать()`",
             "`Группа.Скрыть()`",
@@ -982,6 +982,7 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertNotIn("RGB(", reference_section)
         self.assertNotRegex(reference_section, r'"radio"\s*:')
         self.assertNotRegex(reference_section, r'"(?:leftIndent|showLeftIndent)"\s*:')
+        self.assertNotIn("нет нативного DSL-ключа для левого отступа", reference_section)
         self.assertNotIn('"representation": "Picture"', reference_section)
         self.assertNotIn("Кнопки действий внизу", reference_section)
 
