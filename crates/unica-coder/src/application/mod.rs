@@ -3911,7 +3911,7 @@ mod tests {
         )
         .unwrap();
         let config = src.join("Configuration.xml");
-        let before = r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.19"/>"#;
+        let before = r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.19"><Configuration/></MetaDataObject>"#;
         std::fs::write(&config, before).unwrap();
         let mut args = Map::new();
         args.insert("cwd".into(), Value::String(root.display().to_string()));
@@ -3950,7 +3950,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             src.join("Configuration.xml"),
-            r#"<MetaDataObject version="2.19"/>"#,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.19"><Configuration/></MetaDataObject>"#,
         )
         .unwrap();
         std::fs::write(&output, b"original bytes").unwrap();
@@ -4001,7 +4001,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             src.join("Configuration.xml"),
-            r#"<MetaDataObject version="2.19"/>"#,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.19"><Configuration/></MetaDataObject>"#,
         )
         .unwrap();
         let json_path = root.join("mxl.json");

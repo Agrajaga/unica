@@ -96,6 +96,10 @@ pub(crate) fn evaluate_format_guard(
                         "Формат выгрузки {actual} старше поддерживаемого {} для платформы 1С {}. Изменение отменено; требуется явная повторная выгрузка через платформу 1С 8.3.27. Автоматическая миграция EPF/ERF пока не реализована.",
                         ACTIVE_FORMAT_PROFILE.export_format, ACTIVE_FORMAT_PROFILE.platform_line
                     ),
+                    PlatformXmlOwnerKind::Standalone => format!(
+                        "Формат выгрузки {actual} старше поддерживаемого {} для платформы 1С {}. Изменение отменено; требуется явная повторная выгрузка через платформу 1С 8.3.27. Автоматическая миграция автономного XML пока не реализована.",
+                        ACTIVE_FORMAT_PROFILE.export_format, ACTIVE_FORMAT_PROFILE.platform_line
+                    ),
                 };
                 ("formatMigrationAvailable", warning)
             }
@@ -252,7 +256,7 @@ mod tests {
             .unwrap_or_default();
         std::fs::write(
             src.join("Configuration.xml"),
-            format!(r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses"{version}/>"#),
+            format!(r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses"{version}><Configuration/></MetaDataObject>"#),
         )
         .unwrap();
         src.join("Configuration.xml")
@@ -685,12 +689,12 @@ mod tests {
         .unwrap();
         std::fs::write(
             root.join("old/Configuration.xml"),
-            r#"<MetaDataObject version="2.19"/>"#,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.19"><Configuration/></MetaDataObject>"#,
         )
         .unwrap();
         std::fs::write(
             root.join("active/Configuration.xml"),
-            r#"<MetaDataObject version="2.20"/>"#,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Configuration/></MetaDataObject>"#,
         )
         .unwrap();
         let object = root.join("old/Catalogs/Items.xml");
@@ -819,6 +823,32 @@ mod tests {
     }
 
     #[test]
+    fn valid_standalone_mxl_without_owner_version_is_not_an_old_dump() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-format-guard-valid-standalone-mxl-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let document = root.join("standalone.xml");
+        std::fs::write(
+            &document,
+            r#"<document xmlns="http://v8.1c.ru/8.2/data/spreadsheet"/>"#,
+        )
+        .unwrap();
+        let mut args = Map::new();
+        args.insert(
+            "TemplatePath".into(),
+            Value::String(document.display().to_string()),
+        );
+
+        assert!(matches!(
+            evaluate_format_guard(spec("unica.mxl.info"), &args, &context(&root)).unwrap(),
+            FormatGuardCheck::Allow
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn direct_external_descriptor_uses_external_owner_copy() {
         let root = std::env::temp_dir().join(format!(
             "unica-format-guard-direct-external-owner-{}",
@@ -828,7 +858,7 @@ mod tests {
         let descriptor = root.join("PriceLoader.xml");
         std::fs::write(
             &descriptor,
-            r#"<MetaDataObject version="2.19"><ExternalDataProcessor/></MetaDataObject>"#,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.19"><ExternalDataProcessor/></MetaDataObject>"#,
         )
         .unwrap();
         let mut args = Map::new();
@@ -874,6 +904,125 @@ mod tests {
         assert!(diagnostic["root"]
             .as_str()
             .is_some_and(|path| path.ends_with("/erf/Sales.xml")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn configured_owner_rejects_wrong_root_qname_and_artifact_type() {
+        for (case, owner) in [
+            (
+                "wrong-root",
+                r#"<garbage xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Configuration/></garbage>"#,
+            ),
+            (
+                "wrong-namespace",
+                r#"<MetaDataObject xmlns="urn:wrong" version="2.20"><Configuration/></MetaDataObject>"#,
+            ),
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "unica-format-guard-configured-{case}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(root.join("src/Catalogs")).unwrap();
+            std::fs::write(
+                root.join("v8project.yaml"),
+                "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+            )
+            .unwrap();
+            std::fs::write(root.join("src/Configuration.xml"), owner).unwrap();
+            let mut args = Map::new();
+            args.insert(
+                "ObjectPath".into(),
+                Value::String(root.join("src/Catalogs/Items.xml").display().to_string()),
+            );
+
+            let check =
+                evaluate_format_guard(spec("unica.meta.edit"), &args, &context(&root)).unwrap();
+            let FormatGuardCheck::Block { diagnostic, .. } = check else {
+                panic!("{case}: wrong configured owner contract must block");
+            };
+            assert_eq!(diagnostic["code"], "formatVersionInvalid", "{case}");
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "unica-format-guard-wrong-external-kind-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("epf/PriceLoader")).unwrap();
+        std::fs::write(
+            root.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: external\n    type: EXTERNAL_DATA_PROCESSORS\n    path: epf\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("epf/PriceLoader.xml"),
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><ExternalReport/></MetaDataObject>"#,
+        )
+        .unwrap();
+        let mut args = Map::new();
+        args.insert(
+            "TemplatePath".into(),
+            Value::String(
+                root.join("epf/PriceLoader/Templates/Main/Ext/Template.xml")
+                    .display()
+                    .to_string(),
+            ),
+        );
+        let check = evaluate_format_guard(spec("unica.dcs.edit"), &args, &context(&root)).unwrap();
+        let FormatGuardCheck::Block { diagnostic, .. } = check else {
+            panic!("EPF source set must reject an ERF owner descriptor");
+        };
+        assert_eq!(diagnostic["code"], "formatVersionInvalid");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unknown_version_bearing_standalone_root_is_invalid() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-format-guard-unknown-standalone-root-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("unknown.xml");
+        std::fs::write(&target, r#"<garbage version="2.20"/>"#).unwrap();
+        let mut args = Map::new();
+        args.insert(
+            "FormPath".into(),
+            Value::String(target.display().to_string()),
+        );
+
+        let check = evaluate_format_guard(spec("unica.form.edit"), &args, &context(&root)).unwrap();
+        let FormatGuardCheck::Block { diagnostic, .. } = check else {
+            panic!("unknown version-bearing standalone root must be invalid");
+        };
+        assert_eq!(diagnostic["code"], "formatVersionInvalid");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn known_standalone_form_root_remains_supported() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-format-guard-known-standalone-form-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("Form.xml");
+        std::fs::write(
+            &target,
+            r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20"/>"#,
+        )
+        .unwrap();
+        let mut args = Map::new();
+        args.insert(
+            "FormPath".into(),
+            Value::String(target.display().to_string()),
+        );
+
+        assert!(matches!(
+            evaluate_format_guard(spec("unica.form.edit"), &args, &context(&root)).unwrap(),
+            FormatGuardCheck::Allow
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 }

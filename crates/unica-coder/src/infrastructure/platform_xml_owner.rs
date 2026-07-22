@@ -14,6 +14,7 @@ pub(crate) enum PlatformXmlOwnerKind {
     Extension,
     ExternalProcessor,
     ExternalReport,
+    Standalone,
 }
 
 impl PlatformXmlOwnerKind {
@@ -23,6 +24,7 @@ impl PlatformXmlOwnerKind {
             Self::Extension => "extension",
             Self::ExternalProcessor => "external_processor",
             Self::ExternalReport => "external_report",
+            Self::Standalone => "standalone",
         }
     }
 }
@@ -39,6 +41,14 @@ pub(crate) struct PlatformXmlOwnerError {
     pub path: PathBuf,
     pub message: String,
 }
+
+#[derive(Debug, Clone, Copy)]
+enum OwnerExpectation {
+    SourceSet(SourceSetKind),
+    Standalone,
+}
+
+const MD_CLASSES_NS: &str = "http://v8.1c.ru/8.3/MDClasses";
 
 pub(crate) fn resolve_platform_xml_owner(
     target: &Path,
@@ -87,13 +97,26 @@ pub(crate) fn resolve_platform_xml_owner(
             })?
         };
         require_regular_owner(&owner_path)?;
-        return read_platform_xml_owner(&owner_path, kind).map(Some);
+        return read_platform_xml_owner(&owner_path, OwnerExpectation::SourceSet(kind)).map(Some);
     }
 
     // A standalone descriptor may be edited directly. Do not walk unrelated
     // ancestors: configured source-set boundaries are the ownership boundary.
     if target.is_file() && target.extension().and_then(|ext| ext.to_str()) == Some("xml") {
-        return read_platform_xml_owner(&target, SourceSetKind::Configuration).map(Some);
+        let text = fs::read_to_string(&target).map_err(|error| PlatformXmlOwnerError {
+            path: target.clone(),
+            message: format!("failed to read {}: {error}", target.display()),
+        })?;
+        let document = Document::parse(text.trim_start_matches('\u{feff}')).map_err(|error| {
+            PlatformXmlOwnerError {
+                path: target.clone(),
+                message: format!("failed to parse {}: {error}", target.display()),
+            }
+        })?;
+        let root = document.root_element();
+        if root.attribute("version").is_some() || root.tag_name().name() == "MetaDataObject" {
+            return read_platform_xml_owner(&target, OwnerExpectation::Standalone).map(Some);
+        }
     }
     Ok(None)
 }
@@ -201,7 +224,7 @@ fn owner_path_in_source_set(
 
 fn read_platform_xml_owner(
     path: &Path,
-    configured_kind: SourceSetKind,
+    expectation: OwnerExpectation,
 ) -> Result<PlatformXmlOwner, PlatformXmlOwnerError> {
     let text = fs::read_to_string(path).map_err(|error| PlatformXmlOwnerError {
         path: path.to_path_buf(),
@@ -213,39 +236,135 @@ fn read_platform_xml_owner(
             message: format!("failed to parse {}: {error}", path.display()),
         }
     })?;
-    let is_extension = document
-        .descendants()
-        .any(|node| node.is_element() && node.tag_name().name() == "ConfigurationExtensionPurpose");
     let root = document.root_element();
-    let has_external_processor = root
-        .children()
-        .any(|node| node.is_element() && node.tag_name().name() == "ExternalDataProcessor");
-    let has_external_report = root
-        .children()
-        .any(|node| node.is_element() && node.tag_name().name() == "ExternalReport");
-    let kind = match (has_external_processor, has_external_report, configured_kind) {
-        (true, false, _) => PlatformXmlOwnerKind::ExternalProcessor,
-        (false, true, _) => PlatformXmlOwnerKind::ExternalReport,
-        (false, false, SourceSetKind::ExternalProcessor) => PlatformXmlOwnerKind::ExternalProcessor,
-        (false, false, SourceSetKind::ExternalReport) => PlatformXmlOwnerKind::ExternalReport,
-        (false, false, SourceSetKind::Extension) => PlatformXmlOwnerKind::Extension,
-        (false, false, SourceSetKind::Configuration) if is_extension => {
-            PlatformXmlOwnerKind::Extension
+    let is_extension = document.descendants().any(|node| {
+        node.is_element()
+            && node.tag_name().namespace() == Some(MD_CLASSES_NS)
+            && node.tag_name().name() == "ConfigurationExtensionPurpose"
+    });
+    let has_external_processor = direct_md_child_count(root, "ExternalDataProcessor") == 1;
+    let has_external_report = direct_md_child_count(root, "ExternalReport") == 1;
+    let root_qname = (root.tag_name().namespace(), root.tag_name().name());
+    let kind = match expectation {
+        OwnerExpectation::SourceSet(configured_kind) => {
+            validate_source_set_owner(root, configured_kind, path)?;
+            match configured_kind {
+                SourceSetKind::ExternalProcessor => PlatformXmlOwnerKind::ExternalProcessor,
+                SourceSetKind::ExternalReport => PlatformXmlOwnerKind::ExternalReport,
+                SourceSetKind::Extension => PlatformXmlOwnerKind::Extension,
+                SourceSetKind::Configuration if is_extension => PlatformXmlOwnerKind::Extension,
+                SourceSetKind::Configuration => PlatformXmlOwnerKind::Configuration,
+            }
         }
-        (false, false, SourceSetKind::Configuration) => PlatformXmlOwnerKind::Configuration,
-        (true, true, _) => {
-            return Err(PlatformXmlOwnerError {
-                path: path.to_path_buf(),
-                message: format!(
-                    "platform XML owner has conflicting external artifact kinds: {}",
-                    path.display()
-                ),
-            });
+        OwnerExpectation::Standalone => {
+            if root_qname == (Some(MD_CLASSES_NS), "MetaDataObject") {
+                match (has_external_processor, has_external_report) {
+                    (true, false) => PlatformXmlOwnerKind::ExternalProcessor,
+                    (false, true) => PlatformXmlOwnerKind::ExternalReport,
+                    (true, true) => {
+                        return invalid_owner(
+                            path,
+                            "standalone metadata descriptor has conflicting artifact kinds",
+                        );
+                    }
+                    (false, false) if is_extension => PlatformXmlOwnerKind::Extension,
+                    (false, false) => PlatformXmlOwnerKind::Standalone,
+                }
+            } else if known_standalone_root(root_qname) {
+                PlatformXmlOwnerKind::Standalone
+            } else {
+                return invalid_owner(
+                    path,
+                    &format!(
+                        "unsupported standalone platform XML root {{{}}}{}",
+                        root_qname.0.unwrap_or(""),
+                        root_qname.1
+                    ),
+                );
+            }
         }
     };
     Ok(PlatformXmlOwner {
         kind,
         path: path.to_path_buf(),
         version: root.attribute("version").map(str::to_owned),
+    })
+}
+
+fn validate_source_set_owner(
+    root: roxmltree::Node<'_, '_>,
+    configured_kind: SourceSetKind,
+    path: &Path,
+) -> Result<(), PlatformXmlOwnerError> {
+    if root.tag_name().namespace() != Some(MD_CLASSES_NS)
+        || root.tag_name().name() != "MetaDataObject"
+    {
+        return invalid_owner(
+            path,
+            "source-set owner root must be {http://v8.1c.ru/8.3/MDClasses}MetaDataObject",
+        );
+    }
+    let expected_child = match configured_kind {
+        SourceSetKind::Configuration | SourceSetKind::Extension => "Configuration",
+        SourceSetKind::ExternalProcessor => "ExternalDataProcessor",
+        SourceSetKind::ExternalReport => "ExternalReport",
+    };
+    let artifact_children = root
+        .children()
+        .filter(|node| node.is_element())
+        .collect::<Vec<_>>();
+    if artifact_children.len() != 1
+        || artifact_children[0].tag_name().namespace() != Some(MD_CLASSES_NS)
+        || artifact_children[0].tag_name().name() != expected_child
+    {
+        return invalid_owner(
+            path,
+            &format!(
+                "source-set owner must contain exactly one direct {{{MD_CLASSES_NS}}}{expected_child} artifact child"
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn direct_md_child_count(root: roxmltree::Node<'_, '_>, local_name: &str) -> usize {
+    root.children()
+        .filter(|node| {
+            node.is_element()
+                && node.tag_name().namespace() == Some(MD_CLASSES_NS)
+                && node.tag_name().name() == local_name
+        })
+        .count()
+}
+
+fn known_standalone_root(qname: (Option<&str>, &str)) -> bool {
+    matches!(
+        qname,
+        (Some("http://v8.1c.ru/8.3/xcf/logform"), "Form")
+            | (
+                Some("http://v8.1c.ru/8.3/xcf/extrnprops"),
+                "CommandInterface"
+            )
+            | (Some("http://v8.1c.ru/8.3/xcf/extrnprops"), "Help")
+            | (
+                Some("http://v8.1c.ru/8.3/xcf/extrnprops"),
+                "ExchangePlanContent"
+            )
+            | (
+                Some("http://v8.1c.ru/8.3/xcf/extrnprops"),
+                "HomePageWorkArea"
+            )
+            | (Some("http://v8.1c.ru/8.2/roles"), "Rights")
+            | (
+                Some("http://v8.1c.ru/8.2/managed-application/core"),
+                "ClientApplicationInterface"
+            )
+    )
+}
+
+fn invalid_owner<T>(path: &Path, reason: &str) -> Result<T, PlatformXmlOwnerError> {
+    Err(PlatformXmlOwnerError {
+        path: path.to_path_buf(),
+        message: format!("invalid platform XML owner {}: {reason}", path.display()),
     })
 }
