@@ -91,11 +91,18 @@ native-компилятором.
 - `<ToolTipRepresentation>` со значением DSL;
 - у кнопки `<BackColor>` как verbatim цвет (`#RRGGBB`, `web:*`, `style:*`);
 - у кнопки `<Font .../>` из строковой ссылки на стиль или объекта атрибутов.
+- у обычной/сворачиваемой/всплывающей группы `<ShowLeftMargin>` из
+  документированного `showLeftMargin`, чтобы рекомендация убирать левый отступ
+  не расходилась с native runtime.
 
 Порядок тегов повторяет reference compiler: заголовок и tooltip идут до
 common flags; оформление кнопки — после layout/button-свойств и до companion
 и events. Реализация не добавляет поддержку новых типов элементов и не
 снимает существующий parity gap `element-appearance` целиком.
+
+`showLeftMargin` уже входил в активную DSL-spec и reference compiler, но
+native Rust его молча терял. Это обнаруженное при ревью противоречие
+устраняется в коде и тесте, а не маскируется оговоркой в prompt-visible skill.
 
 Многозначный тумблер в upstream выражен радиогруппой с представлением
 `Tumbler`, но native Form DSL ещё не поддерживает `radio`. Skill поэтому

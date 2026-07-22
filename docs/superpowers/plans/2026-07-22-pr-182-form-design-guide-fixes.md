@@ -180,6 +180,51 @@ git -c commit.gpgsign=false commit -m "docs: complete form design guidance"
 
 ---
 
+### Task 3a: Reconcile the documented group left-margin contract
+
+**Files:**
+- Modify: `crates/unica-coder/src/infrastructure/native_operations/form.rs`
+- Modify: `plugins/unica/references/specs/form-patterns.md`
+- Modify: `plugins/unica/skills/form-patterns/SKILL.md`
+- Modify: `tests/ci/test_unica_skills.py`
+
+**Interfaces:**
+- Group JSON `showLeftMargin: false|true` emits the documented
+  `<ShowLeftMargin>false|true</ShowLeftMargin>` after common layout flags and
+  before companions/children.
+- The mirrored UX section recommends `showLeftMargin: false` for collapsible
+  groups and no longer claims that native DSL lacks the property.
+
+- [ ] **Step 1: Add a failing Rust regression test**
+
+Extend focused group compile coverage with `showLeftMargin: false` and assert
+the exact XML tag and placement. Run the exact test and confirm RED because
+native Rust currently drops the documented property.
+
+- [ ] **Step 2: Implement the minimal group emitter support**
+
+Emit the boolean tag for both explicit values without changing other generic
+layout behavior. Run the focused test, the full form module, and
+`cargo fmt --check`.
+
+- [ ] **Step 3: Correct the mirrored guidance and guardrail**
+
+Replace the temporary limitation wording with supported
+`showLeftMargin: false` guidance in both mirrors. Update the skill contract to
+require the supported key and reject the stale limitation. Run the full skill
+tests and PR-base whitespace check.
+
+- [ ] **Step 4: Commit runtime and guidance corrections**
+
+```bash
+git add crates/unica-coder/src/infrastructure/native_operations/form.rs \
+  plugins/unica/references/specs/form-patterns.md \
+  plugins/unica/skills/form-patterns/SKILL.md tests/ci/test_unica_skills.py
+git -c commit.gpgsign=false commit -m "fix: emit group left margin setting"
+```
+
+---
+
 ### Task 4: Preserve the merge base in PR change classification
 
 **Files:**
