@@ -6567,8 +6567,10 @@ pub(crate) fn emit_form_input(
             lines.push(format!("{inner}<{tag}>true</{tag}>"));
         }
     }
+    if let Some(value) = element.get("choiceButton").and_then(Value::as_bool) {
+        lines.push(format!("{inner}<ChoiceButton>{value}</ChoiceButton>"));
+    }
     for (key, tag) in [
-        ("choiceButton", "ChoiceButton"),
         ("autoMaxWidth", "AutoMaxWidth"),
         ("autoMaxHeight", "AutoMaxHeight"),
     ] {
@@ -6581,6 +6583,17 @@ pub(crate) fn emit_form_input(
     }
     if let Some(height) = element.get("height").and_then(json_i64_value) {
         lines.push(format!("{inner}<Height>{height}</Height>"));
+    }
+    if let Some(value) = element.get("showInHeader").and_then(Value::as_bool) {
+        lines.push(format!("{inner}<ShowInHeader>{value}</ShowInHeader>"));
+    }
+    for (key, tag) in [
+        ("horizontalAlign", "HorizontalAlign"),
+        ("headerHorizontalAlign", "HeaderHorizontalAlign"),
+    ] {
+        if let Some(value) = element.get(key).and_then(Value::as_str) {
+            lines.push(format!("{inner}<{tag}>{}</{tag}>", escape_xml(value)));
+        }
     }
     if let Some(hint) = element.get("inputHint").and_then(Value::as_str) {
         emit_form_mltext(lines, &inner, "InputHint", hint);
@@ -9698,6 +9711,72 @@ mod tests {
                 "\t\t\t<ExtendedTooltip name=\"WithLeftMarginРасширеннаяПодсказка\""
             )),
             "{with_left_margin}"
+        );
+    }
+
+    #[test]
+    fn form_compile_emits_documented_input_column_properties() {
+        let definition = json!({
+            "elements": [
+                {
+                    "input": "ПутьКФайлу",
+                    "path": "ПутьКФайлу",
+                    "choiceButton": true,
+                    "showInHeader": true
+                },
+                {
+                    "input": "Сумма",
+                    "path": "Объект.Товары.Сумма",
+                    "horizontalAlign": "Right",
+                    "headerHorizontalAlign": "Right"
+                },
+                {
+                    "input": "Заполнитель",
+                    "title": "",
+                    "showInHeader": false,
+                    "choiceButton": false,
+                    "inputHint": "Меньше < и & больше"
+                }
+            ]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+
+        assert!(
+            xml.contains(concat!(
+                "<InputField name=\"ПутьКФайлу\" id=\"1\">",
+                "\n\t\t\t<DataPath>ПутьКФайлу</DataPath>\n",
+                "\t\t\t<ChoiceButton>true</ChoiceButton>\n",
+                "\t\t\t<ShowInHeader>true</ShowInHeader>\n",
+                "\t\t\t<ContextMenu name=\"ПутьКФайлуКонтекстноеМеню\""
+            )),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(concat!(
+                "<InputField name=\"Сумма\" id=\"4\">",
+                "\n\t\t\t<DataPath>Объект.Товары.Сумма</DataPath>\n",
+                "\t\t\t<HorizontalAlign>Right</HorizontalAlign>\n",
+                "\t\t\t<HeaderHorizontalAlign>Right</HeaderHorizontalAlign>\n",
+                "\t\t\t<ContextMenu name=\"СуммаКонтекстноеМеню\""
+            )),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(concat!(
+                "<InputField name=\"Заполнитель\" id=\"7\">",
+                "\n\t\t\t<Title/>\n",
+                "\t\t\t<ChoiceButton>false</ChoiceButton>\n",
+                "\t\t\t<ShowInHeader>false</ShowInHeader>\n",
+                "\t\t\t<InputHint>\n",
+                "\t\t\t\t<v8:item>\n",
+                "\t\t\t\t\t<v8:lang>ru</v8:lang>\n",
+                "\t\t\t\t\t<v8:content>Меньше &lt; и &amp; больше</v8:content>\n",
+                "\t\t\t\t</v8:item>\n",
+                "\t\t\t</InputHint>\n",
+                "\t\t\t<ContextMenu name=\"ЗаполнительКонтекстноеМеню\""
+            )),
+            "{xml}"
         );
     }
 
