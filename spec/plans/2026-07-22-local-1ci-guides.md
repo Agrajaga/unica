@@ -15,7 +15,9 @@
 - Discovery cannot escape the three exact configured URL roots.
 - All page images and attachments are downloaded and linked locally.
 - Failed refreshes preserve the last complete corpus.
-- Requests respect `robots.txt`, use timeouts, throttling, and retry/backoff.
+- Requests respect `robots.txt` except for the explicitly approved
+  `https://kb.1ci.com/bin/download/*` attachment path, and use timeouts,
+  throttling, and retry/backoff.
 
 ---
 

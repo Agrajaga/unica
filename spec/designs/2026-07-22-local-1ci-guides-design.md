@@ -44,7 +44,9 @@ and from `plugins/unica/references/`. Packaging scripts must not consume it.
 
 Use a hybrid discovery model:
 
-1. Fetch and respect `robots.txt`.
+1. Fetch and respect `robots.txt`, except for the explicitly user-approved
+   `https://kb.1ci.com/bin/download/*` attachment path. No other disallowed
+   path is eligible for download.
 2. Read `sitemap.xml` and select English pages below the three configured roots.
 3. Parse every selected page for child-page links and attachments.
 4. Add a discovered page only when its normalized URL remains below the same
