@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -926,12 +927,29 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         )
         for token in [
             "Обычная группа",
+            "прижатия элементов и заголовков к краю",
+            "Сильное",
+            "Обычное",
+            "Слабое",
             "Сворачиваемая группа",
+            "не отображайте отступ слева",
+            "нет нативного DSL-ключа для левого отступа",
+            "`collapsed` задаёт начальное состояние",
+            "`Группа.Показать()`",
+            "`Группа.Скрыть()`",
+            "только в коде формы",
             "Всплывающая группа",
+            '"representation": "Picture"',
+            "как подсказку",
+            "подобно гиперссылке",
             "Командная панель",
             "Команды формы",
             "Шапка формы",
+            "функциональным опциям",
+            "автозаполняются или сохраняют предыдущее значение",
+            "изменяющее форму, ставьте первым",
             "Подвал формы",
+            "Комментарий и Ответственный последними",
             "достаточно длинное название",
             "двойное отрицание",
             "Проводить документ при записи",
@@ -953,7 +971,23 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertNotIn("buttonHint", reference_section)
         self.assertNotIn("RGB(", reference_section)
         self.assertNotRegex(reference_section, r'"radio"\s*:')
+        self.assertNotRegex(reference_section, r'"(?:leftIndent|showLeftIndent)"\s*:')
         self.assertNotIn("Кнопки действий внизу", reference_section)
+        whitespace_check = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--check",
+                "832e940",
+                "--",
+                "plugins/unica/references/use-cases/forms-ui.md",
+            ],
+            cwd=self.repo_root(),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(whitespace_check.returncode, 0, whitespace_check.stdout)
 
     def test_meta_info_tracks_upstream_type_presentation_through_unica_boundary(self) -> None:
         meta_info = (self.skill_root() / "meta-info" / "SKILL.md").read_text(encoding="utf-8")
