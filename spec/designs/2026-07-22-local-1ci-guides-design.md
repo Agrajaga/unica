@@ -48,15 +48,19 @@ Use a hybrid discovery model:
    `https://kb.1ci.com/bin/download/*` attachment path. No other disallowed
    path is eligible for download.
 2. Read `sitemap.xml` and select English pages below the three configured roots.
-3. Parse every selected page for child-page links and attachments.
-4. Add a discovered page only when its normalized URL remains below the same
+3. Enumerate the paginated XWiki spaces REST catalog and select exact
+   descendants of the three roots. This is required because the 8.3.27
+   developer and client/server descendants are absent from the sitemap and
+   from their root-page content.
+4. Parse every selected page for child-page links and attachments.
+5. Add a discovered page only when its normalized URL remains below the same
    configured root. Never follow XWiki edit, login, REST, skin, resource, or
    other service URLs.
-5. Download all page attachments and content images, including PDFs, archives,
+6. Download all page attachments and content images, including PDFs, archives,
    examples, and other file types. External web links remain external.
 
-The sitemap provides breadth; in-page discovery detects sitemap omissions and
-collects files that the sitemap does not enumerate.
+The sitemap provides a fast baseline, the spaces catalog supplies hidden guide
+descendants, and in-page discovery collects files and late-linked pages.
 
 ## Conversion and Layout
 

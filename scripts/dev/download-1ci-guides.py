@@ -27,6 +27,7 @@ import xml.etree.ElementTree as ET
 BASE_URL = "https://kb.1ci.com"
 SITEMAP_URL = BASE_URL + "/sitemap.xml"
 ROBOTS_URL = BASE_URL + "/robots.txt"
+SPACES_URL = BASE_URL + "/rest/wikis/xwiki/spaces"
 USER_AGENT = "UnicaLocalDocs/1.0 (+private development corpus)"
 
 
@@ -115,6 +116,63 @@ def page_relative_path(guide: Guide, url: str) -> Path:
     relative = urlsplit(normalized).path[len(_root_path(guide)) :].strip("/")
     parts = [_safe_segment(part) for part in PurePosixPath(relative).parts]
     return Path(guide.name, *parts, "index.md")
+
+
+def guide_space_id(guide: Guide) -> str:
+    segments = ["OnecInt", "KB", *[part for part in urlsplit(guide.root).path.split("/") if part]]
+    escaped = [segment.replace("\\", "\\\\").replace(".", "\\.") for segment in segments]
+    return "xwiki:" + ".".join(escaped)
+
+
+def _catalog_size(fetch_batch) -> int:
+    high = 1
+    while fetch_batch(high, 1):
+        high *= 2
+    low = high // 2
+    while low < high:
+        middle = (low + high) // 2
+        if fetch_batch(middle, 1):
+            low = middle + 1
+        else:
+            high = middle
+    return low
+
+
+def _catalog_lower_bound(fetch_batch, size: int, target: str) -> int:
+    low, high = 0, size
+    while low < high:
+        middle = (low + high) // 2
+        rows = fetch_batch(middle, 1)
+        if rows and rows[0]["id"] < target:
+            low = middle + 1
+        else:
+            high = middle
+    return low
+
+
+def discover_space_pages(fetch_batch, guides=GUIDES, *, batch_size: int = 200) -> set[str]:
+    size = _catalog_size(fetch_batch)
+    pages: set[str] = set()
+    for guide in guides:
+        prefix = guide_space_id(guide)
+        offset = _catalog_lower_bound(fetch_batch, size, prefix)
+        while offset < size:
+            rows = fetch_batch(offset, min(batch_size, size - offset))
+            if not rows:
+                break
+            stop = False
+            for row in rows:
+                identifier = row.get("id", "")
+                if identifier != prefix and not identifier.startswith(prefix + "."):
+                    stop = True
+                    break
+                url = row.get("xwikiAbsoluteUrl")
+                if url and guide_for_url(url) == guide:
+                    pages.add(normalize_page_url(url))
+            if stop:
+                break
+            offset += len(rows)
+    return pages
 
 
 def is_allowed_by_policy(url: str, robots_allowed: bool) -> bool:
@@ -318,13 +376,13 @@ class Fetcher:
         self.opener = build_opener(HTTPCookieProcessor())
         self.last_request = 0.0
 
-    def fetch(self, url: str) -> Response:
+    def fetch(self, url: str, *, accept: str | None = None) -> Response:
         error: Exception | None = None
         for attempt in range(3):
             wait = self.delay - (time.monotonic() - self.last_request)
             if wait > 0:
                 time.sleep(wait)
-            request = Request(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "en"})
+            request = Request(url, headers=request_headers(accept))
             try:
                 with self.opener.open(request, timeout=self.timeout) as response:
                     self.last_request = time.monotonic()
@@ -341,6 +399,13 @@ class Fetcher:
                     break
                 time.sleep(2**attempt)
         raise DownloadError(f"failed to fetch {url}: {error}")
+
+
+def request_headers(accept: str | None = None) -> dict[str, str]:
+    headers = {"User-Agent": USER_AGENT, "Accept-Language": "en"}
+    if accept:
+        headers["Accept"] = accept
+    return headers
 
 
 def _parse_robots(data: bytes) -> RobotFileParser:
@@ -433,7 +498,22 @@ class Downloader:
         robots_response = self.fetcher.fetch(ROBOTS_URL)
         robots = _parse_robots(robots_response.body)
         sitemap_response = self.fetcher.fetch(SITEMAP_URL)
-        pending = deque(sorted(_sitemap_pages(sitemap_response.body) | {normalize_page_url(g.root) for g in GUIDES}))
+        def fetch_space_batch(start: int, number: int) -> list[dict]:
+            separator = "&" if "?" in SPACES_URL else "?"
+            response = self.fetcher.fetch(
+                f"{SPACES_URL}{separator}start={start}&number={number}",
+                accept="application/json",
+            )
+            try:
+                return json.loads(response.body)["spaces"]
+            except (json.JSONDecodeError, KeyError, TypeError) as error:
+                raise DownloadError(f"invalid XWiki spaces response at offset {start}: {error}") from error
+
+        discovered = _sitemap_pages(sitemap_response.body)
+        discovered.update(discover_space_pages(fetch_space_batch))
+        discovered.update(normalize_page_url(guide.root) for guide in GUIDES)
+        print(f"discovered {len(discovered)} pages", flush=True)
+        pending = deque(sorted(discovered))
         seen: set[str] = set()
         records: list[dict] = []
         failures: list[dict] = []

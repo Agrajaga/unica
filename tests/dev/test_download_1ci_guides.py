@@ -14,6 +14,12 @@ SPEC.loader.exec_module(guides)
 
 
 class UrlContractTests(unittest.TestCase):
+    def test_rest_request_can_require_json_without_changing_page_default(self):
+        self.assertEqual(
+            guides.request_headers("application/json")["Accept"], "application/json"
+        )
+        self.assertNotIn("Accept", guides.request_headers())
+
     def test_normalize_forces_english_and_drops_fragment(self):
         source = guides.DEVELOPER.root + "Chapter_1/#section"
         self.assertEqual(
@@ -42,6 +48,36 @@ class UrlContractTests(unittest.TestCase):
             guides.is_allowed_by_policy(
                 "https://kb.1ci.com/bin/edit/Space/Page", False
             )
+        )
+
+    def test_space_catalog_discovers_pages_missing_from_sitemap(self):
+        rows = sorted(
+            [
+                {"id": "xwiki:Help", "xwikiAbsoluteUrl": "https://kb.1ci.com/bin/view/Help/"},
+                {
+                    "id": guides.guide_space_id(guides.DEVELOPER),
+                    "xwikiAbsoluteUrl": guides.DEVELOPER.root,
+                },
+                {
+                    "id": guides.guide_space_id(guides.DEVELOPER) + ".Chapter_1\\._General_concepts",
+                    "xwikiAbsoluteUrl": guides.DEVELOPER.root + "Chapter_1._General_concepts/",
+                },
+                {"id": "xwiki:Zzz", "xwikiAbsoluteUrl": "https://kb.1ci.com/bin/view/Zzz/"},
+            ],
+            key=lambda row: row["id"],
+        )
+
+        def fetch_batch(start, number):
+            return rows[start : start + number]
+
+        pages = guides.discover_space_pages(fetch_batch, (guides.DEVELOPER,), batch_size=2)
+
+        self.assertEqual(
+            pages,
+            {
+                guides.DEVELOPER.root + "?language=en",
+                guides.DEVELOPER.root + "Chapter_1._General_concepts/?language=en",
+            },
         )
 
 

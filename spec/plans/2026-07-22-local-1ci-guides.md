@@ -4,7 +4,7 @@
 
 **Goal:** Build and run a safe hierarchical downloader that creates an ignored English Markdown corpus of the three requested 1Ci 8.3.27 guides.
 
-**Architecture:** A self-contained Python 3.12 module discovers pages from the sitemap plus in-page links, extracts XWiki content with `html.parser`, downloads page assets, rewrites links, and atomically publishes a complete staged corpus. Unit tests exercise pure URL, path, conversion, robots, and publication functions; a bounded live sample precedes the full run.
+**Architecture:** A self-contained Python 3.12 module discovers pages from the sitemap, the paginated XWiki spaces catalog, and in-page links; extracts XWiki content with `html.parser`; downloads page assets; rewrites links; and atomically publishes a complete staged corpus. Unit tests exercise pure URL, path, conversion, robots, catalog discovery, and publication functions; a bounded live sample precedes the full run.
 
 **Tech Stack:** Python 3.12 standard library, `unittest`, 1Ci XWiki sitemap/HTML endpoints.
 
