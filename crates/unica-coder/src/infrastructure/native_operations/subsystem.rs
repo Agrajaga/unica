@@ -1929,6 +1929,10 @@ mod tests {
             subsystem_uuid(&context.cwd, "ExplicitUuidSubsystem"),
             explicit_uuid
         );
+        let generated =
+            fs::read_to_string(context.cwd.join("Subsystems/ExplicitUuidSubsystem.xml")).unwrap();
+        assert!(generated.contains(r#"version="2.20""#), "{generated}");
+        assert!(!generated.contains(r#"version="2.17""#), "{generated}");
         let _ = fs::remove_dir_all(&context.cwd);
     }
 

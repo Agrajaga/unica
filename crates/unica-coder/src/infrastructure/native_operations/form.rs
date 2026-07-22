@@ -7903,6 +7903,16 @@ mod tests {
         let outcome = add_form(&args, &context);
 
         assert!(outcome.ok, "{:?}", outcome.errors);
+        for generated_path in [
+            context.cwd.join("src/Catalogs/Goods/Forms/ListForm.xml"),
+            context
+                .cwd
+                .join("src/Catalogs/Goods/Forms/ListForm/Ext/Form.xml"),
+        ] {
+            let generated = fs::read_to_string(generated_path).unwrap();
+            assert!(generated.contains(r#"version="2.20""#), "{generated}");
+            assert!(!generated.contains(r#"version="2.17""#), "{generated}");
+        }
         let updated = fs::read_to_string(&root_xml).unwrap();
         assert!(updated.contains("<DefaultListForm/>"), "{updated}");
         assert!(
@@ -10227,6 +10237,8 @@ mod tests {
 
         assert!(outcome.ok, "{outcome:?}");
         let xml = read_utf8_sig(&form_path).unwrap();
+        assert!(xml.contains(r#"version="2.20""#), "{xml}");
+        assert!(!xml.contains(r#"version="2.17""#), "{xml}");
         assert_eq!(xml.matches("<Events>").count(), 1, "{xml}");
         assert_eq!(xml.matches("name=\"OnCreateAtServer\"").count(), 1, "{xml}");
         assert!(

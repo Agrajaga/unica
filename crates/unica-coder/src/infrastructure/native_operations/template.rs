@@ -85,11 +85,11 @@ pub(crate) fn add_template(
             ));
         }
 
+        let format_version = detect_format_version(&src_dir_abs)?.to_string();
         let template_ext_dir = templates_dir_abs.join(template_name).join("Ext");
         fs::create_dir_all(&template_ext_dir)
             .map_err(|err| format!("failed to create {}: {err}", template_ext_dir.display()))?;
 
-        let format_version = detect_format_version(&src_dir_abs)?.to_string();
         let template_uuid = fresh_uuid();
         let template_meta_xml = template_metadata_xml(
             template_name,
@@ -604,6 +604,95 @@ pub(crate) fn invoke_mutation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_context(name: &str) -> WorkspaceContext {
+        let root = std::env::temp_dir().join(format!(
+            "unica-template-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        WorkspaceContext {
+            cwd: root.clone(),
+            workspace_root: root.clone(),
+            cache_root: root.join(".build/unica"),
+            workspace_epoch: 1,
+        }
+    }
+
+    #[test]
+    fn template_add_rejects_unsupported_owner_format_before_creating_tree() {
+        for (case, configuration) in [
+            (
+                "unsupported-format",
+                r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.19"><Configuration/></MetaDataObject>"#,
+            ),
+            ("malformed-format", "<MetaDataObject"),
+        ] {
+            let context = temp_context(case);
+            let src = context.cwd.join("src");
+            let reports = src.join("Reports");
+            fs::create_dir_all(reports.join("Sales")).unwrap();
+            fs::write(src.join("Configuration.xml"), configuration).unwrap();
+            let owner = reports.join("Sales.xml");
+            let owner_bytes = br#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Report><ChildObjects/></Report></MetaDataObject>"#.to_vec();
+            fs::write(&owner, &owner_bytes).unwrap();
+            let args = json!({
+                "ObjectName": "Sales",
+                "TemplateName": "Layout",
+                "TemplateType": "Text",
+                "SrcDir": "src/Reports"
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+
+            let outcome = add_template(&args, &context);
+
+            assert!(!outcome.ok, "{case}: {outcome:?}");
+            assert_eq!(fs::read(&owner).unwrap(), owner_bytes, "{case}");
+            assert!(!reports.join("Sales/Templates").exists(), "{case}");
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn template_add_descriptor_uses_active_format() {
+        let context = temp_context("active-format");
+        let src = context.cwd.join("src");
+        let reports = src.join("Reports");
+        fs::create_dir_all(reports.join("Sales")).unwrap();
+        fs::write(
+            src.join("Configuration.xml"),
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Configuration/></MetaDataObject>"#,
+        )
+        .unwrap();
+        fs::write(
+            reports.join("Sales.xml"),
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Report><Properties><MainDataCompositionSchema/></Properties><ChildObjects/></Report></MetaDataObject>"#,
+        )
+        .unwrap();
+        let args = json!({
+            "ObjectName": "Sales",
+            "TemplateName": "Layout",
+            "TemplateType": "Text",
+            "SrcDir": "src/Reports"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let outcome = add_template(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let generated = fs::read_to_string(reports.join("Sales/Templates/Layout.xml")).unwrap();
+        assert!(generated.contains(r#"version="2.20""#), "{generated}");
+        assert!(!generated.contains(r#"version="2.17""#), "{generated}");
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
 
     #[test]
     fn append_metadata_child_text_uses_root_child_objects() {

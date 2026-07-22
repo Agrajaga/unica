@@ -611,6 +611,8 @@ mod tests {
         let bytes = fs::read(&descriptor).unwrap();
         assert!(bytes.starts_with(&[0xef, 0xbb, 0xbf]));
         let xml = String::from_utf8(bytes[3..].to_vec()).unwrap();
+        assert!(xml.contains(r#"version="2.20""#), "{xml}");
+        assert!(!xml.contains(r#"version="2.17""#), "{xml}");
         assert!(xml.contains("<ExternalDataProcessor uuid=\""));
         assert!(xml.contains("<xr:ClassId>c3831ec8-d8d5-4f93-8a22-f9bfae07327f</xr:ClassId>"));
         assert!(xml.contains("name=\"ExternalDataProcessorObject.ИмпортТоваров\""));
@@ -624,12 +626,17 @@ mod tests {
         let form_metadata_bytes = fs::read(object_dir.join("Forms/ОсновнаяФорма.xml")).unwrap();
         assert!(form_metadata_bytes.starts_with(&[0xef, 0xbb, 0xbf]));
         let form_metadata = String::from_utf8(form_metadata_bytes[3..].to_vec()).unwrap();
+        assert!(
+            form_metadata.contains(r#"version="2.20""#),
+            "{form_metadata}"
+        );
         assert_metadata_uuids_v4(&form_metadata, "Form", 1);
 
         let form_path = object_dir.join("Forms/ОсновнаяФорма/Ext/Form.xml");
         let form_bytes = fs::read(&form_path).unwrap();
         assert!(form_bytes.starts_with(&[0xef, 0xbb, 0xbf]));
         let form_xml = String::from_utf8(form_bytes[3..].to_vec()).unwrap();
+        assert!(form_xml.contains(r#"version="2.20""#), "{form_xml}");
         assert!(
             form_xml.contains("<v8:Type>cfg:ExternalDataProcessorObject.ИмпортТоваров</v8:Type>")
         );
@@ -672,6 +679,8 @@ mod tests {
         let bytes = fs::read(&descriptor).unwrap();
         assert!(bytes.starts_with(&[0xef, 0xbb, 0xbf]));
         let xml = String::from_utf8(bytes[3..].to_vec()).unwrap();
+        assert!(xml.contains(r#"version="2.20""#), "{xml}");
+        assert!(!xml.contains(r#"version="2.17""#), "{xml}");
         assert!(xml.contains("<ExternalReport uuid=\""));
         assert!(xml.contains("<xr:ClassId>e41aff26-25cf-4bb6-b6c1-3f478a75f374</xr:ClassId>"));
         assert!(xml.contains("name=\"ExternalReportObject.Остатки\""));

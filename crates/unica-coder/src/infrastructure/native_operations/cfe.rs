@@ -1499,7 +1499,7 @@ pub(crate) fn cfe_borrow_form_xml(
     type_name: &str,
     object_name: &str,
     borrow_main_attr: bool,
-    format_version: &str,
+    _format_version: &str,
     stdout: &mut String,
 ) -> String {
     let source = source_form_content.trim_start_matches('\u{feff}');
@@ -1513,7 +1513,6 @@ pub(crate) fn cfe_borrow_form_xml(
         .unwrap_or("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
         .to_string();
     let form_tag = cfe_borrow_form_open_tag(source)
-        .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("<Form version=\"{}\">", escape_xml(&version)));
 
     let mut form_props = Vec::<String>::new();
@@ -1658,7 +1657,7 @@ pub(crate) fn cfe_borrow_form_xml(
     parts.push("\r\n".to_string());
     parts.push(format!(
         "\t<BaseForm version=\"{}\">\r\n",
-        escape_xml(format_version)
+        escape_xml(&version)
     ));
     for prop_xml in &form_props {
         parts.push(format!("\t\t{prop_xml}\r\n"));
@@ -1684,7 +1683,7 @@ pub(crate) fn cfe_borrow_form_xml_fallback(
     borrow_main_attr: bool,
 ) -> String {
     let version = ACTIVE_FORMAT_PROFILE.export_format.to_string();
-    let mut content = source.to_string();
+    let mut content = cfe_borrow_normalize_form_root_version(source);
     if !borrow_main_attr {
         content = cfe_borrow_strip_simple_data_paths(&content);
     }
@@ -1737,10 +1736,55 @@ pub(crate) fn cfe_borrow_xml_declaration(source: &str) -> Option<&str> {
     }
 }
 
-pub(crate) fn cfe_borrow_form_open_tag(source: &str) -> Option<&str> {
+pub(crate) fn cfe_borrow_form_open_tag(source: &str) -> Option<String> {
     let start = cfe_borrow_find_start_tag(source, "Form", 0)?;
     let end = source[start..].find('>')? + start + 1;
-    Some(&source[start..end])
+    Some(cfe_borrow_normalize_form_open_tag(&source[start..end]))
+}
+
+pub(crate) fn cfe_borrow_normalize_form_root_version(source: &str) -> String {
+    let Some(start) = cfe_borrow_find_start_tag(source, "Form", 0) else {
+        return source.to_string();
+    };
+    let Some(end) = source[start..].find('>').map(|offset| start + offset + 1) else {
+        return source.to_string();
+    };
+    let normalized = cfe_borrow_normalize_form_open_tag(&source[start..end]);
+    format!("{}{}{}", &source[..start], normalized, &source[end..])
+}
+
+pub(crate) fn cfe_borrow_normalize_form_open_tag(open_tag: &str) -> String {
+    let active = ACTIVE_FORMAT_PROFILE.export_format;
+    let Some(version_at) = open_tag.find("version=") else {
+        let insert_at = open_tag
+            .rfind("/>")
+            .or_else(|| open_tag.rfind('>'))
+            .unwrap_or(open_tag.len());
+        return format!(
+            "{} version=\"{}\"{}",
+            &open_tag[..insert_at],
+            active,
+            &open_tag[insert_at..]
+        );
+    };
+    let quote_at = version_at + "version=".len();
+    let Some(quote) = open_tag.as_bytes().get(quote_at).copied() else {
+        return open_tag.to_string();
+    };
+    if quote != b'\'' && quote != b'"' {
+        return open_tag.to_string();
+    }
+    let value_start = quote_at + 1;
+    let Some(value_end_rel) = open_tag[value_start..].find(quote as char) else {
+        return open_tag.to_string();
+    };
+    let value_end = value_start + value_end_rel;
+    format!(
+        "{}{}{}",
+        &open_tag[..value_start],
+        active,
+        &open_tag[value_end..]
+    )
 }
 
 pub(crate) fn cfe_borrow_form_top_level_blocks(source: &str) -> Vec<CfeBorrowFormBlock> {
@@ -3997,6 +4041,10 @@ pub(crate) fn create_extension_scaffold(
                 Ok(compatibility) => return Err(format_compatibility_warning(&compatibility)),
                 Err(error) => return Err(error.to_string()),
             }
+            stdout_prefix.push_str(&format!(
+                "[INFO] Base config MDClasses format version: {}\n",
+                ACTIVE_FORMAT_PROFILE.export_format
+            ));
             let base_lang_file = cfg_dir.join("Languages").join("Русский.xml");
             if base_lang_file.exists() {
                 match fs::read_to_string(&base_lang_file) {
@@ -4036,61 +4084,27 @@ pub(crate) fn create_extension_scaffold(
                 ));
             }
 
-            match fs::read_to_string(&config_path) {
-                Ok(text) => match Document::parse(text.trim_start_matches('\u{feff}')) {
-                    Ok(doc) => {
-                        match classify_root_version(doc.root_element().attribute("version")) {
-                            Ok(FormatCompatibility::Supported { .. }) => {
-                                stdout_prefix.push_str(&format!(
-                                    "[INFO] Base config MDClasses format version: {}\n",
-                                    ACTIVE_FORMAT_PROFILE.export_format
-                                ));
-                            }
-                            Ok(compatibility) => {
-                                return Err(format!(
-                                    "Base config export format {} is unsupported; expected {}",
-                                    compatibility.actual(),
-                                    ACTIVE_FORMAT_PROFILE.export_format
-                                ));
-                            }
-                            Err(error) => return Err(error.to_string()),
-                        }
-                        if let Some(value) = first_text(&doc, "CompatibilityMode") {
-                            compatibility = value;
-                            stdout_prefix.push_str(&format!(
-                                "[INFO] Base config CompatibilityMode: {compatibility}\n"
-                            ));
-                        } else {
-                            stdout_prefix.push_str(&format!(
-                                "[WARN] CompatibilityMode not found in base config, using default: {compatibility}\n"
-                            ));
-                        }
-                        if let Some(value) = first_text(&doc, "InterfaceCompatibilityMode") {
-                            stdout_prefix.push_str(&format!(
-                                "[INFO] Base config InterfaceCompatibilityMode: {value}\n"
-                            ));
-                            value
-                        } else {
-                            let value = "TaxiEnableVersion8_2".to_string();
-                            stdout_prefix.push_str(&format!(
-                                "[WARN] InterfaceCompatibilityMode not found in base config, using default: {value}\n"
-                            ));
-                            value
-                        }
-                    }
-                    Err(_) => {
-                        stdout_prefix.push_str(&format!(
-                            "[WARN] Could not parse base config, using default CompatibilityMode: {compatibility}\n"
-                        ));
-                        "TaxiEnableVersion8_2".to_string()
-                    }
-                },
-                Err(_) => {
-                    stdout_prefix.push_str(&format!(
-                        "[WARN] Could not parse base config, using default CompatibilityMode: {compatibility}\n"
-                    ));
-                    "TaxiEnableVersion8_2".to_string()
-                }
+            if let Some(value) = first_text(&base_document, "CompatibilityMode") {
+                compatibility = value;
+                stdout_prefix.push_str(&format!(
+                    "[INFO] Base config CompatibilityMode: {compatibility}\n"
+                ));
+            } else {
+                stdout_prefix.push_str(&format!(
+                    "[WARN] CompatibilityMode not found in base config, using default: {compatibility}\n"
+                ));
+            }
+            if let Some(value) = first_text(&base_document, "InterfaceCompatibilityMode") {
+                stdout_prefix.push_str(&format!(
+                    "[INFO] Base config InterfaceCompatibilityMode: {value}\n"
+                ));
+                value
+            } else {
+                let value = "TaxiEnableVersion8_2".to_string();
+                stdout_prefix.push_str(&format!(
+                    "[WARN] InterfaceCompatibilityMode not found in base config, using default: {value}\n"
+                ));
+                value
             }
         } else {
             stdout_prefix.push_str("[WARN] Language ExtendedConfigurationObject set to zeros. Use -ConfigPath to auto-resolve from base config, or fix manually before loading.\n");
@@ -4415,6 +4429,28 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn cfe_borrow_form_normalizes_active_version_on_structured_and_fallback_paths() {
+        for source in [
+            r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.17"><AutoCommandBar/></Form>"#,
+            r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.17"></Form>"#,
+        ] {
+            let mut stdout = String::new();
+            let generated = cfe_borrow_form_xml(
+                source,
+                Path::new("."),
+                "Catalog",
+                "Items",
+                false,
+                "2.20",
+                &mut stdout,
+            );
+            let document = Document::parse(&generated).unwrap();
+            assert_eq!(document.root_element().attribute("version"), Some("2.20"));
+            assert!(!generated.contains(r#"version="2.17""#), "{generated}");
+        }
     }
 
     #[test]
@@ -4863,7 +4899,7 @@ mod tests {
                 .join("Ext")
                 .join("Form.xml"),
             r#"<?xml version="1.0" encoding="utf-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+<Form xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.17">
 	<ChildItems>
 		<InputField name="CustomerTaxId" id="1000001"><DataPath>Объект.Customer.TaxId</DataPath></InputField>
 		<InputField name="ProductSku" id="1000002"><DataPath>Объект.Items.Product.Sku</DataPath></InputField>
@@ -4898,6 +4934,14 @@ mod tests {
         let outcome = borrow_cfe(&args, &context);
 
         assert!(outcome.ok, "{:?}", outcome.errors);
+        for path in [
+            ext.join("Catalogs/Orders/Forms/MainForm.xml"),
+            ext.join("Catalogs/Orders/Forms/MainForm/Ext/Form.xml"),
+        ] {
+            let generated = fs::read_to_string(path).unwrap();
+            assert!(generated.contains(r#"version="2.20""#), "{generated}");
+            assert!(!generated.contains(r#"version="2.17""#), "{generated}");
+        }
         let order_xml = fs::read_to_string(ext.join("Catalogs").join("Orders.xml")).unwrap();
         for expected in [
             "<Name>Customer</Name>",

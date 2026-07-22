@@ -4621,6 +4621,10 @@ mod tests {
         let config_text = String::from_utf8_lossy(&config_bytes).to_string();
         assert!(config_text.contains("<Report>MetaCompileBomReport</Report>"));
         roxmltree::Document::parse(config_text.trim_start_matches('\u{feff}')).unwrap();
+        let generated =
+            std::fs::read_to_string(src.join("Reports/MetaCompileBomReport.xml")).unwrap();
+        assert!(generated.contains(r#"version="2.20""#), "{generated}");
+        assert!(!generated.contains(r#"version="2.17""#), "{generated}");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -6035,9 +6039,16 @@ mod tests {
         let help_page = ext.join("Help").join("ru.html");
         assert!(help_xml.is_file());
         assert!(help_page.is_file());
-        assert!(std::fs::read_to_string(&help_xml)
-            .unwrap()
-            .contains("<Page>ru</Page>"));
+        let generated_help = std::fs::read_to_string(&help_xml).unwrap();
+        assert!(generated_help.contains("<Page>ru</Page>"));
+        assert!(
+            generated_help.contains(r#"version="2.20""#),
+            "{generated_help}"
+        );
+        assert!(
+            !generated_help.contains(r#"version="2.17""#),
+            "{generated_help}"
+        );
         assert!(std::fs::read_to_string(&help_page)
             .unwrap()
             .contains("<h1>Catalogs/Items</h1>"));

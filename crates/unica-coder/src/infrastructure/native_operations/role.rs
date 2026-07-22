@@ -1777,3 +1777,52 @@ pub(crate) fn invoke_mutation(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod format_profile_writer_tests {
+    use super::*;
+
+    #[test]
+    fn role_compile_descriptors_use_active_format() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-role-format-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let definition = root.join("role.json");
+        fs::write(&definition, r#"{"name":"Reader"}"#).unwrap();
+        let context = WorkspaceContext {
+            cwd: root.clone(),
+            workspace_root: root.clone(),
+            cache_root: root.join(".build/unica"),
+            workspace_epoch: 1,
+        };
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                Value::String(definition.display().to_string()),
+            ),
+            (
+                "OutputDir".to_string(),
+                Value::String(root.display().to_string()),
+            ),
+        ]);
+
+        let outcome = compile_role(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        for path in [
+            root.join("Roles/Reader.xml"),
+            root.join("Roles/Reader/Ext/Rights.xml"),
+        ] {
+            let generated = fs::read_to_string(path).unwrap();
+            assert!(generated.contains(r#"version="2.20""#), "{generated}");
+            assert!(!generated.contains(r#"version="2.17""#), "{generated}");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+}
