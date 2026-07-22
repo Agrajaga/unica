@@ -1755,36 +1755,95 @@ pub(crate) fn cfe_borrow_normalize_form_root_version(source: &str) -> String {
 
 pub(crate) fn cfe_borrow_normalize_form_open_tag(open_tag: &str) -> String {
     let active = ACTIVE_FORMAT_PROFILE.export_format;
-    let Some(version_at) = open_tag.find("version=") else {
-        let insert_at = open_tag
-            .rfind("/>")
-            .or_else(|| open_tag.rfind('>'))
-            .unwrap_or(open_tag.len());
-        return format!(
-            "{} version=\"{}\"{}",
-            &open_tag[..insert_at],
+    match cfe_borrow_version_value_range(open_tag) {
+        Ok(Some((value_start, value_end))) => format!(
+            "{}{}{}",
+            &open_tag[..value_start],
             active,
-            &open_tag[insert_at..]
-        );
-    };
-    let quote_at = version_at + "version=".len();
-    let Some(quote) = open_tag.as_bytes().get(quote_at).copied() else {
-        return open_tag.to_string();
-    };
-    if quote != b'\'' && quote != b'"' {
-        return open_tag.to_string();
+            &open_tag[value_end..]
+        ),
+        Err(()) => open_tag.to_string(),
+        Ok(None) => {
+            let insert_at = open_tag
+                .rfind("/>")
+                .or_else(|| open_tag.rfind('>'))
+                .unwrap_or(open_tag.len());
+            format!(
+                "{} version=\"{}\"{}",
+                &open_tag[..insert_at],
+                active,
+                &open_tag[insert_at..]
+            )
+        }
     }
-    let value_start = quote_at + 1;
-    let Some(value_end_rel) = open_tag[value_start..].find(quote as char) else {
-        return open_tag.to_string();
-    };
-    let value_end = value_start + value_end_rel;
-    format!(
-        "{}{}{}",
-        &open_tag[..value_start],
-        active,
-        &open_tag[value_end..]
-    )
+}
+
+fn cfe_borrow_version_value_range(open_tag: &str) -> Result<Option<(usize, usize)>, ()> {
+    let bytes = open_tag.as_bytes();
+    let mut index = usize::from(bytes.first() == Some(&b'<'));
+    while index < bytes.len() && !cfe_borrow_is_xml_space(bytes[index]) && bytes[index] != b'>' {
+        index += 1;
+    }
+
+    while index < bytes.len() {
+        while index < bytes.len() && cfe_borrow_is_xml_space(bytes[index]) {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] == b'>' || bytes[index] == b'/' {
+            return Ok(None);
+        }
+
+        let name_start = index;
+        while index < bytes.len()
+            && !cfe_borrow_is_xml_space(bytes[index])
+            && !matches!(bytes[index], b'=' | b'>' | b'/')
+        {
+            index += 1;
+        }
+        let is_version = &open_tag[name_start..index] == "version";
+        while index < bytes.len() && cfe_borrow_is_xml_space(bytes[index]) {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'=') {
+            if is_version {
+                return Err(());
+            }
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && cfe_borrow_is_xml_space(bytes[index]) {
+            index += 1;
+        }
+        let Some(quote @ (b'\'' | b'"')) = bytes.get(index).copied() else {
+            if is_version {
+                return Err(());
+            }
+            while index < bytes.len()
+                && !cfe_borrow_is_xml_space(bytes[index])
+                && bytes[index] != b'>'
+            {
+                index += 1;
+            }
+            continue;
+        };
+        index += 1;
+        let value_start = index;
+        while index < bytes.len() && bytes[index] != quote {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            return if is_version { Err(()) } else { Ok(None) };
+        }
+        if is_version {
+            return Ok(Some((value_start, index)));
+        }
+        index += 1;
+    }
+    Ok(None)
+}
+
+fn cfe_borrow_is_xml_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
 pub(crate) fn cfe_borrow_form_top_level_blocks(source: &str) -> Vec<CfeBorrowFormBlock> {
@@ -4433,9 +4492,15 @@ mod tests {
 
     #[test]
     fn cfe_borrow_form_normalizes_active_version_on_structured_and_fallback_paths() {
-        for source in [
-            r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.17"><AutoCommandBar/></Form>"#,
-            r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.17"></Form>"#,
+        for (path, source) in [
+            (
+                "structured",
+                r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" conversionversion="keep" version = '2.17'><AutoCommandBar/></Form>"#,
+            ),
+            (
+                "fallback",
+                r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" conversionversion="keep" version = '2.17'></Form>"#,
+            ),
         ] {
             let mut stdout = String::new();
             let generated = cfe_borrow_form_xml(
@@ -4448,8 +4513,17 @@ mod tests {
                 &mut stdout,
             );
             let document = Document::parse(&generated).unwrap();
-            assert_eq!(document.root_element().attribute("version"), Some("2.20"));
-            assert!(!generated.contains(r#"version="2.17""#), "{generated}");
+            let root = document.root_element();
+            assert_eq!(root.attribute("version"), Some("2.20"), "{path}");
+            assert_eq!(
+                root.attributes()
+                    .filter(|attribute| attribute.name() == "version")
+                    .count(),
+                1,
+                "{path}: {generated}"
+            );
+            assert_eq!(root.attribute("conversionversion"), Some("keep"), "{path}");
+            assert!(!generated.contains("2.17"), "{path}: {generated}");
         }
     }
 
