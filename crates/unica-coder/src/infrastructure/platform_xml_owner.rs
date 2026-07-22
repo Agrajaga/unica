@@ -242,8 +242,8 @@ fn read_platform_xml_owner(
             && node.tag_name().namespace() == Some(MD_CLASSES_NS)
             && node.tag_name().name() == "ConfigurationExtensionPurpose"
     });
-    let has_external_processor = direct_md_child_count(root, "ExternalDataProcessor") == 1;
-    let has_external_report = direct_md_child_count(root, "ExternalReport") == 1;
+    let external_processor_count = direct_md_child_count(root, "ExternalDataProcessor");
+    let external_report_count = direct_md_child_count(root, "ExternalReport");
     let root_qname = (root.tag_name().namespace(), root.tag_name().name());
     let kind = match expectation {
         OwnerExpectation::SourceSet(configured_kind) => {
@@ -258,17 +258,19 @@ fn read_platform_xml_owner(
         }
         OwnerExpectation::Standalone => {
             if root_qname == (Some(MD_CLASSES_NS), "MetaDataObject") {
-                match (has_external_processor, has_external_report) {
-                    (true, false) => PlatformXmlOwnerKind::ExternalProcessor,
-                    (false, true) => PlatformXmlOwnerKind::ExternalReport,
-                    (true, true) => {
+                let direct_element_count = root.children().filter(|node| node.is_element()).count();
+                match (external_processor_count, external_report_count) {
+                    (1, 0) if direct_element_count == 1 => PlatformXmlOwnerKind::ExternalProcessor,
+                    (0, 1) if direct_element_count == 1 => PlatformXmlOwnerKind::ExternalReport,
+                    (processor_count, report_count) if processor_count > 0 || report_count > 0 => {
                         return invalid_owner(
                             path,
-                            "standalone metadata descriptor has conflicting artifact kinds",
+                            "standalone external descriptor must contain exactly one direct artifact child",
                         );
                     }
-                    (false, false) if is_extension => PlatformXmlOwnerKind::Extension,
-                    (false, false) => PlatformXmlOwnerKind::Standalone,
+                    (0, 0) if is_extension => PlatformXmlOwnerKind::Extension,
+                    (0, 0) => PlatformXmlOwnerKind::Standalone,
+                    _ => unreachable!(),
                 }
             } else if known_standalone_root(root_qname) {
                 PlatformXmlOwnerKind::Standalone

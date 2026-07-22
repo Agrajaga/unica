@@ -882,6 +882,33 @@ mod tests {
     }
 
     #[test]
+    fn direct_external_descriptor_rejects_extra_artifact_children() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-format-guard-direct-external-extra-child-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let descriptor = root.join("PriceLoader.xml");
+        std::fs::write(
+            &descriptor,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><ExternalDataProcessor/><Catalog/></MetaDataObject>"#,
+        )
+        .unwrap();
+        let mut args = Map::new();
+        args.insert(
+            "ObjectPath".into(),
+            Value::String(descriptor.display().to_string()),
+        );
+
+        let check = evaluate_format_guard(spec("unica.meta.edit"), &args, &context(&root)).unwrap();
+        let FormatGuardCheck::Block { diagnostic, .. } = check else {
+            panic!("direct EPF owner with extra artifact child must be invalid");
+        };
+        assert_eq!(diagnostic["code"], "formatVersionInvalid");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn external_source_root_with_one_descriptor_resolves_that_owner() {
         let root = std::env::temp_dir().join(format!(
             "unica-format-guard-external-root-owner-{}",
