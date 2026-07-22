@@ -262,6 +262,60 @@ git -c commit.gpgsign=false commit -m "fix: emit documented input column propert
 
 ---
 
+### Task 3c: Reconcile global commands and object tooltips
+
+**Files:**
+- Modify: `crates/unica-coder/src/infrastructure/native_operations/form.rs`
+- Modify: `plugins/unica/references/specs/form-patterns.md`
+- Modify: `plugins/unica/skills/form-patterns/SKILL.md`
+- Modify: `tests/ci/test_unica_skills.py`
+
+**Interfaces:**
+- Button `commandName` emits a global `<CommandName>` verbatim when local
+  `command` is absent; existing `command` precedence is preserved.
+- Standalone command-bar `commandSource` emits `<CommandSource>` before
+  `<Autofill>` and child items.
+- Element tooltip accepts string, `{ru, en}`, and `{text, formatted}` values;
+  language/content values are XML-escaped and explicit formatted state is
+  preserved on `<ToolTip>`.
+- Mirrored guidance uses `titleLocation: "top"` for multiline fields and
+  distinguishes supported command source/global-command keys from the current
+  inability to deduplicate standard commands automatically when a table is
+  split across pages.
+
+- [ ] **Step 1: Add failing Rust regressions**
+
+Add exact tests for a command bar with both supported source values and global
+buttons, including local-command precedence and escaping. Add tooltip cases
+for multilingual and formatted object values on supported element kinds. Run
+the exact tests and confirm the documented properties are currently dropped.
+
+- [ ] **Step 2: Implement narrow native support**
+
+Reuse shared XML escaping, keep schema order aligned with the reference
+compiler, skip empty optional values, and do not add unsupported popup or
+button-group element types.
+
+- [ ] **Step 3: Complete and guard the mirrored UX prose**
+
+Add the multiline-title recommendation and command-source example/limitation
+to both mirrors, then extend the semantic contract test. Do not present popup
+or automatic standard-command deduplication as executable native behavior.
+
+- [ ] **Step 4: Verify and commit**
+
+Run the exact tests, the full form module, full skill tests, formatter, and
+PR-base diff-check. Commit as:
+
+```bash
+git add crates/unica-coder/src/infrastructure/native_operations/form.rs \
+  plugins/unica/references/specs/form-patterns.md \
+  plugins/unica/skills/form-patterns/SKILL.md tests/ci/test_unica_skills.py
+git -c commit.gpgsign=false commit -m "fix: emit documented form command and tooltip values"
+```
+
+---
+
 ### Task 4: Preserve the merge base in PR change classification
 
 **Files:**
