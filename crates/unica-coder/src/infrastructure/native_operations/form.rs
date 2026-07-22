@@ -6088,6 +6088,58 @@ pub(crate) fn emit_form_mltext(lines: &mut Vec<String>, indent: &str, tag: &str,
     lines.push(format!("{indent}</{tag}>"));
 }
 
+pub(crate) fn emit_form_element_tooltip(
+    lines: &mut Vec<String>,
+    element: &Map<String, Value>,
+    indent: &str,
+) {
+    if let Some(tooltip) = element.get("tooltip").and_then(Value::as_str) {
+        emit_form_mltext(lines, indent, "ToolTip", tooltip);
+    }
+    if let Some(representation) = element.get("tooltipRepresentation").and_then(Value::as_str) {
+        lines.push(format!(
+            "{indent}<ToolTipRepresentation>{}</ToolTipRepresentation>",
+            escape_xml(representation)
+        ));
+    }
+}
+
+pub(crate) fn emit_form_font(lines: &mut Vec<String>, font: &Value, indent: &str) {
+    if let Some(reference) = font.as_str().filter(|reference| !reference.is_empty()) {
+        lines.push(format!(
+            "{indent}<Font ref=\"{}\" kind=\"StyleItem\"/>",
+            escape_xml(reference)
+        ));
+        return;
+    }
+    let Some(attributes) = font.as_object() else {
+        return;
+    };
+    let mut serialized = Vec::new();
+    for name in [
+        "ref",
+        "faceName",
+        "height",
+        "bold",
+        "italic",
+        "underline",
+        "strikeout",
+        "kind",
+        "scale",
+    ] {
+        let Some(value) = attributes.get(name).filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let value = if let Some(flag) = value.as_bool() {
+            if flag { "true" } else { "false" }.to_string()
+        } else {
+            json_value_to_python_string(value)
+        };
+        serialized.push(format!("{name}=\"{}\"", escape_xml(&value)));
+    }
+    lines.push(format!("{indent}<Font {}/>", serialized.join(" ")));
+}
+
 pub(crate) fn emit_form_properties(
     lines: &mut Vec<String>,
     props: &Map<String, Value>,
@@ -6404,6 +6456,7 @@ pub(crate) fn emit_form_check(
     if let Some(title) = element.get("title").and_then(Value::as_str) {
         emit_form_mltext(lines, &inner, "Title", title);
     }
+    emit_form_element_tooltip(lines, element, &inner);
     emit_form_common_flags(lines, element, &inner);
     if let Some(value) = element.get("checkBoxType").and_then(Value::as_str) {
         if !value.is_empty() {
@@ -6472,6 +6525,7 @@ pub(crate) fn emit_form_input(
     if let Some(title) = element.get("title").and_then(Value::as_str) {
         emit_form_mltext(lines, &inner, "Title", title);
     }
+    emit_form_element_tooltip(lines, element, &inner);
     emit_form_common_flags(lines, element, &inner);
     if let Some(value) = element.get("titleLocation").and_then(Value::as_str) {
         let location = match value {
@@ -6577,6 +6631,7 @@ pub(crate) fn emit_form_button(
     if let Some(title) = element.get("title").and_then(Value::as_str) {
         emit_form_mltext(lines, &inner, "Title", title);
     }
+    emit_form_element_tooltip(lines, element, &inner);
     emit_form_common_flags(lines, element, &inner);
     if element.get("defaultButton").and_then(Value::as_bool) == Some(true) {
         lines.push(format!("{inner}<DefaultButton>true</DefaultButton>"));
@@ -6600,6 +6655,15 @@ pub(crate) fn emit_form_button(
             "{inner}<LocationInCommandBar>{}</LocationInCommandBar>",
             escape_xml(location)
         ));
+    }
+    if let Some(back_color) = element.get("backColor").and_then(Value::as_str) {
+        lines.push(format!(
+            "{inner}<BackColor>{}</BackColor>",
+            escape_xml(back_color)
+        ));
+    }
+    if let Some(font) = element.get("font") {
+        emit_form_font(lines, font, &inner);
     }
     emit_form_companion(
         lines,
@@ -6658,6 +6722,7 @@ pub(crate) fn emit_form_label_field(
     if let Some(path) = element.get("path").and_then(Value::as_str) {
         lines.push(format!("{inner}<DataPath>{}</DataPath>", escape_xml(path)));
     }
+    emit_form_element_tooltip(lines, element, &inner);
     emit_form_common_flags(lines, element, &inner);
     emit_form_companion(
         lines,
@@ -9448,6 +9513,77 @@ mod tests {
         assert!(xml.contains("<Table name=\"Rows\""), "{xml}");
         assert!(xml.contains("<Page name=\"Main\""), "{xml}");
         assert!(xml.contains("<Group>Horizontal</Group>"), "{xml}");
+    }
+
+    #[test]
+    fn form_compile_emits_tooltip_and_button_appearance() {
+        let definition = json!({
+            "elements": [
+                {
+                    "input": "Comment",
+                    "title": "Comment",
+                    "tooltip": "Enter <comment> & confirm",
+                    "tooltipRepresentation": "Button",
+                    "disabled": true
+                },
+                {
+                    "button": "Apply",
+                    "title": "Apply",
+                    "tooltip": "Apply <changes> & continue",
+                    "tooltipRepresentation": "Button",
+                    "backColor": "#FFE0A0",
+                    "font": {
+                        "ref": "style:Button&Main",
+                        "bold": true,
+                        "italic": false,
+                        "kind": "StyleItem"
+                    }
+                }
+            ]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+
+        assert!(
+            xml.contains(concat!(
+                "<Title>\n",
+                "\t\t\t\t<v8:item>\n",
+                "\t\t\t\t\t<v8:lang>ru</v8:lang>\n",
+                "\t\t\t\t\t<v8:content>Comment</v8:content>\n",
+                "\t\t\t\t</v8:item>\n",
+                "\t\t\t</Title>\n",
+                "\t\t\t<ToolTip>\n",
+                "\t\t\t\t<v8:item>\n",
+                "\t\t\t\t\t<v8:lang>ru</v8:lang>\n",
+                "\t\t\t\t\t<v8:content>Enter &lt;comment&gt; &amp; confirm</v8:content>\n",
+                "\t\t\t\t</v8:item>\n",
+                "\t\t\t</ToolTip>\n",
+                "\t\t\t<ToolTipRepresentation>Button</ToolTipRepresentation>\n",
+                "\t\t\t<Enabled>false</Enabled>"
+            )),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(concat!(
+                "<Title>\n",
+                "\t\t\t\t<v8:item>\n",
+                "\t\t\t\t\t<v8:lang>ru</v8:lang>\n",
+                "\t\t\t\t\t<v8:content>Apply</v8:content>\n",
+                "\t\t\t\t</v8:item>\n",
+                "\t\t\t</Title>\n",
+                "\t\t\t<ToolTip>\n",
+                "\t\t\t\t<v8:item>\n",
+                "\t\t\t\t\t<v8:lang>ru</v8:lang>\n",
+                "\t\t\t\t\t<v8:content>Apply &lt;changes&gt; &amp; continue</v8:content>\n",
+                "\t\t\t\t</v8:item>\n",
+                "\t\t\t</ToolTip>\n",
+                "\t\t\t<ToolTipRepresentation>Button</ToolTipRepresentation>\n",
+                "\t\t\t<BackColor>#FFE0A0</BackColor>\n",
+                "\t\t\t<Font ref=\"style:Button&amp;Main\" bold=\"true\" italic=\"false\" kind=\"StyleItem\"/>\n",
+                "\t\t\t<ExtendedTooltip"
+            )),
+            "{xml}"
+        );
     }
 
     #[test]
