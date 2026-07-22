@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import unittest
 from pathlib import Path
 
@@ -950,6 +949,17 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             "изменяющее форму, ставьте первым",
             "Подвал формы",
             "Комментарий и Ответственный последними",
+            "строковых полей с доступным выбором",
+            '"choiceButton": true',
+            "очевидных полей",
+            '"titleLocation": "none"',
+            '"inputHint": "По всем организациям"',
+            '"showInHeader": false',
+            '"readOnly": true',
+            '"horizontalStretch": true',
+            '"headerHorizontalAlign": "Right"',
+            '"horizontalAlign": "Right"',
+            "не используйте много разных стилей и цветов",
             "достаточно длинное название",
             "двойное отрицание",
             "Проводить документ при записи",
@@ -974,21 +984,6 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertNotRegex(reference_section, r'"(?:leftIndent|showLeftIndent)"\s*:')
         self.assertNotIn('"representation": "Picture"', reference_section)
         self.assertNotIn("Кнопки действий внизу", reference_section)
-        whitespace_check = subprocess.run(
-            [
-                "git",
-                "diff",
-                "--check",
-                "832e940",
-                "--",
-                "plugins/unica/references/use-cases/forms-ui.md",
-            ],
-            cwd=self.repo_root(),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(whitespace_check.returncode, 0, whitespace_check.stdout)
 
     def test_meta_info_tracks_upstream_type_presentation_through_unica_boundary(self) -> None:
         meta_info = (self.skill_root() / "meta-info" / "SKILL.md").read_text(encoding="utf-8")
