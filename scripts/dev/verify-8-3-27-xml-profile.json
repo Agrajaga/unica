@@ -15,7 +15,14 @@
     "knownCompileFailures": {
       "0049.xsd": "runtime export contains an xs:restriction without base",
       "0056.xsd": "runtime export depends on external W3C xml.xsd"
-    }
+    },
+    "knownExternalImports": [
+      {
+        "file": "schemas/0056.xsd",
+        "namespace": "http://www.w3.org/XML/1998/namespace",
+        "schemaLocation": "http://www.w3.org/2001/xml.xsd"
+      }
+    ]
   },
   "edt": {
     "sha256": "a0c13bbff0527503c23cde14fb10f07742223c6e7d85bf9f06a753cfcc3707b8",
@@ -65,13 +72,25 @@
     "{http://v8.1c.ru/8.2/managed-application/core}ClientApplicationInterface": {
       "id": "client-application-interface",
       "coverage": "known-schema-incompatibility",
-      "version": "root"
+      "version": "owner"
     },
     "{http://v8.1c.ru/8.3/MDClasses}MetaDataObject": {
       "id": "metadata",
       "coverage": "not-covered",
       "version": "root",
-      "edtDeclaration": "metadata"
+      "edtDeclaration": "metadata",
+      "sourceSetOwner": true,
+      "sourceSetOwnerTypes": [
+        "Configuration",
+        "ConfigurationExtension",
+        "ExternalDataProcessor",
+        "ExternalReport"
+      ]
+    },
+    "{http://v8.1c.ru/8.3/MDClasses}Flowchart": {
+      "id": "flowchart",
+      "coverage": "not-covered",
+      "version": "root"
     },
     "{http://v8.1c.ru/8.3/xcf/logform}Form": {
       "id": "managed-form",

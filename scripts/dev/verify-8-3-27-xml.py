@@ -6,19 +6,23 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
+import re
 import stat
 import subprocess
 import sys
 import tempfile
 import zipfile
-from pathlib import Path, PurePosixPath
+import zlib
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from lxml import etree
 
 
 XS_NS = "http://www.w3.org/2001/XMLSchema"
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
+REPORT_SCHEMA_NAME = "verify-8-3-27-xml-report.schema.json"
+MANIFEST_SCHEMA_URI_PREFIX = "unica-manifest-xsd://schema/"
+BLOCKED_SCHEMA_URI_PREFIX = "unica-blocked-xsd://dependency/"
 
 
 class SourceError(RuntimeError):
@@ -39,12 +43,49 @@ class RuntimeEvidence(dict):
         self.close()
 
 
-def file_sha256(path: Path) -> str:
+def _private_copy_with_sha256(source: Path, destination: Path, label: str) -> str:
+    """Copy once, while hashing, so all later checks consume the same bytes."""
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
+    try:
+        with source.open("rb") as input_stream, destination.open("xb") as output_stream:
+            for block in iter(lambda: input_stream.read(1024 * 1024), b""):
+                digest.update(block)
+                output_stream.write(block)
+    except OSError as error:
+        raise SourceError(f"cannot read {label}: {source}: {error}") from error
     return digest.hexdigest()
+
+
+class _ManifestOnlyResolver(etree.Resolver):
+    """Resolve schema dependencies only through verified temporary copies."""
+
+    def __init__(self, locations: dict[str, Path], blocked: set[str]):
+        super().__init__()
+        self.locations = locations
+        self.blocked = blocked
+        self.path_locations = {path.resolve(): uri for uri, path in locations.items()}
+
+    def uri_for(self, path: Path) -> str:
+        try:
+            return self.path_locations[path.resolve()]
+        except KeyError as error:
+            raise SourceError(f"schema is not registered in verified manifest: {path}") from error
+
+    def resolve(self, url, _public_id, context):
+        if url in self.locations:
+            return self.resolve_filename(str(self.locations[url]), context)
+        if url in self.blocked:
+            return self.resolve_string(b"<blocked-external-schema/>", context)
+        if url.startswith((MANIFEST_SCHEMA_URI_PREFIX, BLOCKED_SCHEMA_URI_PREFIX)):
+            raise OSError(f"unregistered schema URI: {url}")
+        raise OSError(f"schema access outside verified manifest is forbidden: {url}")
+
+
+def _schema_parser(resolver: _ManifestOnlyResolver | None = None) -> etree.XMLParser:
+    parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)
+    if resolver is not None:
+        parser.resolvers.add(resolver)
+    return parser
 
 
 def _safe_zip_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
@@ -54,12 +95,37 @@ def _safe_zip_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
         raise SourceError("duplicate ZIP member")
     for info in infos:
         path = PurePosixPath(info.filename)
-        if path.is_absolute() or ".." in path.parts or not path.parts:
+        windows_path = PureWindowsPath(info.filename)
+        if (
+            path.is_absolute()
+            or windows_path.is_absolute()
+            or windows_path.drive
+            or ".." in path.parts
+            or ".." in windows_path.parts
+            or "\\" in info.filename
+            or not path.parts
+        ):
             raise SourceError(f"unsafe ZIP path: {info.filename}")
         mode = info.external_attr >> 16
         if stat.S_ISLNK(mode):
             raise SourceError(f"ZIP symlink is forbidden: {info.filename}")
     return infos
+
+
+def _read_zip_member(archive: zipfile.ZipFile, name: str, label: str) -> bytes:
+    try:
+        return archive.read(name)
+    except (
+        KeyError,
+        OSError,
+        RuntimeError,
+        EOFError,
+        NotImplementedError,
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+        zlib.error,
+    ) as error:
+        raise SourceError(f"cannot read {label} ZIP member {name}: {error}") from error
 
 
 def _manifest_member(infos: list[zipfile.ZipInfo]) -> str:
@@ -89,54 +155,217 @@ def _expected_runtime(profile: dict) -> dict:
     return runtime
 
 
+def _is_nonempty_string(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_sha256(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _is_json_integer(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_runtime_contract(runtime: dict) -> None:
+    if not _is_sha256(runtime.get("sha256")):
+        raise SourceError("runtime profile sha256 must be a lowercase SHA-256")
+    format_version = runtime.get("formatVersion")
+    if not _is_json_integer(format_version) or format_version < 0:
+        raise SourceError("runtime profile formatVersion must be a non-negative integer")
+    if not _is_nonempty_string(runtime.get("platformVersion")):
+        raise SourceError("runtime profile platformVersion must be a non-empty string")
+    summary = runtime.get("summary")
+    count_names = {"packages", "namespaces", "success", "schemas", "errors"}
+    if not isinstance(summary, dict) or set(summary) != count_names:
+        raise SourceError("runtime profile summary must contain exactly the five count fields")
+    if any(
+        not isinstance(summary[name], int)
+        or isinstance(summary[name], bool)
+        or summary[name] < 0
+        for name in count_names
+    ):
+        raise SourceError("runtime profile summary counts must be non-negative integers")
+    known_failures = runtime.get("knownCompileFailures")
+    if not isinstance(known_failures, dict) or any(
+        not _is_nonempty_string(name) or not _is_nonempty_string(reason)
+        for name, reason in known_failures.items()
+    ):
+        raise SourceError("runtime profile knownCompileFailures must be a string map")
+    external_imports = runtime.get("knownExternalImports", [])
+    if not isinstance(external_imports, list):
+        raise SourceError("runtime profile knownExternalImports must be a list")
+    seen_external = set()
+    for rule in external_imports:
+        if not isinstance(rule, dict):
+            raise SourceError("runtime profile knownExternalImports rule must be an object")
+        key = (rule.get("file"), rule.get("namespace"), rule.get("schemaLocation"))
+        if (
+            not _is_canonical_relative_path(key[0], suffix=".xsd")
+            or not _is_nonempty_string(key[1])
+            or not _is_nonempty_string(key[2])
+            or key in seen_external
+        ):
+            raise SourceError("runtime profile knownExternalImports rule is invalid or duplicate")
+        seen_external.add(key)
+
+
+def _validate_edt_contract(edt: dict) -> None:
+    if not _is_sha256(edt.get("sha256")):
+        raise SourceError("EDT profile sha256 must be a lowercase SHA-256")
+    if not _is_nonempty_string(edt.get("symbolicName")) or not _is_nonempty_string(edt.get("version")):
+        raise SourceError("EDT profile symbolicName/version must be non-empty strings")
+    entries = edt.get("entries")
+    if not isinstance(entries, dict) or any(
+        not _is_nonempty_string(label) or not _is_canonical_relative_path(name)
+        for label, name in entries.items()
+    ):
+        raise SourceError("EDT profile entries must be a canonical path map")
+    declarations = edt.get("declarations")
+    if not isinstance(declarations, dict):
+        raise SourceError("EDT profile declarations must be an object")
+    for label, rule in declarations.items():
+        if not _is_nonempty_string(label) or not isinstance(rule, dict):
+            raise SourceError("EDT profile declaration rule is invalid")
+        entry = rule.get("entry")
+        tokens = rule.get("tokens")
+        if (
+            not _is_nonempty_string(entry)
+            or entry not in entries
+            or not isinstance(tokens, list)
+            or not tokens
+            or any(not _is_nonempty_string(token) for token in tokens)
+            or len(tokens) != len(set(tokens))
+        ):
+            raise SourceError(f"EDT profile declaration is invalid: {label}")
+
+
+def _validate_profile(profile: dict) -> None:
+    if not isinstance(profile.get("profile"), str) or not profile["profile"].strip():
+        raise SourceError("verification profile id must be a non-empty string")
+    if not isinstance(profile.get("exportVersion"), str) or not profile["exportVersion"].strip():
+        raise SourceError("verification profile exportVersion must be a non-empty string")
+    if not isinstance(profile.get("runtime"), dict) or not isinstance(profile.get("edt"), dict):
+        raise SourceError("verification profile runtime/EDT contracts must be objects")
+    families = profile.get("families")
+    if not isinstance(families, dict) or not families:
+        raise SourceError("verification profile families must be a non-empty object")
+    family_ids = set()
+    owner_families = 0
+    owner_references = 0
+    edt_references = set()
+    for expected_qname, family in families.items():
+        if (
+            not isinstance(expected_qname, str)
+            or re.fullmatch(r"\{[^{}]+\}[^{}]+", expected_qname) is None
+            or not isinstance(family, dict)
+        ):
+            raise SourceError("verification profile family contract is invalid")
+        family_id = family.get("id")
+        if not isinstance(family_id, str) or not family_id or family_id in family_ids:
+            raise SourceError(f"verification profile family id is invalid or duplicate: {family_id}")
+        family_ids.add(family_id)
+        coverage = family.get("coverage")
+        if not isinstance(coverage, str) or coverage not in {"strict", "advisory", "not-covered", "known-schema-incompatibility"}:
+            raise SourceError(f"verification profile coverage is invalid: {family_id}")
+        version_mode = family.get("version", "none")
+        if not isinstance(version_mode, str) or version_mode not in {"none", "root", "owner"}:
+            raise SourceError(f"verification profile version mode is invalid: {family_id}")
+        owner_references += version_mode == "owner"
+        if family.get("coverage") == "strict" and (
+            not _is_nonempty_string(family.get("schemaNamespace"))
+            or not _is_nonempty_string(family.get("wrapperType"))
+        ):
+            raise SourceError(f"strict verification profile family is incomplete: {family_id}")
+        if "sourceSetOwner" in family and not isinstance(family["sourceSetOwner"], bool):
+            raise SourceError(f"sourceSetOwner must be boolean: {family_id}")
+        if "edtDeclaration" in family:
+            if not _is_nonempty_string(family["edtDeclaration"]):
+                raise SourceError(f"EDT declaration reference is invalid: {family_id}")
+            edt_references.add(family["edtDeclaration"])
+        if family.get("sourceSetOwner") is True:
+            owner_families += 1
+            if version_mode != "root" or not expected_qname.endswith("}MetaDataObject"):
+                raise SourceError("sourceSetOwner must be a version-bearing MetaDataObject family")
+            owner_types = family.get("sourceSetOwnerTypes")
+            if (
+                not isinstance(owner_types, list)
+                or not owner_types
+                or any(not isinstance(value, str) or not value for value in owner_types)
+                or len(owner_types) != len(set(owner_types))
+            ):
+                raise SourceError("sourceSetOwnerTypes must be a non-empty list of unique names")
+    if owner_references and owner_families != 1:
+        raise SourceError("verification profile must define exactly one sourceSetOwner family")
+    _validate_runtime_contract(profile["runtime"])
+    _validate_edt_contract(profile["edt"])
+    missing_declarations = edt_references - set(profile["edt"]["declarations"])
+    if missing_declarations:
+        raise SourceError(f"verification profile references missing EDT declaration: {sorted(missing_declarations)[0]}")
+
+
 def verified_runtime(path: Path | str, profile: dict) -> dict:
     path = Path(path)
     expected = _expected_runtime(profile)
-    if not path.is_file():
-        raise SourceError(f"runtime XSD archive is missing: {path}")
-    actual_hash = file_sha256(path)
-    if actual_hash != expected.get("sha256"):
-        raise SourceError(f"runtime archive SHA-256 mismatch: {actual_hash}")
-
+    _validate_runtime_contract(expected)
     temporary = tempfile.TemporaryDirectory(prefix="unica-8-3-27-xsd-")
     temp_root = Path(temporary.name)
     try:
-        with zipfile.ZipFile(path) as archive:
+        private_archive = temp_root / "runtime-evidence.zip"
+        actual_hash = _private_copy_with_sha256(path, private_archive, "runtime XSD archive")
+        if actual_hash != expected.get("sha256"):
+            raise SourceError(f"runtime archive SHA-256 mismatch: {actual_hash}")
+        try:
+            archive_context = zipfile.ZipFile(private_archive)
+        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
+            raise SourceError(f"invalid runtime ZIP archive: {error}") from error
+        with archive_context as archive:
             infos = _safe_zip_members(archive)
             manifest_name = _manifest_member(infos)
             try:
-                manifest = json.loads(archive.read(manifest_name))
-            except (json.JSONDecodeError, UnicodeDecodeError, KeyError) as error:
+                manifest = json.loads(_read_zip_member(archive, manifest_name, "runtime manifest"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
                 raise SourceError(f"invalid runtime manifest: {error}") from error
-            if manifest.get("formatVersion") != expected.get("formatVersion"):
+            if not isinstance(manifest, dict):
+                raise SourceError("runtime manifest root must be an object")
+            manifest_format_version = manifest.get("formatVersion")
+            if (
+                not _is_json_integer(manifest_format_version)
+                or manifest_format_version < 0
+                or manifest_format_version != expected.get("formatVersion")
+            ):
                 raise SourceError("runtime manifest formatVersion mismatch")
             if manifest.get("platformVersion") != expected.get("platformVersion"):
                 raise SourceError("runtime manifest platformVersion mismatch")
-            if manifest.get("summary") != expected.get("summary"):
+            summary = manifest.get("summary")
+            if not isinstance(summary, dict) or summary != expected.get("summary"):
                 raise SourceError("runtime manifest summary mismatch")
+            count_names = ("packages", "namespaces", "success", "schemas", "errors")
+            if any(not isinstance(summary.get(name), int) or isinstance(summary.get(name), bool) or summary[name] < 0 for name in count_names):
+                raise SourceError("runtime manifest summary count is invalid")
             declarations = manifest.get("schemas")
             if not isinstance(declarations, list) or not declarations:
                 raise SourceError("runtime manifest schemas are missing or empty")
+            if len(declarations) != summary["schemas"]:
+                raise SourceError("runtime manifest schema count mismatch")
             prefix = str(PurePosixPath(manifest_name).parent)
             prefix = "" if prefix == "." else prefix + "/"
             declared_names = set()
+            declared_by_member = {}
             namespace_paths = {}
             schema_rows = []
             for declaration in declarations:
+                if not isinstance(declaration, dict):
+                    raise SourceError("runtime schema declaration must be an object")
                 relative = declaration.get("file")
-                if not isinstance(relative, str):
+                if not _is_canonical_relative_path(relative, suffix=".xsd"):
                     raise SourceError("runtime schema declaration has no file")
                 pure = PurePosixPath(relative)
-                if pure.is_absolute() or ".." in pure.parts:
-                    raise SourceError(f"unsafe manifest schema path: {relative}")
                 member = prefix + relative
                 if member in declared_names:
                     raise SourceError(f"duplicate runtime schema declaration: {relative}")
                 declared_names.add(member)
-                try:
-                    payload = archive.read(member)
-                except KeyError as error:
-                    raise SourceError(f"declared XSD is missing: {relative}") from error
+                payload = _read_zip_member(archive, member, "runtime XSD")
                 if len(payload) != declaration.get("size"):
                     raise SourceError(f"manifest size mismatch: {relative}")
                 if hashlib.sha256(payload).hexdigest() != declaration.get("sha256"):
@@ -150,30 +379,66 @@ def verified_runtime(path: Path | str, profile: dict) -> dict:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(payload)
                 namespace_paths[namespace] = target
-                schema_rows.append({"file": relative, "targetNamespace": namespace})
+                row = {"file": relative, "targetNamespace": namespace}
+                schema_rows.append(row)
+                declared_by_member[member] = row
+            if len(namespace_paths) != summary["namespaces"]:
+                raise SourceError("runtime manifest namespace count mismatch")
             exports = manifest.get("exports")
-            if not isinstance(exports, list) or len(exports) != manifest["summary"]["packages"]:
+            if not isinstance(exports, list) or len(exports) != summary["packages"]:
                 raise SourceError("runtime manifest exports/package count mismatch")
             exported_files = set()
             exported_namespaces = set()
+            successful_exports = 0
+            failed_exports = 0
             for export in exports:
+                if not isinstance(export, dict):
+                    raise SourceError("runtime export row must be an object")
                 namespace = export.get("sourceNamespace")
                 if not isinstance(namespace, str) or namespace in exported_namespaces:
                     raise SourceError(f"duplicate or invalid exported namespace: {namespace}")
                 exported_namespaces.add(namespace)
                 if export.get("error") not in (None, ""):
+                    failed_exports += 1
                     raise SourceError(f"runtime export reports an error for {namespace}")
-                for relative in export.get("files", []):
-                    exported_files.add(prefix + relative)
+                successful_exports += 1
+                export_files = export.get("files")
+                if not isinstance(export_files, list) or not export_files:
+                    raise SourceError(f"runtime export files are missing for {namespace}")
+                for relative in export_files:
+                    if not _is_canonical_relative_path(relative, suffix=".xsd"):
+                        raise SourceError(f"unsafe runtime export file: {relative}")
+                    member = prefix + relative
+                    if member in exported_files:
+                        raise SourceError(f"runtime schema is exported more than once: {relative}")
+                    declaration = declared_by_member.get(member)
+                    if declaration is None:
+                        raise SourceError(f"runtime export references undeclared schema: {relative}")
+                    if declaration["targetNamespace"] != namespace:
+                        raise SourceError(f"runtime export namespace does not match {relative}")
+                    exported_files.add(member)
+            if successful_exports != summary["success"] or failed_exports != summary["errors"]:
+                raise SourceError("runtime export success/error count mismatch")
             if exported_files != declared_names or exported_namespaces != set(namespace_paths):
                 raise SourceError("runtime exports do not exactly match declared schemas/namespaces")
             archived_xsd = {info.filename for info in infos if info.filename.lower().endswith(".xsd")}
-            undeclared = sorted(archived_xsd - declared_names)
-            if undeclared:
-                raise SourceError(f"undeclared XSD in runtime archive: {undeclared[0]}")
+            if archived_xsd != declared_names:
+                difference = sorted(archived_xsd ^ declared_names)
+                raise SourceError(f"runtime archive XSD declaration mismatch: {difference[0]}")
 
-        _resolve_imports(namespace_paths)
-        matrix = _compile_matrix(schema_rows, temp_root, expected.get("knownCompileFailures", {}))
+        resolver = _resolve_schema_references(
+            namespace_paths,
+            schema_rows,
+            expected.get("knownExternalImports", []),
+        )
+        matrix = _compile_matrix(
+            schema_rows,
+            temp_root,
+            expected.get("knownCompileFailures", {}),
+            resolver,
+        )
+        if len(matrix) != summary["schemas"]:
+            raise SourceError("runtime schema compilation matrix count mismatch")
         strict_namespaces = {
             family.get("schemaNamespace")
             for family in profile.get("families", {}).values()
@@ -191,7 +456,7 @@ def verified_runtime(path: Path | str, profile: dict) -> dict:
                 continue
             namespace = family["schemaNamespace"]
             wrappers[(namespace, family["wrapperType"])] = _compile_wrapper(
-                namespace_paths[namespace], namespace, family["wrapperType"], temp_root
+                namespace_paths[namespace], namespace, family["wrapperType"], temp_root, resolver
             )
         return RuntimeEvidence({
             "source": {
@@ -199,6 +464,7 @@ def verified_runtime(path: Path | str, profile: dict) -> dict:
                 "sha256": actual_hash,
                 "formatVersion": manifest["formatVersion"],
                 "platformVersion": manifest["platformVersion"],
+                "manifestSummary": dict(summary),
                 "identityStatement": "Configured SHA-256 proves identity with approved local evidence, not download provenance.",
             },
             "compilationMatrix": matrix,
@@ -211,38 +477,133 @@ def verified_runtime(path: Path | str, profile: dict) -> dict:
         raise
 
 
-def _resolve_imports(namespace_paths: dict[str, Path]) -> None:
+def _is_canonical_relative_path(raw, suffix: str | None = None) -> bool:
+    if not isinstance(raw, str) or not raw or "\\" in raw or "\0" in raw:
+        return False
+    pure = PurePosixPath(raw)
+    windows = PureWindowsPath(raw)
+    if pure.is_absolute() or windows.is_absolute() or windows.drive or ".." in pure.parts:
+        return False
+    if pure.as_posix() != raw or not pure.parts:
+        return False
+    return suffix is None or pure.suffix.lower() == suffix.lower()
+
+
+def _schema_tree(path: Path, resolver: _ManifestOnlyResolver | None = None):
+    try:
+        root = etree.fromstring(
+            path.read_bytes(),
+            parser=_schema_parser(resolver),
+            base_url=path.as_uri(),
+        )
+    except (OSError, etree.XMLSyntaxError) as error:
+        raise SourceError(f"cannot parse temporary schema {path.name}: {error}") from error
+    return etree.ElementTree(root)
+
+
+def _resolve_schema_references(
+    namespace_paths: dict[str, Path],
+    rows: list[dict],
+    known_external_imports,
+) -> _ManifestOnlyResolver:
+    row_by_path = {
+        namespace_paths[row["targetNamespace"]].resolve(): row
+        for row in rows
+    }
+    locations = {}
+    namespace_locations = {}
+    path_locations = {}
+    for namespace, path in namespace_paths.items():
+        uri = MANIFEST_SCHEMA_URI_PREFIX + hashlib.sha256(namespace.encode()).hexdigest()
+        locations[uri] = path
+        namespace_locations[namespace] = uri
+        path_locations[path.resolve()] = uri
+
+    if not isinstance(known_external_imports, list):
+        raise SourceError("knownExternalImports must be a list")
+    configured_external = set()
+    for rule in known_external_imports:
+        if not isinstance(rule, dict):
+            raise SourceError("known external import rule must be an object")
+        key = (rule.get("file"), rule.get("namespace"), rule.get("schemaLocation"))
+        if not all(isinstance(value, str) and value for value in key) or key in configured_external:
+            raise SourceError("invalid or duplicate known external import rule")
+        configured_external.add(key)
+    observed_external = set()
+    blocked = set()
+    allowed_paths = set(path_locations)
+
     for path in namespace_paths.values():
-        tree = etree.parse(str(path), parser=etree.XMLParser(resolve_entities=False, no_network=True))
-        changed = False
+        tree = _schema_tree(path)
+        row = row_by_path[path.resolve()]
         for node in tree.findall(f".//{{{XS_NS}}}import"):
-            if node.get("schemaLocation"):
-                continue
             namespace = node.get("namespace")
-            target = namespace_paths.get(namespace)
-            if target is None:
-                raise SourceError(f"unresolved namespace import {namespace!r} in {path.name}")
-            node.set("schemaLocation", os.path.relpath(target, path.parent))
-            changed = True
-        if changed:
-            tree.write(str(path), encoding="UTF-8", xml_declaration=True)
+            if namespace in namespace_locations:
+                location = node.get("schemaLocation")
+                if location is not None:
+                    if not _is_canonical_relative_path(location):
+                        raise SourceError(
+                            f"external schemaLocation is forbidden in {row['file']}: {location}"
+                        )
+                    target = (path.parent / location).resolve()
+                    if target != namespace_paths[namespace].resolve():
+                        raise SourceError(
+                            f"import schemaLocation is not the manifest schema for {namespace}: {row['file']} {location}"
+                        )
+                node.set("schemaLocation", namespace_locations[namespace])
+                continue
+            key = (row["file"], namespace, node.get("schemaLocation"))
+            if key not in configured_external:
+                raise SourceError(
+                    f"unresolved namespace import is not provided by verified manifest: {row['file']} {namespace!r}"
+                )
+            blocked_uri = BLOCKED_SCHEMA_URI_PREFIX + hashlib.sha256(repr(key).encode()).hexdigest()
+            node.set("schemaLocation", blocked_uri)
+            blocked.add(blocked_uri)
+            observed_external.add(key)
+
+        for local_name in ("include", "redefine", "override"):
+            for node in tree.findall(f".//{{{XS_NS}}}{local_name}"):
+                location = node.get("schemaLocation")
+                if not _is_canonical_relative_path(location):
+                    raise SourceError(
+                        f"external schemaLocation is forbidden in {row['file']}: {location}"
+                    )
+                target = (path.parent / location).resolve()
+                if target not in allowed_paths:
+                    raise SourceError(
+                        f"schema reference is not provided by verified manifest: {row['file']} {location}"
+                    )
+                node.set("schemaLocation", path_locations[target])
+        tree.write(str(path), encoding="UTF-8", xml_declaration=True)
+
+    missing_rules = configured_external - observed_external
+    if missing_rules:
+        raise SourceError(f"configured known external import was not observed: {sorted(missing_rules)[0]}")
+    return _ManifestOnlyResolver(locations, blocked)
 
 
-def _compile_matrix(rows: list[dict], root: Path, known: dict) -> list[dict]:
+def _compile_matrix(
+    rows: list[dict],
+    root: Path,
+    known: dict,
+    resolver: _ManifestOnlyResolver,
+) -> list[dict]:
     matrix = []
     unexpected = []
     for row in sorted(rows, key=lambda item: item["file"]):
         path = root / row["file"]
         result = dict(row)
         try:
-            etree.XMLSchema(etree.parse(str(path), parser=etree.XMLParser(no_network=True, resolve_entities=False)))
+            etree.XMLSchema(_schema_tree(path, resolver))
             result.update(status="compiled", detail="")
-        except (etree.XMLSchemaParseError, etree.XMLSyntaxError) as error:
+        except (SourceError, etree.XMLSchemaParseError, etree.XMLSyntaxError, OSError) as error:
             reason = known.get(PurePosixPath(row["file"]).name) or known.get(row["file"])
             if reason:
                 result.update(status="known-source-incompatibility", detail=reason)
             else:
-                detail = str(error.error_log.last_error or error).replace(str(root), "<runtime-xsd>")
+                error_log = getattr(error, "error_log", None)
+                detail = str((error_log.last_error if error_log is not None else None) or error).replace(str(root), "<runtime-xsd>")
                 result.update(status="compile-error", detail=detail)
                 unexpected.append(result)
         matrix.append(result)
@@ -252,17 +613,23 @@ def _compile_matrix(rows: list[dict], root: Path, known: dict) -> list[dict]:
     return matrix
 
 
-def _compile_wrapper(schema_path: Path, namespace: str, type_name: str, root: Path):
+def _compile_wrapper(
+    schema_path: Path,
+    namespace: str,
+    type_name: str,
+    root: Path,
+    resolver: _ManifestOnlyResolver,
+):
     wrapper = root / f"wrapper-{hashlib.sha256((namespace + type_name).encode()).hexdigest()[:12]}.xsd"
-    include = os.path.relpath(schema_path, wrapper.parent)
+    include = resolver.uri_for(schema_path)
     content = f'''<xs:schema xmlns:xs="{XS_NS}" xmlns:tns="{namespace}" targetNamespace="{namespace}" elementFormDefault="qualified">
 <xs:include schemaLocation="{include}"/>
 <xs:element name="{type_name}" type="tns:{type_name}"/>
 </xs:schema>'''
     wrapper.write_text(content, encoding="utf-8")
     try:
-        return etree.XMLSchema(etree.parse(str(wrapper), parser=etree.XMLParser(no_network=True, resolve_entities=False)))
-    except etree.XMLSchemaParseError as error:
+        return etree.XMLSchema(_schema_tree(wrapper, resolver))
+    except (SourceError, etree.XMLSchemaParseError, OSError) as error:
         raise SourceError(f"strict schema wrapper failed for {namespace} {type_name}: {error}") from error
 
 
@@ -278,20 +645,33 @@ def strict_xsd_error(runtime: dict, namespace: str, type_name: str, xml_text: st
 
 
 def _safe_corpus_path(root: Path, raw: str) -> Path:
+    if not _is_canonical_relative_path(raw, suffix=".xml"):
+        raise CorpusError(f"unsafe corpus path or non-canonical path: {raw}")
     pure = PurePosixPath(raw)
-    if pure.is_absolute() or ".." in pure.parts:
-        raise CorpusError(f"unsafe corpus path: {raw}")
     candidate = root
     for part in pure.parts:
         candidate = candidate / part
         if candidate.is_symlink():
             raise CorpusError(f"corpus symlink is forbidden: {raw}")
-    resolved_root = root.resolve()
     try:
-        candidate.resolve().relative_to(resolved_root)
-    except ValueError as error:
+        candidate.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (OSError, ValueError) as error:
         raise CorpusError(f"corpus path escapes root: {raw}") from error
     return candidate
+
+
+def _read_corpus_snapshot(path: Path, raw: str) -> tuple[bytes, str]:
+    """Read once into immutable bytes while hashing the exact same stream."""
+    digest = hashlib.sha256()
+    blocks = []
+    try:
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                blocks.append(block)
+                digest.update(block)
+    except OSError as error:
+        raise CorpusError(f"cannot read corpus file for hashing: {raw}: {error}") from error
+    return b"".join(blocks), digest.hexdigest()
 
 
 def _load_corpus(manifest_path: Path, expected_profile: str) -> tuple[dict, Path, list[dict]]:
@@ -299,36 +679,86 @@ def _load_corpus(manifest_path: Path, expected_profile: str) -> tuple[dict, Path
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise CorpusError(f"invalid corpus manifest: {error}") from error
-    if manifest.get("schemaVersion") != 1 or manifest.get("profile") != expected_profile:
+    if not isinstance(manifest, dict):
+        raise CorpusError("corpus manifest root must be an object")
+    schema_version = manifest.get("schemaVersion")
+    if not _is_json_integer(schema_version) or schema_version != 1 or manifest.get("profile") != expected_profile:
         raise CorpusError("corpus schemaVersion/profile mismatch")
     root = manifest_path.parent
     files = []
-    seen = set()
-    for case in manifest.get("cases", []):
-        if not isinstance(case.get("files"), list):
+    seen_paths = set()
+    seen_identities = set()
+    seen_cases = set()
+    cases = manifest.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise CorpusError("corpus cases must be a non-empty list")
+    for case in cases:
+        if not isinstance(case, dict):
+            raise CorpusError("corpus case must be an object")
+        case_id = case.get("id")
+        if not isinstance(case_id, str) or not case_id.strip():
+            raise CorpusError("corpus case id must be a non-empty string")
+        if case_id in seen_cases:
+            raise CorpusError(f"duplicate corpus case id: {case_id}")
+        seen_cases.add(case_id)
+        tool_id = case.get("toolId")
+        if not isinstance(tool_id, str) or not tool_id.strip():
+            raise CorpusError(f"corpus case toolId must be a non-empty string: {case_id}")
+        xml_impact = case.get("xmlImpact")
+        if not isinstance(xml_impact, str) or not xml_impact.strip():
+            raise CorpusError(f"corpus case xmlImpact must be a non-empty string: {case_id}")
+        if not isinstance(case.get("files"), list) or not case["files"]:
             raise CorpusError("corpus case has no files list")
         for entry in case["files"]:
+            if not isinstance(entry, dict):
+                raise CorpusError(f"corpus file entry must be an object: {case_id}")
             raw = entry.get("path")
-            if not isinstance(raw, str) or raw in seen:
+            if not isinstance(raw, str) or raw in seen_paths:
                 raise CorpusError(f"duplicate or missing corpus file: {raw}")
-            seen.add(raw)
+            seen_paths.add(raw)
             path = _safe_corpus_path(root, raw)
             if not path.is_file():
                 raise CorpusError(f"listed corpus file is missing: {raw}")
-            if file_sha256(path) != entry.get("sha256"):
+            try:
+                file_stat = path.stat()
+            except OSError as error:
+                raise CorpusError(f"cannot inspect corpus file: {raw}: {error}") from error
+            identity = (file_stat.st_dev, file_stat.st_ino)
+            if identity in seen_identities:
+                raise CorpusError(f"duplicate corpus paths reference the same file: {raw}")
+            seen_identities.add(identity)
+            declared_hash = entry.get("sha256")
+            if not isinstance(declared_hash, str) or re.fullmatch(r"[0-9a-f]{64}", declared_hash) is None:
+                raise CorpusError(f"corpus SHA-256 is invalid: {raw}")
+            snapshot, actual_hash = _read_corpus_snapshot(path, raw)
+            if actual_hash != declared_hash:
                 raise CorpusError(f"corpus hash mismatch: {raw}")
-            if not isinstance(entry.get("family"), str):
+            if not isinstance(entry.get("family"), str) or not entry["family"].strip():
                 raise CorpusError(f"corpus file has no family: {raw}")
             if not isinstance(entry.get("seed"), bool):
                 raise CorpusError(f"corpus file must explicitly declare seed: {raw}")
-            files.append({**entry, "caseId": case.get("id"), "toolId": case.get("toolId"), "xmlImpact": case.get("xmlImpact"), "_path": path})
+            if "newStandalone" in entry and not isinstance(entry["newStandalone"], bool):
+                raise CorpusError(f"newStandalone must be boolean: {raw}")
+            if "ownerPath" in entry and not _is_canonical_relative_path(entry["ownerPath"], suffix=".xml"):
+                raise CorpusError(f"ownerPath must be a canonical corpus XML path: {raw}")
+            files.append({
+                **entry,
+                "caseId": case_id,
+                "toolId": tool_id,
+                "xmlImpact": xml_impact,
+                "_snapshot": snapshot,
+            })
     if not files:
         raise CorpusError("empty or unprocessed corpus")
     for path in root.rglob("*"):
         if path.is_symlink():
             raise CorpusError(f"corpus symlink is forbidden: {path.relative_to(root)}")
-    actual_xml = {path.relative_to(root).as_posix() for path in root.rglob("*.xml") if path.is_file()}
-    unlisted = sorted(actual_xml - seen)
+    actual_xml = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".xml"
+    }
+    unlisted = sorted(actual_xml - seen_paths)
     if unlisted:
         raise CorpusError(f"unlisted XML in corpus: {unlisted[0]}")
     return manifest, root, files
@@ -340,6 +770,8 @@ def _qname(root) -> str:
 
 def _unresolved_qname_prefix(root) -> str | None:
     for node in root.iter():
+        if not isinstance(node.tag, str):
+            continue
         for name, value in node.attrib.items():
             if name == f"{{{XSI_NS}}}type" and ":" in value:
                 prefix = value.split(":", 1)[0]
@@ -355,7 +787,7 @@ def _unresolved_qname_prefix(root) -> str | None:
 
 
 def verify_corpus(manifest_path: Path | str, profile: dict, runtime: dict, edt: dict | None) -> tuple[dict, int]:
-    _, root, entries = _load_corpus(Path(manifest_path), profile["profile"])
+    _, _root, entries = _load_corpus(Path(manifest_path), profile["profile"])
     listed = {entry["path"]: entry for entry in entries}
     families_by_id = {}
     for expected_qname, configured in profile.get("families", {}).items():
@@ -369,7 +801,7 @@ def verify_corpus(manifest_path: Path | str, profile: dict, runtime: dict, edt: 
     for entry in sorted(entries, key=lambda item: item["path"]):
         checks = []
         try:
-            xml_root = etree.fromstring(entry["_path"].read_bytes(), parser=etree.XMLParser(no_network=True, resolve_entities=False))
+            xml_root = etree.fromstring(entry["_snapshot"], parser=etree.XMLParser(no_network=True, resolve_entities=False))
             checks.append({"name": "wellFormed", "status": "pass"})
         except etree.XMLSyntaxError as error:
             rows.append(_file_row(entry, None, "unknown", [{"name": "wellFormed", "status": "fail", "detail": str(error)}], "fail", "repair XML syntax"))
@@ -402,15 +834,37 @@ def verify_corpus(manifest_path: Path | str, profile: dict, runtime: dict, edt: 
                 if owner is None:
                     raise CorpusError(f"ownerPath is not a listed corpus file: {owner_path}")
                 owner_selected = families_by_id.get(owner.get("family"))
-                if owner_selected is None or owner_selected[1].get("version") != "root":
-                    raise CorpusError(f"ownerPath is not a listed version-bearing descriptor: {owner_path}")
+                if owner_selected is None or owner_selected[1].get("sourceSetOwner") is not True:
+                    raise CorpusError(f"ownerPath is not a profile-marked source-set owner descriptor: {owner_path}")
+                if owner.get("caseId") != entry.get("caseId"):
+                    raise CorpusError(f"ownerPath must reference a source-set owner in the same case: {owner_path}")
                 try:
-                    owner_root = etree.fromstring(owner["_path"].read_bytes(), parser=etree.XMLParser(no_network=True, resolve_entities=False))
+                    owner_root = etree.fromstring(owner["_snapshot"], parser=etree.XMLParser(no_network=True, resolve_entities=False))
                     actual = owner_root.get("version")
                 except etree.XMLSyntaxError as error:
                     actual = None
                     checks.append({"name": "ownerVersion", "status": "fail", "detail": str(error)})
                 else:
+                    owner_qname = _qname(owner_root)
+                    expected_owner_qname = owner_selected[0]
+                    owner_namespace = etree.QName(owner_root).namespace
+                    owner_type = next(
+                        (
+                            etree.QName(child).localname
+                            for child in owner_root
+                            if isinstance(child.tag, str) and etree.QName(child).namespace == owner_namespace
+                        ),
+                        None,
+                    )
+                    allowed_owner_types = owner_selected[1].get("sourceSetOwnerTypes", [])
+                    if owner_qname != expected_owner_qname:
+                        raise CorpusError(
+                            f"ownerPath descriptor is not the configured source-set owner: {owner_path}: {owner_qname}"
+                        )
+                    if owner_type not in allowed_owner_types:
+                        raise CorpusError(
+                            f"ownerPath descriptor type is not a source-set owner: {owner_path}: {owner_type}"
+                        )
                     status = "pass" if actual == profile["exportVersion"] else "fail"
                     checks.append({"name": "ownerVersion", "status": status, "actual": actual, "expected": profile["exportVersion"], "ownerPath": owner_path})
                     violation |= status == "fail"
@@ -490,35 +944,65 @@ def _unfold_manifest(text: str) -> dict[str, str]:
 def verified_edt(path: Path | str, profile: dict, runner=subprocess.run) -> dict:
     path = Path(path)
     expected = profile.get("edt", {})
-    if not path.is_file() or file_sha256(path) != expected.get("sha256"):
-        raise SourceError("EDT jar SHA-256 mismatch or file missing")
-    completed = runner(["jarsigner", "-verify", "-certs", str(path)], capture_output=True, text=True)
-    if completed.returncode != 0 or "jar verified" not in (completed.stdout + completed.stderr).lower():
-        raise SourceError("jarsigner verification failed for EDT jar")
-    with zipfile.ZipFile(path) as archive:
-        infos = _safe_zip_members(archive)
-        names = {info.filename for info in infos}
+    if not isinstance(expected, dict):
+        raise SourceError("profile has no EDT contract")
+    _validate_edt_contract(expected)
+    with tempfile.TemporaryDirectory(prefix="unica-8-3-27-edt-") as temporary:
+        private_jar = Path(temporary) / "edt-evidence.jar"
+        actual_hash = _private_copy_with_sha256(path, private_jar, "EDT jar")
+        if actual_hash != expected.get("sha256"):
+            raise SourceError("EDT jar SHA-256 mismatch or file missing")
         try:
-            headers = _unfold_manifest(archive.read("META-INF/MANIFEST.MF").decode("utf-8"))
-        except (KeyError, UnicodeDecodeError) as error:
-            raise SourceError(f"invalid EDT OSGi manifest: {error}") from error
-        if headers.get("Bundle-SymbolicName", "").split(";", 1)[0] != expected.get("symbolicName"):
-            raise SourceError("EDT Bundle-SymbolicName mismatch")
-        if headers.get("Bundle-Version") != expected.get("version"):
-            raise SourceError("EDT Bundle-Version mismatch")
-        entry_text = {}
-        for label, name in expected.get("entries", {}).items():
-            if name not in names:
-                raise SourceError(f"required EDT XDTO entry is missing: {name}")
-            entry_text[label] = archive.read(name).decode("utf-8")
-        declarations = {}
-        for label, rule in expected.get("declarations", {}).items():
-            text = entry_text.get(rule["entry"], "")
-            declarations[label] = all(token in text for token in rule.get("tokens", []))
-            if not declarations[label]:
-                raise SourceError(f"EDT declaration evidence is missing: {label}")
+            completed = runner(
+                ["jarsigner", "-verify", "-certs", str(private_jar)],
+                capture_output=True,
+                text=True,
+            )
+        except OSError as error:
+            raise SourceError(f"jarsigner is unavailable for EDT verification: {error}") from error
+        if completed.returncode != 0 or "jar verified" not in (completed.stdout + completed.stderr).lower():
+            raise SourceError("jarsigner verification failed for EDT jar")
+        try:
+            archive_context = zipfile.ZipFile(private_jar)
+        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
+            raise SourceError(f"invalid EDT ZIP/JAR archive: {error}") from error
+        with archive_context as archive:
+            infos = _safe_zip_members(archive)
+            names = {info.filename for info in infos}
+            try:
+                headers = _unfold_manifest(
+                    _read_zip_member(archive, "META-INF/MANIFEST.MF", "EDT OSGi manifest").decode("utf-8")
+                )
+            except UnicodeDecodeError as error:
+                raise SourceError(f"invalid EDT OSGi manifest: {error}") from error
+            if headers.get("Bundle-SymbolicName", "").split(";", 1)[0] != expected.get("symbolicName"):
+                raise SourceError("EDT Bundle-SymbolicName mismatch")
+            if headers.get("Bundle-Version") != expected.get("version"):
+                raise SourceError("EDT Bundle-Version mismatch")
+            entry_text = {}
+            entries = expected.get("entries")
+            if not isinstance(entries, dict):
+                raise SourceError("EDT entries contract is invalid")
+            for label, name in entries.items():
+                if not isinstance(name, str) or name not in names:
+                    raise SourceError(f"required EDT XDTO entry is missing: {name}")
+                try:
+                    entry_text[label] = _read_zip_member(archive, name, "EDT XDTO").decode("utf-8")
+                except UnicodeDecodeError as error:
+                    raise SourceError(f"invalid EDT XDTO entry encoding: {name}") from error
+            declarations = {}
+            declaration_rules = expected.get("declarations")
+            if not isinstance(declaration_rules, dict):
+                raise SourceError("EDT declarations contract is invalid")
+            for label, rule in declaration_rules.items():
+                if not isinstance(rule, dict) or not isinstance(rule.get("entry"), str) or not isinstance(rule.get("tokens"), list):
+                    raise SourceError(f"invalid EDT declaration rule: {label}")
+                text = entry_text.get(rule["entry"], "")
+                declarations[label] = all(isinstance(token, str) and token in text for token in rule["tokens"])
+                if not declarations[label]:
+                    raise SourceError(f"EDT declaration evidence is missing: {label}")
     return {
-        "provided": True, "sha256": expected["sha256"],
+        "provided": True, "sha256": actual_hash,
         "bundleSymbolicName": expected["symbolicName"], "bundleVersion": expected["version"],
         "evidenceScope": "8.3.27-line declaration evidence; not proof of patch build 8.3.27.2074",
         "identityStatement": "Configured SHA-256 proves identity with approved local evidence, not download provenance.",
@@ -526,34 +1010,159 @@ def verified_edt(path: Path | str, profile: dict, runner=subprocess.run) -> dict
     }
 
 
-def report_matches_schema(value, schema) -> bool:
-    if "const" in schema and value != schema["const"]:
+def _json_values_equal(left, right) -> bool:
+    left_is_number = isinstance(left, (int, float)) and not isinstance(left, bool)
+    right_is_number = isinstance(right, (int, float)) and not isinstance(right, bool)
+    if left_is_number or right_is_number:
+        return left_is_number and right_is_number and left == right
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left == right
+    if isinstance(left, list) or isinstance(right, list):
+        return (
+            isinstance(left, list)
+            and isinstance(right, list)
+            and len(left) == len(right)
+            and all(_json_values_equal(left_item, right_item) for left_item, right_item in zip(left, right))
+        )
+    if isinstance(left, dict) or isinstance(right, dict):
+        return (
+            isinstance(left, dict)
+            and isinstance(right, dict)
+            and set(left) == set(right)
+            and all(_json_values_equal(left[key], right[key]) for key in left)
+        )
+    return type(left) is type(right) and left == right
+
+
+def _matches_schema(value, schema) -> bool:
+    if "const" in schema and not _json_values_equal(value, schema["const"]):
         return False
-    if "oneOf" in schema and sum(report_matches_schema(value, choice) for choice in schema["oneOf"]) != 1:
+    if "oneOf" in schema and sum(_matches_schema(value, choice) for choice in schema["oneOf"]) != 1:
         return False
-    if "enum" in schema and value not in schema["enum"]:
+    if "enum" in schema and not any(_json_values_equal(value, choice) for choice in schema["enum"]):
         return False
     expected_type = schema.get("type")
+    if isinstance(expected_type, list):
+        if not any(_matches_schema(value, {"type": choice}) for choice in expected_type):
+            return False
+        expected_type = None
     if expected_type == "object":
         if not isinstance(value, dict):
             return False
         if any(key not in value for key in schema.get("required", [])):
             return False
         properties = schema.get("properties", {})
-        return all(key not in value or report_matches_schema(value[key], child) for key, child in properties.items())
+        if not all(key not in value or _matches_schema(value[key], child) for key, child in properties.items()):
+            return False
+        additional = schema.get("additionalProperties", True)
+        unknown = set(value) - set(properties)
+        if additional is False and unknown:
+            return False
+        if isinstance(additional, dict) and any(not _matches_schema(value[key], additional) for key in unknown):
+            return False
+        return True
     if expected_type == "array":
-        return isinstance(value, list) and all(report_matches_schema(item, schema.get("items", {})) for item in value)
+        if not isinstance(value, list):
+            return False
+        if len(value) < schema.get("minItems", 0):
+            return False
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            return False
+        return all(_matches_schema(item, schema.get("items", {})) for item in value)
     if expected_type == "string":
-        return isinstance(value, str)
+        if not isinstance(value, str) or len(value) < schema.get("minLength", 0):
+            return False
+        return "pattern" not in schema or re.search(schema["pattern"], value) is not None
     if expected_type == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
+        if not _is_json_integer(value):
+            return False
+        return "minimum" not in schema or value >= schema["minimum"]
     if expected_type == "boolean":
         return isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
     return True
 
 
-def _error_report(profile_id: str, error: Exception) -> dict:
-    return {"schemaVersion": 1, "profile": profile_id, "verdict": "source-error", "exitCode": 2, "sourceError": str(error), "sources": {}, "schemaCompilation": [], "files": [], "summary": {"files": 0, "passed": 0, "failed": 0, "inconclusive": 0}}
+def _report_semantics(report: dict) -> bool:
+    if not isinstance(report, dict):
+        return False
+    summary = report.get("summary")
+    files = report.get("files")
+    if not isinstance(summary, dict) or not isinstance(files, list):
+        return False
+    expected_summary = {
+        "files": len(files),
+        "passed": sum(isinstance(row, dict) and row.get("result") == "pass" for row in files),
+        "failed": sum(isinstance(row, dict) and row.get("result") == "fail" for row in files),
+        "inconclusive": sum(isinstance(row, dict) and row.get("result") == "inconclusive" for row in files),
+    }
+    if summary != expected_summary:
+        return False
+    verdict = report.get("verdict")
+    if verdict == "source-error":
+        return (
+            isinstance(report.get("sourceError"), str)
+            and bool(report["sourceError"].strip())
+            and not files
+            and report.get("schemaCompilation") == []
+            and report.get("sources") == {}
+        )
+    if "sourceError" in report:
+        return False
+    if not files or not isinstance(report.get("schemaCompilation"), list) or not report["schemaCompilation"]:
+        return False
+    for row in files:
+        if not isinstance(row, dict) or not isinstance(row.get("checks"), list) or not row["checks"]:
+            return False
+        statuses = [check.get("status") for check in row["checks"] if isinstance(check, dict)]
+        if len(statuses) != len(row["checks"]):
+            return False
+        result = row.get("result")
+        if "fail" in statuses:
+            if result != "fail":
+                return False
+            continue
+        if result == "fail":
+            return False
+        if row.get("coverage") == "strict":
+            if not all(status == "pass" for status in statuses) or result != "pass":
+                return False
+        elif result != "inconclusive":
+            return False
+    sources = report.get("sources")
+    if not isinstance(sources, dict) or not isinstance(sources.get("runtime"), dict) or not isinstance(sources.get("edt"), dict):
+        return False
+    manifest_summary = sources["runtime"].get("manifestSummary")
+    if not isinstance(manifest_summary, dict) or len(report["schemaCompilation"]) != manifest_summary.get("schemas"):
+        return False
+    if verdict == "pass":
+        return expected_summary["passed"] == expected_summary["files"]
+    if verdict == "fail":
+        return expected_summary["failed"] > 0
+    if verdict == "inconclusive":
+        return expected_summary["failed"] == 0 and expected_summary["inconclusive"] > 0
+    return False
+
+
+def report_matches_schema(value, schema) -> bool:
+    return _matches_schema(value, schema) and _report_semantics(value)
+
+
+def _error_report(profile_id: object, error: Exception) -> dict:
+    detail = str(error).strip() or error.__class__.__name__
+    safe_profile_id = profile_id if _is_nonempty_string(profile_id) else "unknown"
+    return {"schemaVersion": 1, "profile": safe_profile_id, "verdict": "source-error", "exitCode": 2, "sourceError": detail, "sources": {}, "schemaCompilation": [], "files": [], "summary": {"files": 0, "passed": 0, "failed": 0, "inconclusive": 0}}
+
+
+def _read_json_object(path: Path, label: str) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SourceError(f"invalid {label}: {error}") from error
+    if not isinstance(value, dict):
+        raise SourceError(f"invalid {label}: root must be an object")
+    return value
 
 
 def main(argv=None) -> int:
@@ -564,9 +1173,13 @@ def main(argv=None) -> int:
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--profile", type=Path, default=Path(__file__).with_name("verify-8-3-27-xml-profile.json"), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    profile = json.loads(args.profile.read_text(encoding="utf-8"))
+    profile = {}
+    report_schema = None
     runtime = None
     try:
+        report_schema = _read_json_object(Path(__file__).with_name(REPORT_SCHEMA_NAME), "report schema")
+        profile = _read_json_object(args.profile, "verification profile")
+        _validate_profile(profile)
         runtime = verified_runtime(args.runtime_xsd_zip, profile)
         edt = verified_edt(args.edt_xdto_jar, profile)
         report, status = verify_corpus(args.corpus, profile, runtime, edt)
@@ -575,8 +1188,17 @@ def main(argv=None) -> int:
     finally:
         if runtime is not None:
             runtime.close()
-    args.report.parent.mkdir(parents=True, exist_ok=True)
-    args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if report_schema is not None and not report_matches_schema(report, report_schema):
+        report, status = _error_report(
+            profile.get("profile", "unknown"),
+            SourceError("generated report failed internal report-schema validation"),
+        ), 2
+    try:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as error:
+        print(f"cannot write verification report: {error}", file=sys.stderr)
+        return 2
     return status
 
 

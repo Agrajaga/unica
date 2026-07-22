@@ -1,13 +1,17 @@
 import hashlib
 import importlib.util
 import json
+import os
+import shutil
 import stat
+import struct
 import subprocess
 import tempfile
 import unittest
 import warnings
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,6 +32,9 @@ DCS_NS = "urn:test:dcs"
 ROLE_NS = "urn:test:roles"
 MXL_NS = "urn:test:mxl"
 MD_NS = "urn:test:md"
+REAL_MD_NS = "http://v8.1c.ru/8.3/MDClasses"
+REAL_CAI_NS = "http://v8.1c.ru/8.2/managed-application/core"
+REAL_FLOWCHART_QNAME = f"{{{REAL_MD_NS}}}Flowchart"
 
 
 def sha(data):
@@ -96,7 +103,8 @@ def test_profile(runtime_zip):
             },
             f"{{{MD_NS}}}MetaDataObject": {
                 "id": "metadata", "coverage": "not-covered", "version": "root",
-                "edtDeclaration": "metadata"
+                "edtDeclaration": "metadata", "sourceSetOwner": True,
+                "sourceSetOwnerTypes": ["Configuration", "ConfigurationExtension", "ExternalDataProcessor", "ExternalReport"]
             }
         }
     }
@@ -156,6 +164,37 @@ def edt_jar(root):
     return target
 
 
+def corrupt_zip_member(path, member, mode):
+    with zipfile.ZipFile(path) as archive:
+        info = archive.getinfo(member)
+    payload = bytearray(path.read_bytes())
+    if mode == "crc":
+        name_size, extra_size = struct.unpack_from("<HH", payload, info.header_offset + 26)
+        data_offset = info.header_offset + 30 + name_size + extra_size
+        if info.compress_size == 0:
+            raise AssertionError("test member must not be empty")
+        payload[data_offset] ^= 1
+    elif mode == "encrypted":
+        local_flags = struct.unpack_from("<H", payload, info.header_offset + 6)[0]
+        struct.pack_into("<H", payload, info.header_offset + 6, local_flags | 1)
+        offset = 0
+        while True:
+            offset = payload.find(b"PK\x01\x02", offset)
+            if offset < 0:
+                raise AssertionError(f"central directory member is missing: {member}")
+            name_size, extra_size, comment_size = struct.unpack_from("<HHH", payload, offset + 28)
+            name = bytes(payload[offset + 46:offset + 46 + name_size]).decode()
+            if name == member:
+                central_flags = struct.unpack_from("<H", payload, offset + 8)[0]
+                struct.pack_into("<H", payload, offset + 8, central_flags | 1)
+                break
+            offset += 46 + name_size + extra_size + comment_size
+    else:
+        raise AssertionError(f"unknown corruption mode: {mode}")
+    path.write_bytes(payload)
+    return path
+
+
 class VerifierContractTests(unittest.TestCase):
     def test_checked_in_verifier_contract_files_exist(self):
         self.assertTrue(SCRIPT.is_file())
@@ -175,6 +214,12 @@ class VerifierContractTests(unittest.TestCase):
             profile = test_profile(traversal)
             with self.assertRaisesRegex(verifier.SourceError, "unsafe ZIP"):
                 verifier.verified_runtime(traversal, profile)
+
+            for unsafe_name in ("C:/escape.xsd", "..\\escape.xsd"):
+                windows_escape = runtime_archive(root, basic_schemas(), extra=[(unsafe_name, b"x", 0)])
+                with self.subTest(unsafe_name=unsafe_name):
+                    with self.assertRaisesRegex(verifier.SourceError, "unsafe ZIP"):
+                        verifier.verified_runtime(windows_escape, test_profile(windows_escape))
 
     def test_runtime_rejects_symlink_and_manifest_hash_or_namespace_mismatch(self):
         verifier = load_verifier()
@@ -238,6 +283,194 @@ class VerifierContractTests(unittest.TestCase):
             with self.assertRaisesRegex(verifier.SourceError, "unresolved namespace import"):
                 verifier.verified_runtime(archive, profile)
 
+    def test_runtime_rejects_external_import_include_and_redefine_locations(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            imported = root / "imported.xsd"
+            imported.write_bytes(schema("urn:test:outside", '<xs:simpleType name="Name"><xs:restriction base="xs:string"/></xs:simpleType>'))
+            included = root / "included.xsd"
+            included.write_bytes(schema(DCS_NS, '<xs:simpleType name="Name"><xs:restriction base="xs:string"/></xs:simpleType>'))
+            references = (
+                f'<xs:import namespace="urn:test:outside" schemaLocation="{imported.as_uri()}"/>',
+                f'<xs:include schemaLocation="{included.as_uri()}"/>',
+                f'<xs:redefine schemaLocation="{included.as_uri()}"><xs:simpleType name="Name"><xs:restriction base="tns:Name"><xs:maxLength value="10"/></xs:restriction></xs:simpleType></xs:redefine>',
+            )
+            for reference in references:
+                consumer = schema(
+                    DCS_NS,
+                    '<xs:complexType name="DataCompositionSchema"><xs:sequence><xs:element name="name" type="xs:string"/></xs:sequence></xs:complexType>',
+                    reference,
+                )
+                archive = runtime_archive(root, [(DCS_NS, consumer), basic_schemas()[1]])
+                with self.subTest(reference=reference.split()[0]):
+                    with self.assertRaisesRegex(verifier.SourceError, "manifest|external|schemaLocation|reference"):
+                        verifier.verified_runtime(archive, test_profile(archive))
+
+            known_namespace_external = schema(
+                DCS_NS,
+                '<xs:complexType name="DataCompositionSchema"><xs:sequence><xs:element name="name" type="xs:string"/></xs:sequence></xs:complexType>',
+                f'<xs:import namespace="{ROLE_NS}" schemaLocation="{imported.as_uri()}"/>',
+            )
+            archive = runtime_archive(root, [(DCS_NS, known_namespace_external), basic_schemas()[1]])
+            with self.assertRaisesRegex(verifier.SourceError, "manifest|external|schemaLocation|reference"):
+                verifier.verified_runtime(archive, test_profile(archive))
+
+    def test_controlled_known_external_import_is_a_non_pass_matrix_row(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            external_holder = schema(
+                "urn:test:known-external",
+                '<xs:complexType name="Holder"/>',
+                '<xs:import namespace="http://www.w3.org/XML/1998/namespace" schemaLocation="http://www.w3.org/2001/xml.xsd"/>',
+            )
+            archive = runtime_archive(root, [*basic_schemas(), ("urn:test:known-external", external_holder)])
+            profile = test_profile(archive)
+            profile["runtime"]["summary"] = {"packages": 3, "namespaces": 3, "success": 3, "schemas": 3, "errors": 0}
+            profile["runtime"]["knownCompileFailures"] = {"0003.xsd": "controlled external dependency"}
+            profile["runtime"]["knownExternalImports"] = [{
+                "file": "schemas/0003.xsd",
+                "namespace": "http://www.w3.org/XML/1998/namespace",
+                "schemaLocation": "http://www.w3.org/2001/xml.xsd",
+            }]
+            runtime = verifier.verified_runtime(archive, profile)
+            failed = [row for row in runtime["compilationMatrix"] if row["status"] != "compiled"]
+            self.assertEqual([(row["file"], row["status"]) for row in failed], [("schemas/0003.xsd", "known-source-incompatibility")])
+            runtime.close()
+
+    def test_strict_dependency_compile_failure_is_a_source_error(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            broken_dependency = schema("urn:test:base", '<xs:simpleType name="Name"><xs:restriction/></xs:simpleType>')
+            consumer = schema(
+                DCS_NS,
+                '<xs:complexType name="DataCompositionSchema"><xs:sequence><xs:element name="name" type="b:Name" xmlns:b="urn:test:base"/></xs:sequence></xs:complexType>',
+                '<xs:import namespace="urn:test:base"/>',
+            )
+            archive = runtime_archive(root, [(DCS_NS, consumer), ("urn:test:base", broken_dependency)])
+            profile = test_profile(archive)
+            profile["families"].pop(f"{{{ROLE_NS}}}Rights")
+            with self.assertRaisesRegex(verifier.SourceError, "compile failure|strict schema"):
+                verifier.verified_runtime(archive, profile)
+
+    def test_runtime_export_rows_must_match_declared_namespace_and_summary_counts(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = runtime_archive(root, basic_schemas())
+            swapped = rewrite_manifest(
+                archive,
+                root / "swapped.zip",
+                lambda value: (
+                    value["exports"][0].update(files=[value["schemas"][1]["file"]]),
+                    value["exports"][1].update(files=[value["schemas"][0]["file"]]),
+                ),
+            )
+            with self.assertRaisesRegex(verifier.SourceError, "export|namespace"):
+                verifier.verified_runtime(swapped, test_profile(swapped))
+
+            for field, value in (("packages", 3), ("namespaces", 3), ("schemas", 3), ("success", 1), ("errors", 1)):
+                changed = rewrite_manifest(
+                    archive,
+                    root / f"bad-{field}.zip",
+                    lambda manifest, field=field, value=value: manifest["summary"].update({field: value}),
+                )
+                profile = test_profile(changed)
+                with zipfile.ZipFile(changed) as source:
+                    manifest = json.loads(source.read("export/manifest.json"))
+                profile["runtime"]["summary"] = manifest["summary"]
+                with self.subTest(field=field):
+                    with self.assertRaisesRegex(verifier.SourceError, "count|summary|success|error|export"):
+                        verifier.verified_runtime(changed, profile)
+
+    def test_runtime_manifest_rejects_boolean_format_version(self):
+        verifier = load_verifier()
+        schema_value = json.loads(REPORT_SCHEMA.read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = runtime_archive(root, basic_schemas())
+            boolean_version = rewrite_manifest(
+                archive,
+                root / "boolean-format-version.zip",
+                lambda value: value.update(formatVersion=True),
+            )
+            profile = test_profile(boolean_version)
+            with self.subTest(api="verified_runtime"):
+                try:
+                    runtime = verifier.verified_runtime(boolean_version, profile)
+                except verifier.SourceError as error:
+                    self.assertIn("formatVersion", str(error))
+                else:
+                    runtime.close()
+                    self.fail("boolean runtime formatVersion must not equal integer 1")
+
+            profile["edt"] = {
+                "sha256": "0" * 64, "symbolicName": "test", "version": "1",
+                "entries": {"backend": "backend.xdto"},
+                "declarations": {
+                    "metadata": {"entry": "backend", "tokens": ["urn:test:md", "MetaDataObject"]},
+                },
+            }
+            profile_path = root / "profile.json"
+            profile_path.write_text(json.dumps(profile))
+            report_path = root / "report.json"
+            with self.subTest(api="cli"):
+                status = verifier.main([
+                    "--runtime-xsd-zip", str(boolean_version),
+                    "--edt-xdto-jar", str(root / "unused.jar"),
+                    "--corpus", str(root / "unused-corpus.json"),
+                    "--report", str(report_path),
+                    "--profile", str(profile_path),
+                ])
+                report = json.loads(report_path.read_text())
+                self.assertEqual(status, 2)
+                self.assertIn("formatVersion", report["sourceError"])
+                self.assertTrue(verifier.report_matches_schema(report, schema_value))
+
+    def test_runtime_and_edt_process_the_same_private_bytes_that_were_hashed(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original_dir = root / "original"
+            replacement_dir = root / "replacement"
+            original_dir.mkdir()
+            replacement_dir.mkdir()
+            archive = runtime_archive(original_dir, basic_schemas())
+            broken = schema(DCS_NS, '<xs:complexType name="DataCompositionSchema"><xs:restriction/></xs:complexType>')
+            replacement = runtime_archive(replacement_dir, [(DCS_NS, broken), basic_schemas()[1]])
+            profile = test_profile(archive)
+            real_private_copy = verifier._private_copy_with_sha256
+
+            def copy_then_replace(source, destination, label):
+                digest = real_private_copy(source, destination, label)
+                shutil.copyfile(replacement, source)
+                return digest
+
+            with mock.patch.object(verifier, "_private_copy_with_sha256", side_effect=copy_then_replace):
+                runtime = verifier.verified_runtime(archive, profile)
+            runtime.close()
+
+            jar = edt_jar(original_dir)
+            profile["edt"] = {
+                "sha256": sha(jar.read_bytes()), "symbolicName": "test", "version": "1",
+                "entries": {"backend": "backend.xdto"},
+                "declarations": {"metadata": {"entry": "backend", "tokens": ["urn:test:md", "MetaDataObject"]}},
+            }
+            invalid_jar = replacement_dir / "invalid.jar"
+            invalid_jar.write_bytes(b"not a jar")
+
+            def copy_jar_then_replace(source, destination, label):
+                digest = real_private_copy(source, destination, label)
+                shutil.copyfile(invalid_jar, source)
+                return digest
+
+            verified_runner = lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout="jar verified.\n", stderr="")
+            with mock.patch.object(verifier, "_private_copy_with_sha256", side_effect=copy_jar_then_replace):
+                edt = verifier.verified_edt(jar, profile, runner=verified_runner)
+            self.assertTrue(edt["provided"])
+
     def test_dcs_and_rights_wrappers_preserve_schema_content(self):
         verifier = load_verifier()
         with tempfile.TemporaryDirectory() as tmp:
@@ -263,14 +496,19 @@ class VerifierContractTests(unittest.TestCase):
             self.assertTrue(verifier.report_matches_schema(report, json.loads(REPORT_SCHEMA.read_text())))
 
             corpus = write_corpus(root / "bad", [("rights.xml", "<Rights xmlns='urn:test:roles' version='2.19'/>", {})])
-            _, status = verifier.verify_corpus(corpus, profile, runtime, None)
+            failed_report, status = verifier.verify_corpus(corpus, profile, runtime, None)
             self.assertEqual(status, 1)
+            self.assertTrue(verifier.report_matches_schema(failed_report, json.loads(REPORT_SCHEMA.read_text())))
 
             corpus = write_corpus(root / "inconclusive", [("mxl.xml", "<document xmlns='urn:test:mxl'/>", {"newStandalone": True})])
             report, status = verifier.verify_corpus(corpus, profile, runtime, None)
             self.assertEqual(status, 3)
             self.assertEqual((report["verdict"], report["exitCode"]), ("inconclusive", 3))
             self.assertEqual(report["files"][0]["result"], "inconclusive")
+            self.assertTrue(verifier.report_matches_schema(report, json.loads(REPORT_SCHEMA.read_text())))
+
+            source_report = verifier._error_report(profile["profile"], verifier.SourceError("missing evidence"))
+            self.assertTrue(verifier.report_matches_schema(source_report, json.loads(REPORT_SCHEMA.read_text())))
 
             profile["runtime"]["sha256"] = "f" * 64
             with self.assertRaises(verifier.SourceError):
@@ -284,7 +522,7 @@ class VerifierContractTests(unittest.TestCase):
             profile = test_profile(archive)
             runtime = verifier.verified_runtime(archive, profile)
             corpus = write_corpus(root / "owned", [
-                ("owner.xml", "<MetaDataObject xmlns='urn:test:md' version='2.19'/>", {}),
+                ("owner.xml", "<MetaDataObject xmlns='urn:test:md' version='2.19'><Configuration/></MetaDataObject>", {}),
                 ("dcs.xml", "<DataCompositionSchema xmlns='urn:test:dcs'><name>x</name></DataCompositionSchema>", {"ownerPath": "case/owner.xml"}),
             ])
             _, status = verifier.verify_corpus(corpus, profile, runtime, None)
@@ -308,6 +546,512 @@ class VerifierContractTests(unittest.TestCase):
             with self.assertRaisesRegex(verifier.CorpusError, "unlisted XML"):
                 verifier.verify_corpus(corpus, profile, runtime, None)
 
+    def test_owner_path_requires_a_same_case_source_set_owner_descriptor(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = runtime_archive(root, basic_schemas())
+            profile = test_profile(archive)
+            runtime = verifier.verified_runtime(archive, profile)
+
+            fake_owner = write_corpus(root / "fake-owner", [
+                ("rights.xml", "<Rights xmlns='urn:test:roles' version='2.20'><setForNewObjects>true</setForNewObjects></Rights>", {}),
+                ("dcs.xml", "<DataCompositionSchema xmlns='urn:test:dcs'><name>x</name></DataCompositionSchema>", {"ownerPath": "case/rights.xml"}),
+            ])
+            with self.assertRaisesRegex(verifier.CorpusError, "source-set owner|descriptor"):
+                verifier.verify_corpus(fake_owner, profile, runtime, None)
+
+            mislabeled_owner = write_corpus(root / "mislabeled-owner", [
+                ("owner.xml", "<Rights xmlns='urn:test:roles' version='2.20'><setForNewObjects>true</setForNewObjects></Rights>", {"family": "metadata"}),
+                ("dcs.xml", "<DataCompositionSchema xmlns='urn:test:dcs'><name>x</name></DataCompositionSchema>", {"ownerPath": "case/owner.xml"}),
+            ])
+            with self.assertRaisesRegex(verifier.CorpusError, "source-set owner|descriptor"):
+                verifier.verify_corpus(mislabeled_owner, profile, runtime, {"declarations": {"metadata": True}})
+
+            valid_owner = write_corpus(root / "valid-owner", [
+                ("owner.xml", "<MetaDataObject xmlns='urn:test:md' version='2.20'><Configuration/></MetaDataObject>", {}),
+                ("dcs.xml", "<DataCompositionSchema xmlns='urn:test:dcs'><name>x</name></DataCompositionSchema>", {"ownerPath": "case/owner.xml"}),
+            ])
+            report, status = verifier.verify_corpus(valid_owner, profile, runtime, {"declarations": {"metadata": True}})
+            self.assertEqual(status, 3)
+            self.assertEqual(next(row for row in report["files"] if row["path"].endswith("dcs.xml"))["result"], "pass")
+
+            object_owner = write_corpus(root / "object-owner", [
+                ("owner.xml", "<MetaDataObject xmlns='urn:test:md' version='2.20'><Catalog/></MetaDataObject>", {}),
+                ("dcs.xml", "<DataCompositionSchema xmlns='urn:test:dcs'><name>x</name></DataCompositionSchema>", {"ownerPath": "case/owner.xml"}),
+            ])
+            with self.assertRaisesRegex(verifier.CorpusError, "source-set owner|descriptor type"):
+                verifier.verify_corpus(object_owner, profile, runtime, {"declarations": {"metadata": True}})
+
+            cross_root = root / "cross-case"
+            (cross_root / "one").mkdir(parents=True)
+            (cross_root / "two").mkdir(parents=True)
+            dcs_path = cross_root / "one/dcs.xml"
+            owner_path = cross_root / "two/owner.xml"
+            dcs_path.write_text("<DataCompositionSchema xmlns='urn:test:dcs'><name>x</name></DataCompositionSchema>")
+            owner_path.write_text("<MetaDataObject xmlns='urn:test:md' version='2.20'><Configuration/></MetaDataObject>")
+            cross_manifest = {
+                "schemaVersion": 1,
+                "profile": "test-2.20",
+                "cases": [
+                    {"id": "one", "toolId": "unica.dcs.edit", "xmlImpact": "modified", "files": [{
+                        "path": "one/dcs.xml", "sha256": sha(dcs_path.read_bytes()), "seed": False,
+                        "family": "dcs", "ownerPath": "two/owner.xml",
+                    }]},
+                    {"id": "two", "toolId": "unica.seed", "xmlImpact": "unchanged", "files": [{
+                        "path": "two/owner.xml", "sha256": sha(owner_path.read_bytes()), "seed": True,
+                        "family": "metadata",
+                    }]},
+                ],
+            }
+            cross_path = cross_root / "corpus-manifest.json"
+            cross_path.write_text(json.dumps(cross_manifest))
+            with self.assertRaisesRegex(verifier.CorpusError, "same case|source-set owner"):
+                verifier.verify_corpus(cross_path, profile, runtime, {"declarations": {"metadata": True}})
+            runtime.close()
+
+    def test_client_application_interface_uses_configuration_owner_version(self):
+        verifier = load_verifier()
+        profile = json.loads(PROFILE.read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            case = root / "case"
+            case.mkdir()
+            owner = case / "Configuration.xml"
+            owner.write_text(
+                f"<MetaDataObject xmlns='{REAL_MD_NS}' version='2.20'><Configuration/></MetaDataObject>"
+            )
+            interface = case / "ClientApplicationInterface.xml"
+            interface.write_text(f"<ClientApplicationInterface xmlns='{REAL_CAI_NS}' uuid='00000000-0000-0000-0000-000000000000'/>")
+            manifest = {
+                "schemaVersion": 1,
+                "profile": profile["profile"],
+                "cases": [{
+                    "id": "configuration-interface",
+                    "toolId": "unica.interface.edit",
+                    "xmlImpact": "modified",
+                    "files": [
+                        {
+                            "path": "case/Configuration.xml",
+                            "sha256": sha(owner.read_bytes()),
+                            "seed": True,
+                            "family": "metadata",
+                        },
+                        {
+                            "path": "case/ClientApplicationInterface.xml",
+                            "sha256": sha(interface.read_bytes()),
+                            "seed": False,
+                            "family": "client-application-interface",
+                            "ownerPath": "case/Configuration.xml",
+                        },
+                    ],
+                }],
+            }
+            manifest_path = root / "corpus-manifest.json"
+            manifest_path.write_text(json.dumps(manifest))
+            runtime = {
+                "source": {
+                    "kind": "runtime-xsd",
+                    "sha256": "0" * 64,
+                    "formatVersion": 1,
+                    "platformVersion": "8.3.27.2074",
+                    "manifestSummary": {"packages": 1, "namespaces": 1, "success": 1, "schemas": 1, "errors": 0},
+                    "identityStatement": "synthetic",
+                },
+                "compilationMatrix": [{
+                    "file": "synthetic.xsd",
+                    "targetNamespace": "urn:synthetic",
+                    "status": "compiled",
+                    "detail": "",
+                }],
+                "wrappers": {},
+            }
+            edt = {
+                "provided": True,
+                "sha256": "0" * 64,
+                "bundleSymbolicName": "synthetic",
+                "bundleVersion": "synthetic",
+                "evidenceScope": "synthetic",
+                "identityStatement": "synthetic",
+                "declarations": {"metadata": True},
+            }
+            report, status = verifier.verify_corpus(manifest_path, profile, runtime, edt)
+            self.assertEqual(status, 3)
+            interface_row = next(row for row in report["files"] if row["path"].endswith("ClientApplicationInterface.xml"))
+            self.assertEqual(next(check for check in interface_row["checks"] if check["name"] == "ownerVersion")["status"], "pass")
+            self.assertNotIn("exportVersion", {check["name"] for check in interface_row["checks"]})
+
+    def test_flowchart_is_known_not_covered_and_requires_root_version_2_20(self):
+        verifier = load_verifier()
+        profile = json.loads(PROFILE.read_text())
+        self.assertIn(REAL_FLOWCHART_QNAME, profile["families"])
+        self.assertEqual(
+            profile["families"][REAL_FLOWCHART_QNAME],
+            {"id": "flowchart", "coverage": "not-covered", "version": "root"},
+        )
+        runtime = {
+            "source": {
+                "kind": "runtime-xsd",
+                "sha256": "0" * 64,
+                "formatVersion": 1,
+                "platformVersion": "8.3.27.2074",
+                "manifestSummary": {"packages": 1, "namespaces": 1, "success": 1, "schemas": 1, "errors": 0},
+                "identityStatement": "synthetic",
+            },
+            "compilationMatrix": [{
+                "file": "synthetic.xsd", "targetNamespace": "urn:synthetic",
+                "status": "compiled", "detail": "",
+            }],
+            "wrappers": {},
+        }
+
+        def verify(xml):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                case = root / "case"
+                case.mkdir()
+                path = case / "Flowchart.xml"
+                path.write_text(xml)
+                manifest = root / "corpus-manifest.json"
+                manifest.write_text(json.dumps({
+                    "schemaVersion": 1,
+                    "profile": profile["profile"],
+                    "cases": [{
+                        "id": "flowchart", "toolId": "unica.meta.compile", "xmlImpact": "created",
+                        "files": [{
+                            "path": "case/Flowchart.xml", "sha256": sha(path.read_bytes()),
+                            "seed": False, "family": "flowchart",
+                        }],
+                    }],
+                }))
+                return verifier.verify_corpus(manifest, profile, runtime, None)
+
+        report, status = verify(f"<Flowchart xmlns='{REAL_MD_NS}' version='2.20'/>")
+        self.assertEqual(status, 3)
+        self.assertEqual((report["files"][0]["coverage"], report["files"][0]["result"]), ("not-covered", "inconclusive"))
+        self.assertNotIn("edtDeclaration", {check["name"] for check in report["files"][0]["checks"]})
+
+        report, status = verify(f"<Flowchart xmlns='{REAL_MD_NS}' version='2.19'/>")
+        self.assertEqual(status, 1)
+        self.assertEqual(next(check for check in report["files"][0]["checks"] if check["name"] == "exportVersion")["status"], "fail")
+
+        report, status = verify(f"<NotFlowchart xmlns='{REAL_MD_NS}' version='2.20'/>")
+        self.assertEqual(status, 1)
+        self.assertEqual(next(check for check in report["files"][0]["checks"] if check["name"] == "rootQName")["status"], "fail")
+
+    def test_corpus_requires_complete_cases_and_canonical_unique_files(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = write_corpus(root / "base", [
+                ("rights.xml", "<Rights xmlns='urn:test:roles' version='2.20'><setForNewObjects>true</setForNewObjects></Rights>", {}),
+            ])
+            original = json.loads(corpus.read_text())
+
+            for field in ("id", "toolId", "xmlImpact"):
+                changed = json.loads(json.dumps(original))
+                changed["cases"][0].pop(field)
+                corpus.write_text(json.dumps(changed))
+                with self.subTest(missing=field):
+                    with self.assertRaisesRegex(verifier.CorpusError, field):
+                        verifier._load_corpus(corpus, "test-2.20")
+
+            changed = json.loads(json.dumps(original))
+            changed["cases"] = None
+            corpus.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(verifier.CorpusError, "cases"):
+                verifier._load_corpus(corpus, "test-2.20")
+
+            changed = json.loads(json.dumps(original))
+            alias = dict(changed["cases"][0]["files"][0])
+            alias["path"] = "case/./rights.xml"
+            changed["cases"][0]["files"].append(alias)
+            corpus.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(verifier.CorpusError, "canonical|duplicate"):
+                verifier._load_corpus(corpus, "test-2.20")
+
+            changed = json.loads(json.dumps(original))
+            changed["cases"][0]["files"][0]["ownerPath"] = ""
+            corpus.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(verifier.CorpusError, "ownerPath"):
+                verifier._load_corpus(corpus, "test-2.20")
+
+            hardlink_root = root / "hardlink"
+            hardlink_corpus = write_corpus(hardlink_root, [
+                ("rights.xml", "<Rights xmlns='urn:test:roles' version='2.20'><setForNewObjects>true</setForNewObjects></Rights>", {}),
+            ])
+            os.link(hardlink_root / "case/rights.xml", hardlink_root / "case/rights-copy.xml")
+            hardlink_data = json.loads(hardlink_corpus.read_text())
+            hardlink_entry = dict(hardlink_data["cases"][0]["files"][0])
+            hardlink_entry["path"] = "case/rights-copy.xml"
+            hardlink_data["cases"][0]["files"].append(hardlink_entry)
+            hardlink_corpus.write_text(json.dumps(hardlink_data))
+            with self.assertRaisesRegex(verifier.CorpusError, "same file|duplicate"):
+                verifier._load_corpus(hardlink_corpus, "test-2.20")
+
+            corpus.write_text(json.dumps(original))
+            real_open = Path.open
+
+            def deny_xml_open(path, *args, **kwargs):
+                if path.suffix.lower() == ".xml":
+                    raise PermissionError("denied")
+                return real_open(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "open", new=deny_xml_open):
+                with self.assertRaisesRegex(verifier.CorpusError, "hash|read"):
+                    verifier._load_corpus(corpus, "test-2.20")
+
+    def test_corpus_hash_and_validation_use_the_same_immutable_snapshot(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = runtime_archive(root, basic_schemas())
+            profile = test_profile(archive)
+            runtime = verifier.verified_runtime(archive, profile)
+            real_snapshot = verifier._read_corpus_snapshot
+
+            rights_corpus = write_corpus(root / "rights-swap", [
+                ("rights.xml", "<Rights xmlns='urn:test:roles' version='2.20'><setForNewObjects>true</setForNewObjects></Rights>", {}),
+            ])
+            original_sha = json.loads(rights_corpus.read_text())["cases"][0]["files"][0]["sha256"]
+
+            def snapshot_then_swap_rights(path, raw):
+                payload, digest = real_snapshot(path, raw)
+                path.write_text("<Rights xmlns='urn:test:roles' version='2.19'><setForNewObjects>invalid</setForNewObjects></Rights>")
+                return payload, digest
+
+            with mock.patch.object(verifier, "_read_corpus_snapshot", side_effect=snapshot_then_swap_rights):
+                report, status = verifier.verify_corpus(rights_corpus, profile, runtime, None)
+            self.assertEqual(status, 0)
+            self.assertEqual(report["files"][0]["sha256"], original_sha)
+            self.assertIn("version='2.19'", (rights_corpus.parent / "case/rights.xml").read_text())
+            self.assertEqual(next(check for check in report["files"][0]["checks"] if check["name"] == "runtimeXsd")["status"], "pass")
+
+            owner_corpus = write_corpus(root / "owner-swap", [
+                ("owner.xml", "<MetaDataObject xmlns='urn:test:md' version='2.20'><Configuration/></MetaDataObject>", {}),
+                ("dcs.xml", "<DataCompositionSchema xmlns='urn:test:dcs'><name>x</name></DataCompositionSchema>", {"ownerPath": "case/owner.xml"}),
+            ])
+
+            def snapshot_then_swap_owner(path, raw):
+                payload, digest = real_snapshot(path, raw)
+                if raw == "case/owner.xml":
+                    path.write_text("<MetaDataObject xmlns='urn:test:md' version='2.19'><Catalog/></MetaDataObject>")
+                return payload, digest
+
+            with mock.patch.object(verifier, "_read_corpus_snapshot", side_effect=snapshot_then_swap_owner):
+                report, status = verifier.verify_corpus(
+                    owner_corpus,
+                    profile,
+                    runtime,
+                    {"declarations": {"metadata": True}},
+                )
+            self.assertEqual(status, 3)
+            dcs_row = next(row for row in report["files"] if row["path"] == "case/dcs.xml")
+            owner_check = next(check for check in dcs_row["checks"] if check["name"] == "ownerVersion")
+            self.assertEqual((owner_check["status"], owner_check["actual"]), ("pass", "2.20"))
+            runtime.close()
+
+    def test_qname_scan_ignores_comments_processing_instructions_and_entities(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = runtime_archive(root, basic_schemas())
+            profile = test_profile(archive)
+            runtime = verifier.verified_runtime(archive, profile)
+            corpus = write_corpus(root / "non-elements", [(
+                "owner.xml",
+                """<!DOCTYPE MetaDataObject [<!ENTITY label "value">]>
+<MetaDataObject xmlns='urn:test:md' version='2.20'>
+  <Configuration><!-- comment --><?review instruction?><Name>&label;</Name></Configuration>
+</MetaDataObject>""",
+                {},
+            )])
+            try:
+                report, status = verifier.verify_corpus(
+                    corpus,
+                    profile,
+                    runtime,
+                    {"declarations": {"metadata": True}},
+                )
+            except Exception as error:
+                self.fail(f"valid non-element XML nodes must not crash QName scanning: {error!r}")
+            self.assertEqual(status, 3)
+            self.assertEqual(report["files"][0]["result"], "inconclusive")
+            self.assertEqual(
+                next(check for check in report["files"][0]["checks"] if check["name"] == "qnamePrefixes")["status"],
+                "pass",
+            )
+            runtime.close()
+
+    def test_malformed_corpus_cli_is_exit_2_with_a_valid_report(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus-manifest.json"
+            corpus.write_text(json.dumps({"schemaVersion": 1, "profile": "1c-8.3.27-export-2.20", "cases": None}))
+            report_path = root / "report.json"
+            runtime = verifier.RuntimeEvidence({"source": {}, "compilationMatrix": [], "wrappers": {}})
+            with mock.patch.object(verifier, "verified_runtime", return_value=runtime), mock.patch.object(
+                verifier, "verified_edt", return_value={"provided": True}
+            ):
+                status = verifier.main([
+                    "--runtime-xsd-zip", str(root / "runtime.zip"),
+                    "--edt-xdto-jar", str(root / "edt.jar"),
+                    "--corpus", str(corpus),
+                    "--report", str(report_path),
+                ])
+            self.assertEqual(status, 2)
+            report = json.loads(report_path.read_text())
+            self.assertEqual((report["verdict"], report["exitCode"]), ("source-error", 2))
+            self.assertTrue(verifier.report_matches_schema(report, json.loads(REPORT_SCHEMA.read_text())))
+
+    def test_boolean_corpus_schema_version_is_a_deterministic_source_error(self):
+        verifier = load_verifier()
+        schema_value = json.loads(REPORT_SCHEMA.read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus-manifest.json"
+            corpus.write_text(json.dumps({
+                "schemaVersion": True,
+                "profile": "1c-8.3.27-export-2.20",
+                "cases": [],
+            }))
+            reports = []
+            for index in range(2):
+                report_path = root / f"report-{index}.json"
+                runtime = verifier.RuntimeEvidence({"source": {}, "compilationMatrix": [], "wrappers": {}})
+                with mock.patch.object(verifier, "verified_runtime", return_value=runtime), mock.patch.object(
+                    verifier, "verified_edt", return_value={"provided": True}
+                ):
+                    status = verifier.main([
+                        "--runtime-xsd-zip", str(root / "runtime.zip"),
+                        "--edt-xdto-jar", str(root / "edt.jar"),
+                        "--corpus", str(corpus),
+                        "--report", str(report_path),
+                    ])
+                report = json.loads(report_path.read_text())
+                self.assertEqual(status, 2)
+                self.assertIn("schemaVersion", report["sourceError"])
+                self.assertTrue(verifier.report_matches_schema(report, schema_value))
+                reports.append(report)
+            self.assertEqual(reports[0], reports[1])
+
+    def test_malformed_profile_cli_is_exit_2_with_a_valid_report(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            case = root / "case"
+            case.mkdir()
+            xml = case / "x.xml"
+            xml.write_text("<x/>")
+            corpus = root / "corpus-manifest.json"
+            corpus.write_text(json.dumps({
+                "schemaVersion": 1,
+                "profile": "broken-profile",
+                "cases": [{
+                    "id": "case", "toolId": "unica.test", "xmlImpact": "created",
+                    "files": [{"path": "case/x.xml", "sha256": sha(xml.read_bytes()), "seed": False, "family": "x"}],
+                }],
+            }))
+            missing_families = {
+                "profile": "broken-profile",
+                "exportVersion": "2.20",
+                "runtime": {},
+                "edt": {},
+                "families": None,
+            }
+            unhashable_owner_type = json.loads(PROFILE.read_text())
+            unhashable_owner_type["profile"] = "broken-profile"
+            owner_family = next(
+                family
+                for family in unhashable_owner_type["families"].values()
+                if family.get("sourceSetOwner") is True
+            )
+            owner_family["sourceSetOwnerTypes"] = [{}]
+            null_known_failures = json.loads(PROFILE.read_text())
+            null_known_failures["profile"] = "broken-profile"
+            null_known_failures["runtime"]["knownCompileFailures"] = None
+            malformed_external_imports = json.loads(PROFILE.read_text())
+            malformed_external_imports["profile"] = "broken-profile"
+            malformed_external_imports["runtime"]["knownExternalImports"] = {}
+            boolean_summary_count = json.loads(PROFILE.read_text())
+            boolean_summary_count["profile"] = "broken-profile"
+            boolean_summary_count["runtime"]["summary"]["schemas"] = True
+            malformed_edt_declaration = json.loads(PROFILE.read_text())
+            malformed_edt_declaration["profile"] = "broken-profile"
+            malformed_edt_declaration["edt"]["declarations"]["metadata"]["tokens"] = None
+            malformed_coverage_list = json.loads(PROFILE.read_text())
+            malformed_coverage_list["profile"] = "broken-profile"
+            next(iter(malformed_coverage_list["families"].values()))["coverage"] = []
+            malformed_coverage_object = json.loads(PROFILE.read_text())
+            malformed_coverage_object["profile"] = "broken-profile"
+            next(iter(malformed_coverage_object["families"].values()))["coverage"] = {}
+            malformed_version_list = json.loads(PROFILE.read_text())
+            malformed_version_list["profile"] = "broken-profile"
+            next(iter(malformed_version_list["families"].values()))["version"] = []
+            malformed_version_object = json.loads(PROFILE.read_text())
+            malformed_version_object["profile"] = "broken-profile"
+            next(iter(malformed_version_object["families"].values()))["version"] = {}
+            broken_profile = root / "profile.json"
+            report_path = root / "report.json"
+            runtime = verifier.RuntimeEvidence({"source": {}, "compilationMatrix": [], "wrappers": {}})
+            for label, value, expected_error in (
+                ("missing families", missing_families, "families"),
+                ("unhashable owner type", unhashable_owner_type, "sourceSetOwnerTypes"),
+                ("null known failures", null_known_failures, "knownCompileFailures"),
+                ("malformed external imports", malformed_external_imports, "knownExternalImports"),
+                ("boolean summary count", boolean_summary_count, "summary"),
+                ("malformed EDT declaration", malformed_edt_declaration, "declaration"),
+                ("coverage list", malformed_coverage_list, "coverage"),
+                ("coverage object", malformed_coverage_object, "coverage"),
+                ("version list", malformed_version_list, "version mode"),
+                ("version object", malformed_version_object, "version mode"),
+            ):
+                with self.subTest(label=label):
+                    broken_profile.write_text(json.dumps(value))
+                    with mock.patch.object(verifier, "verified_runtime", return_value=runtime) as runtime_check, mock.patch.object(
+                        verifier, "verified_edt", return_value={"provided": True}
+                    ):
+                        try:
+                            status = verifier.main([
+                                "--runtime-xsd-zip", str(root / "runtime.zip"),
+                                "--edt-xdto-jar", str(root / "edt.jar"),
+                                "--corpus", str(corpus),
+                                "--report", str(report_path),
+                                "--profile", str(broken_profile),
+                            ])
+                        except Exception as error:
+                            self.fail(f"malformed profile must produce a source-error report: {error!r}")
+                    runtime_check.assert_not_called()
+                    self.assertEqual(status, 2)
+                    report = json.loads(report_path.read_text())
+                    self.assertIn(expected_error, report["sourceError"])
+                    self.assertTrue(verifier.report_matches_schema(report, json.loads(REPORT_SCHEMA.read_text())))
+
+    def test_source_error_report_sanitizes_non_string_profile_ids(self):
+        verifier = load_verifier()
+        schema_value = json.loads(REPORT_SCHEMA.read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile_path = root / "profile.json"
+            report_path = root / "report.json"
+            for profile_id in ([1], 123, {"bad": True}):
+                value = json.loads(PROFILE.read_text())
+                value["profile"] = profile_id
+                profile_path.write_text(json.dumps(value))
+                with self.subTest(profile_id=profile_id):
+                    status = verifier.main([
+                        "--runtime-xsd-zip", str(root / "runtime.zip"),
+                        "--edt-xdto-jar", str(root / "edt.jar"),
+                        "--corpus", str(root / "corpus.json"),
+                        "--report", str(report_path),
+                        "--profile", str(profile_path),
+                    ])
+                    report = json.loads(report_path.read_text())
+                    self.assertEqual(status, 2)
+                    self.assertEqual(report["profile"], "unknown")
+                    self.assertTrue(verifier.report_matches_schema(report, schema_value))
+
     def test_report_is_deterministic(self):
         verifier = load_verifier()
         with tempfile.TemporaryDirectory() as tmp:
@@ -319,6 +1063,122 @@ class VerifierContractTests(unittest.TestCase):
             first, _ = verifier.verify_corpus(corpus, profile, runtime, None)
             second, _ = verifier.verify_corpus(corpus, profile, runtime, None)
             self.assertEqual(json.dumps(first, sort_keys=True), json.dumps(second, sort_keys=True))
+
+    def test_report_validation_rejects_empty_pass_and_inconsistent_summary(self):
+        verifier = load_verifier()
+        schema_value = json.loads(REPORT_SCHEMA.read_text())
+        empty_pass = {
+            "schemaVersion": 1,
+            "profile": "test",
+            "verdict": "pass",
+            "exitCode": 0,
+            "sources": {},
+            "schemaCompilation": [],
+            "files": [],
+            "summary": {"files": -1, "passed": 99, "failed": -7, "inconclusive": 42},
+        }
+        self.assertFalse(verifier.report_matches_schema(empty_pass, schema_value))
+        source_error_without_detail = {
+            **empty_pass,
+            "verdict": "source-error",
+            "exitCode": 2,
+            "summary": {"files": 0, "passed": 0, "failed": 0, "inconclusive": 0},
+        }
+        self.assertFalse(verifier.report_matches_schema(source_error_without_detail, schema_value))
+
+    def test_schema_const_and_enum_distinguish_booleans_from_numbers(self):
+        verifier = load_verifier()
+        report_schema = json.loads(REPORT_SCHEMA.read_text())
+        edt_choices = report_schema["properties"]["sources"]["properties"]["edt"]["oneOf"]
+        false_schema = edt_choices[0]["properties"]["provided"]
+        true_schema = edt_choices[1]["properties"]["provided"]
+
+        self.assertTrue(verifier._matches_schema(False, false_schema))
+        self.assertTrue(verifier._matches_schema(True, true_schema))
+        self.assertFalse(verifier._matches_schema(0, false_schema))
+        self.assertFalse(verifier._matches_schema(1, true_schema))
+        self.assertFalse(verifier._matches_schema({"provided": 0}, {"const": {"provided": False}}))
+        self.assertFalse(verifier._matches_schema(1, {"enum": [True]}))
+        self.assertFalse(verifier._matches_schema(True, {"enum": [1]}))
+        self.assertTrue(verifier._matches_schema(1.0, {"const": 1}))
+
+    def test_report_semantics_require_check_result_and_coverage_consistency(self):
+        verifier = load_verifier()
+        schema_value = json.loads(REPORT_SCHEMA.read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = runtime_archive(root, basic_schemas())
+            profile = test_profile(archive)
+            runtime = verifier.verified_runtime(archive, profile)
+            corpus = write_corpus(root / "corpus", [
+                ("rights.xml", "<Rights xmlns='urn:test:roles' version='2.20'><setForNewObjects>true</setForNewObjects></Rights>", {}),
+            ])
+            valid, status = verifier.verify_corpus(corpus, profile, runtime, None)
+            self.assertEqual(status, 0)
+            self.assertTrue(verifier.report_matches_schema(valid, schema_value))
+
+            failed_check_pass_row = json.loads(json.dumps(valid))
+            failed_check_pass_row["files"][0]["checks"][0]["status"] = "fail"
+            self.assertFalse(verifier.report_matches_schema(failed_check_pass_row, schema_value))
+
+            advisory_pass_row = json.loads(json.dumps(valid))
+            advisory_pass_row["files"][0]["coverage"] = "advisory"
+            self.assertFalse(verifier.report_matches_schema(advisory_pass_row, schema_value))
+
+            failed_without_failed_check = json.loads(json.dumps(valid))
+            failed_without_failed_check["files"][0]["result"] = "fail"
+            failed_without_failed_check["summary"] = {"files": 1, "passed": 0, "failed": 1, "inconclusive": 0}
+            failed_without_failed_check["verdict"] = "fail"
+            failed_without_failed_check["exitCode"] = 1
+            self.assertFalse(verifier.report_matches_schema(failed_without_failed_check, schema_value))
+
+            strict_unavailable = json.loads(json.dumps(valid))
+            strict_unavailable["files"][0]["checks"][0]["status"] = "unavailable"
+            strict_unavailable["files"][0]["result"] = "inconclusive"
+            strict_unavailable["summary"] = {"files": 1, "passed": 0, "failed": 0, "inconclusive": 1}
+            strict_unavailable["verdict"] = "inconclusive"
+            strict_unavailable["exitCode"] = 3
+            self.assertFalse(verifier.report_matches_schema(strict_unavailable, schema_value))
+
+            advisory_inconclusive = json.loads(json.dumps(advisory_pass_row))
+            advisory_inconclusive["files"][0]["result"] = "inconclusive"
+            advisory_inconclusive["files"][0]["requiredNextEvidence"] = "platform roundtrip"
+            advisory_inconclusive["summary"] = {"files": 1, "passed": 0, "failed": 0, "inconclusive": 1}
+            advisory_inconclusive["verdict"] = "inconclusive"
+            advisory_inconclusive["exitCode"] = 3
+            self.assertTrue(verifier.report_matches_schema(advisory_inconclusive, schema_value))
+            runtime.close()
+
+    def test_main_converts_an_invalid_generated_report_to_source_error(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            invalid = {
+                "schemaVersion": 1,
+                "profile": "1c-8.3.27-export-2.20",
+                "verdict": "pass",
+                "exitCode": 0,
+                "sources": {},
+                "schemaCompilation": [],
+                "files": [],
+                "summary": {"files": 0, "passed": 0, "failed": 0, "inconclusive": 0},
+            }
+            runtime = verifier.RuntimeEvidence({"source": {}, "compilationMatrix": [], "wrappers": {}})
+            report_path = root / "report.json"
+            with mock.patch.object(verifier, "verified_runtime", return_value=runtime), mock.patch.object(
+                verifier, "verified_edt", return_value={"provided": True}
+            ), mock.patch.object(verifier, "verify_corpus", return_value=(invalid, 0)):
+                status = verifier.main([
+                    "--runtime-xsd-zip", str(root / "runtime.zip"),
+                    "--edt-xdto-jar", str(root / "edt.jar"),
+                    "--corpus", str(root / "corpus.json"),
+                    "--report", str(report_path),
+                ])
+            self.assertEqual(status, 2)
+            report = json.loads(report_path.read_text())
+            self.assertEqual((report["verdict"], report["exitCode"]), ("source-error", 2))
+            self.assertIn("report", report["sourceError"])
+            self.assertTrue(verifier.report_matches_schema(report, json.loads(REPORT_SCHEMA.read_text())))
 
     def test_edt_declaration_is_line_evidence_not_xsd_coverage(self):
         verifier = load_verifier()
@@ -344,6 +1204,117 @@ class VerifierContractTests(unittest.TestCase):
             self.assertEqual(report["files"][0]["coverage"], "not-covered")
             self.assertEqual(report["files"][0]["checks"][-1]["name"], "edtDeclaration")
             self.assertIn("not proof of patch build", report["sources"]["edt"]["evidenceScope"])
+
+    def test_invalid_zip_and_unavailable_jarsigner_are_source_errors(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            invalid = root / "runtime.zip"
+            invalid.write_bytes(b"not a zip")
+            profile = test_profile(invalid)
+            with self.assertRaisesRegex(verifier.SourceError, "ZIP|archive"):
+                verifier.verified_runtime(invalid, profile)
+
+            jar = edt_jar(root)
+            profile["edt"] = {
+                "sha256": sha(jar.read_bytes()), "symbolicName": "test", "version": "1",
+                "entries": {"backend": "backend.xdto"},
+                "declarations": {"metadata": {"entry": "backend", "tokens": ["urn:test:md", "MetaDataObject"]}},
+            }
+
+            def missing_jarsigner(*_args, **_kwargs):
+                raise FileNotFoundError("jarsigner")
+
+            with self.assertRaisesRegex(verifier.SourceError, "jarsigner"):
+                verifier.verified_edt(jar, profile, runner=missing_jarsigner)
+
+    def test_corrupt_or_encrypted_zip_members_produce_valid_source_error_reports(self):
+        verifier = load_verifier()
+        schema_value = json.loads(REPORT_SCHEMA.read_text())
+
+        def assert_source_error_report(call, report_path):
+            try:
+                status = call()
+            except Exception as error:
+                self.fail(f"ZIP member read failure must be reported, not raised: {error!r}")
+            self.assertEqual(status, 2)
+            report = json.loads(report_path.read_text())
+            self.assertEqual((report["verdict"], report["exitCode"]), ("source-error", 2))
+            self.assertTrue(verifier.report_matches_schema(report, schema_value))
+            self.assertRegex(report["sourceError"], "CRC|crc|encrypted|member|archive")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for mode in ("crc", "encrypted"):
+                case_root = root / f"runtime-{mode}"
+                case_root.mkdir()
+                archive = runtime_archive(case_root, basic_schemas())
+                corrupt_zip_member(archive, "export/schemas/0001.xsd", mode)
+                with zipfile.ZipFile(archive) as opened:
+                    self.assertIn("export/schemas/0001.xsd", opened.namelist())
+                profile = test_profile(archive)
+                profile["edt"] = {
+                    "sha256": "0" * 64, "symbolicName": "test", "version": "1",
+                    "entries": {"backend": "backend.xdto"},
+                    "declarations": {
+                        "metadata": {"entry": "backend", "tokens": ["urn:test:md", "MetaDataObject"]},
+                    },
+                }
+                profile_path = case_root / "profile.json"
+                profile_path.write_text(json.dumps(profile))
+                report_path = case_root / "report.json"
+                with self.subTest(source="runtime", mode=mode):
+                    assert_source_error_report(
+                        lambda: verifier.main([
+                            "--runtime-xsd-zip", str(archive),
+                            "--edt-xdto-jar", str(case_root / "unused.jar"),
+                            "--corpus", str(case_root / "unused-corpus.json"),
+                            "--report", str(report_path),
+                            "--profile", str(profile_path),
+                        ]),
+                        report_path,
+                    )
+
+            for mode in ("crc", "encrypted"):
+                case_root = root / f"edt-{mode}"
+                case_root.mkdir()
+                archive = runtime_archive(case_root, basic_schemas())
+                jar = edt_jar(case_root)
+                corrupt_zip_member(jar, "backend.xdto", mode)
+                with zipfile.ZipFile(jar) as opened:
+                    self.assertIn("backend.xdto", opened.namelist())
+                profile = test_profile(archive)
+                profile["edt"] = {
+                    "sha256": sha(jar.read_bytes()), "symbolicName": "test", "version": "1",
+                    "entries": {"backend": "backend.xdto"},
+                    "declarations": {
+                        "metadata": {"entry": "backend", "tokens": ["urn:test:md", "MetaDataObject"]},
+                    },
+                }
+                profile_path = case_root / "profile.json"
+                profile_path.write_text(json.dumps(profile))
+                report_path = case_root / "report.json"
+                real_verified_edt = verifier.verified_edt
+
+                def verified_edt_with_test_runner(path, selected_profile):
+                    runner = lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                        [], 0, stdout="jar verified.\n", stderr=""
+                    )
+                    return real_verified_edt(path, selected_profile, runner=runner)
+
+                with self.subTest(source="edt", mode=mode), mock.patch.object(
+                    verifier, "verified_edt", side_effect=verified_edt_with_test_runner
+                ):
+                    assert_source_error_report(
+                        lambda: verifier.main([
+                            "--runtime-xsd-zip", str(archive),
+                            "--edt-xdto-jar", str(jar),
+                            "--corpus", str(case_root / "unused-corpus.json"),
+                            "--report", str(report_path),
+                            "--profile", str(profile_path),
+                        ]),
+                        report_path,
+                    )
 
     def test_corpus_rejects_escape_absolute_duplicate_and_hash_mismatch(self):
         verifier = load_verifier()
