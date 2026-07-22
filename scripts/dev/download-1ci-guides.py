@@ -21,7 +21,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 from urllib.robotparser import RobotFileParser
-import xml.etree.ElementTree as ET
 
 
 BASE_URL = "https://kb.1ci.com"
@@ -29,6 +28,7 @@ SITEMAP_URL = BASE_URL + "/sitemap.xml"
 ROBOTS_URL = BASE_URL + "/robots.txt"
 SPACES_URL = BASE_URL + "/rest/wikis/xwiki/spaces"
 USER_AGENT = "UnicaLocalDocs/1.0 (+private development corpus)"
+XWIKI_VIEW_PREFIX = "/bin/view/OnecInt/KB"
 
 
 class Guide(NamedTuple):
@@ -79,11 +79,19 @@ def _root_path(guide: Guide) -> str:
     return urlsplit(guide.root).path.rstrip("/") + "/"
 
 
+def _public_path(path: str) -> str:
+    if path == XWIKI_VIEW_PREFIX:
+        return "/"
+    if path.startswith(XWIKI_VIEW_PREFIX + "/"):
+        return path[len(XWIKI_VIEW_PREFIX) :]
+    return path
+
+
 def guide_for_url(url: str) -> Guide | None:
     parsed = urlsplit(urljoin(BASE_URL, url))
     if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != "kb.1ci.com":
         return None
-    path = parsed.path.rstrip("/") + "/"
+    path = _public_path(parsed.path).rstrip("/") + "/"
     for guide in GUIDES:
         root = _root_path(guide)
         if path == root or path.startswith(root):
@@ -97,7 +105,7 @@ def normalize_page_url(url: str) -> str:
     if guide is None:
         raise ValueError(f"URL is outside configured guide roots: {url}")
     parsed = urlsplit(absolute)
-    path = re.sub(r"/+", "/", parsed.path)
+    path = re.sub(r"/+", "/", _public_path(parsed.path))
     if not path.endswith("/"):
         path += "/"
     return urlunsplit(("https", "kb.1ci.com", path, "language=en", ""))
@@ -124,54 +132,34 @@ def guide_space_id(guide: Guide) -> str:
     return "xwiki:" + ".".join(escaped)
 
 
-def _catalog_size(fetch_batch) -> int:
-    high = 1
-    while fetch_batch(high, 1):
-        high *= 2
-    low = high // 2
-    while low < high:
-        middle = (low + high) // 2
-        if fetch_batch(middle, 1):
-            low = middle + 1
-        else:
-            high = middle
-    return low
-
-
-def _catalog_lower_bound(fetch_batch, size: int, target: str) -> int:
-    low, high = 0, size
-    while low < high:
-        middle = (low + high) // 2
-        rows = fetch_batch(middle, 1)
-        if rows and rows[0]["id"] < target:
-            low = middle + 1
-        else:
-            high = middle
-    return low
-
-
-def discover_space_pages(fetch_batch, guides=GUIDES, *, batch_size: int = 200) -> set[str]:
-    size = _catalog_size(fetch_batch)
+def discover_space_pages(fetch_batch, guides=GUIDES, *, batch_size: int = 1000) -> set[str]:
     pages: set[str] = set()
-    for guide in guides:
-        prefix = guide_space_id(guide)
-        offset = _catalog_lower_bound(fetch_batch, size, prefix)
-        while offset < size:
-            rows = fetch_batch(offset, min(batch_size, size - offset))
-            if not rows:
-                break
-            stop = False
-            for row in rows:
-                identifier = row.get("id", "")
+    prefixes = {guide_space_id(guide): guide for guide in guides}
+    offset = 0
+    seen_batches: set[tuple[tuple[str, str], ...]] = set()
+    while True:
+        rows = fetch_batch(offset, batch_size)
+        if not rows:
+            break
+        signature = tuple(
+            (str(row.get("id", "")), str(row.get("xwikiAbsoluteUrl", "")))
+            for row in rows
+        )
+        if signature in seen_batches:
+            raise DownloadError(f"XWiki spaces endpoint repeated a batch at offset {offset}")
+        seen_batches.add(signature)
+        for row in rows:
+            identifier = row.get("id", "")
+            url = row.get("xwikiAbsoluteUrl")
+            if not url:
+                continue
+            for prefix, guide in prefixes.items():
                 if identifier != prefix and not identifier.startswith(prefix + "."):
-                    stop = True
-                    break
-                url = row.get("xwikiAbsoluteUrl")
-                if url and guide_for_url(url) == guide:
+                    continue
+                if guide_for_url(url) == guide:
                     pages.add(normalize_page_url(url))
-            if stop:
                 break
-            offset += len(rows)
+        offset += len(rows)
     return pages
 
 
@@ -254,7 +242,17 @@ def _inline(node: Node | str, page_url: str) -> str:
         return "  \n"
     if node.tag == "a":
         href = _clean_link_target(node.attrs.get("href", ""))
-        return f"[{content or href}]({urljoin(page_url, href)})" if href else content
+        if not href:
+            return content
+        absolute = urljoin(page_url, href)
+        try:
+            target = normalize_page_url(absolute)
+        except ValueError:
+            target = absolute
+        fragment = urlsplit(absolute).fragment
+        if fragment and guide_for_url(absolute):
+            target += "#" + fragment
+        return f"[{content or href}]({target})"
     if node.tag == "img":
         src = urljoin(page_url, _clean_link_target(node.attrs.get("src", "")))
         alt = node.attrs.get("alt", "")
@@ -332,7 +330,10 @@ def _all_nodes(node: Node | str):
 
 
 def _looks_like_asset(url: str) -> bool:
-    path = urlsplit(url).path.lower()
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or parsed.netloc.lower() != "kb.1ci.com":
+        return False
+    path = parsed.path.lower()
     return path.startswith("/bin/download/") or "/download/" in path or bool(
         re.search(r"\.(?:png|jpe?g|gif|svg|webp|pdf|zip|rar|7z|tar|gz|epf|erf|xml|json|txt|csv|xlsx?|docx?|pptx?)$", path)
     )
@@ -421,14 +422,39 @@ def _parse_robots(data: bytes) -> RobotFileParser:
     return parser
 
 
+class SitemapParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.locations: list[str] = []
+        self._location: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.rsplit(":", 1)[-1] == "loc":
+            self._location = []
+
+    def handle_data(self, data: str) -> None:
+        if self._location is not None:
+            self._location.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if self._location is not None:
+            self._location.append(f"&{name};")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.rsplit(":", 1)[-1] == "loc" and self._location is not None:
+            self.locations.append("".join(self._location).strip())
+            self._location = None
+
+
 def _sitemap_pages(data: bytes) -> set[str]:
-    root = ET.fromstring(data)
+    parser = SitemapParser()
+    parser.feed(data.decode("utf-8", "replace"))
     pages: set[str] = set()
-    for element in root.iter():
-        if element.tag.rsplit("}", 1)[-1] != "loc" or not element.text:
+    for location in parser.locations:
+        if not location:
             continue
         try:
-            normalized = normalize_page_url(element.text.strip())
+            normalized = normalize_page_url(location)
         except ValueError:
             continue
         pages.add(normalized)
@@ -551,6 +577,7 @@ class Downloader:
                         failures.append({"url": asset_url, "page": url, "error": "blocked by robots.txt"})
                         continue
                     asset_response = self.fetcher.fetch(asset_url)
+                    asset_retrieved = datetime.now(timezone.utc).isoformat()
                     asset_path = _asset_relative_path(page_path, asset_url)
                     _atomic_write(staging / asset_path, asset_response.body)
                     markdown = markdown.replace(asset_url, _relative_link(page_path, asset_path))
@@ -560,6 +587,9 @@ class Downloader:
                             "path": asset_path.as_posix(),
                             "sha256": hashlib.sha256(asset_response.body).hexdigest(),
                             "contentType": asset_response.content_type,
+                            "etag": asset_response.etag,
+                            "lastModified": asset_response.last_modified,
+                            "retrieved": asset_retrieved,
                         }
                     )
                 retrieved = datetime.now(timezone.utc).isoformat()
@@ -579,6 +609,7 @@ class Downloader:
                         "sha256": hashlib.sha256(response.body).hexdigest(),
                         "etag": response.etag,
                         "lastModified": response.last_modified,
+                        "retrieved": retrieved,
                         "assets": assets,
                     }
                 )
