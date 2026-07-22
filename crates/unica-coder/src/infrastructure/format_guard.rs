@@ -16,7 +16,7 @@ use crate::infrastructure::native_operations::form::{
     form_compile_infer_from_object_target, form_compile_normalize_from_object_output_label,
 };
 use crate::infrastructure::native_operations::meta::resolve_meta_edit_object_path;
-use crate::infrastructure::platform_xml_owner::{resolve_platform_xml_owner, PlatformXmlOwnerKind};
+use crate::infrastructure::platform_xml_owner::resolve_platform_xml_owner;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
@@ -88,25 +88,15 @@ pub(crate) fn evaluate_format_guard(
         let actual = compatibility.actual().to_string();
         let (code, warning) = match compatibility {
             FormatCompatibility::Older { .. } => {
-                let warning = match owner.kind {
-                    PlatformXmlOwnerKind::Configuration => format!(
-                        "Формат выгрузки {actual} старше поддерживаемого {} для платформы 1С {}. Изменение отменено; предложите пользователю явную миграцию через unica.cf.migrate_format.",
-                        ACTIVE_FORMAT_PROFILE.export_format, ACTIVE_FORMAT_PROFILE.platform_line
-                    ),
-                    PlatformXmlOwnerKind::Extension => format!(
-                        "Формат выгрузки {actual} старше поддерживаемого {} для платформы 1С {}. Изменение отменено; предложите пользователю явную миграцию через unica.cfe.migrate_format.",
-                        ACTIVE_FORMAT_PROFILE.export_format, ACTIVE_FORMAT_PROFILE.platform_line
-                    ),
-                    PlatformXmlOwnerKind::ExternalProcessor
-                    | PlatformXmlOwnerKind::ExternalReport => format!(
-                        "Формат выгрузки {actual} старше поддерживаемого {} для платформы 1С {}. Изменение отменено; требуется явная повторная выгрузка через платформу 1С 8.3.27. Автоматическая миграция EPF/ERF пока не реализована.",
-                        ACTIVE_FORMAT_PROFILE.export_format, ACTIVE_FORMAT_PROFILE.platform_line
-                    ),
-                    PlatformXmlOwnerKind::Standalone => format!(
-                        "Формат выгрузки {actual} старше поддерживаемого {} для платформы 1С {}. Изменение отменено; требуется явная повторная выгрузка через платформу 1С 8.3.27. Автоматическая миграция автономного XML пока не реализована.",
-                        ACTIVE_FORMAT_PROFILE.export_format, ACTIVE_FORMAT_PROFILE.platform_line
-                    ),
+                let access = if spec.mutating {
+                    "Изменение отменено."
+                } else {
+                    "Доступен только режим чтения."
                 };
+                let warning = format!(
+                    "Формат выгрузки {actual} старше поддерживаемого {} для платформы 1С {}. {access} Чтобы редактировать исходники, явно перенесите выгрузку средствами платформы 1С 8.3.27: загрузите исходники и повторно выгрузите их. Unica не выполняет эту миграцию автоматически.",
+                    ACTIVE_FORMAT_PROFILE.export_format, ACTIVE_FORMAT_PROFILE.platform_line
+                );
                 ("formatMigrationAvailable", warning)
             }
             FormatCompatibility::Newer { .. } => (
@@ -305,6 +295,17 @@ mod tests {
         tools().into_iter().find(|tool| tool.name == name).unwrap()
     }
 
+    fn assert_platform_reexport_warning(warning: &str) {
+        assert!(warning.contains("платформы 1С 8.3.27"), "{warning}");
+        assert!(warning.contains("повторно выгруз"), "{warning}");
+        assert!(
+            warning.contains("не выполняет эту миграцию автоматически"),
+            "{warning}"
+        );
+        assert!(!warning.contains("migrate_format"), "{warning}");
+        assert!(!warning.contains("unica."), "{warning}");
+    }
+
     fn external_source_set(
         root: &std::path::Path,
         kind: &str,
@@ -337,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn older_dump_blocks_mutation_and_offers_explicit_migration() {
+    fn older_dump_blocks_mutation_and_recommends_platform_reexport() {
         let root = std::env::temp_dir().join(format!(
             "unica-format-guard-old-{}-{}",
             std::process::id(),
@@ -362,16 +363,19 @@ mod tests {
         assert!(!outcome.ok);
         assert_eq!(diagnostic["code"], "formatMigrationAvailable");
         assert_eq!(diagnostic["actualFormat"], "2.19");
-        assert!(outcome
-            .warnings
-            .join("\n")
-            .contains("unica.cf.migrate_format"));
+        let warning = outcome.warnings.join("\n");
+        assert_platform_reexport_warning(&warning);
+        assert!(warning.contains("Изменение отменено."), "{warning}");
+        assert!(
+            !warning.contains("Доступен только режим чтения."),
+            "{warning}"
+        );
         assert_eq!(std::fs::read(path).unwrap(), before);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn older_extension_dump_offers_extension_migration() {
+    fn older_extension_dump_recommends_platform_reexport() {
         let root =
             std::env::temp_dir().join(format!("unica-format-guard-old-cfe-{}", std::process::id()));
         let src = root.join("src");
@@ -393,15 +397,13 @@ mod tests {
         let FormatGuardCheck::Block { outcome, .. } = check else {
             panic!("older extension mutation must be blocked");
         };
-        assert!(outcome
-            .warnings
-            .join("\n")
-            .contains("unica.cfe.migrate_format"));
+        let warning = outcome.warnings.join("\n");
+        assert_platform_reexport_warning(&warning);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn cfe_init_preflights_its_optional_cf_base_with_cf_migration() {
+    fn cfe_init_preflights_its_optional_cf_base_with_platform_reexport() {
         let root = std::env::temp_dir().join(format!(
             "unica-format-guard-cfe-init-{}",
             std::process::id()
@@ -422,10 +424,8 @@ mod tests {
             panic!("older optional CF base must block CFE init");
         };
         assert_eq!(diagnostic["code"], "formatMigrationAvailable");
-        assert!(outcome
-            .warnings
-            .join("\n")
-            .contains("unica.cf.migrate_format"));
+        let warning = outcome.warnings.join("\n");
+        assert_platform_reexport_warning(&warning);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -776,8 +776,7 @@ mod tests {
             panic!("old EPF owner must block DCS edit");
         };
         assert_eq!(diagnostic["actualFormat"], "2.19");
-        assert!(outcome.warnings.join("\n").contains("повторная выгрузка"));
-        assert!(!outcome.warnings.join("\n").contains("migrate_format"));
+        assert_platform_reexport_warning(&outcome.warnings.join("\n"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -799,10 +798,44 @@ mod tests {
         );
 
         let check = evaluate_format_guard(spec("unica.mxl.info"), &args, &context(&root)).unwrap();
-        let FormatGuardCheck::Warn { diagnostic, .. } = check else {
+        let FormatGuardCheck::Warn {
+            warning,
+            diagnostic,
+        } = check
+        else {
             panic!("old ERF owner must warn for read-only MXL info");
         };
         assert_eq!(diagnostic["actualFormat"], "2.19");
+        assert_platform_reexport_warning(&warning);
+        assert!(
+            warning.contains("Доступен только режим чтения."),
+            "{warning}"
+        );
+        assert!(!warning.contains("Изменение отменено."), "{warning}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn standalone_owner_warning_recommends_platform_reexport_without_tool_name() {
+        let root = std::env::temp_dir().join(format!(
+            "unica-format-guard-old-standalone-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let form = root.join("Form.xml");
+        std::fs::write(
+            &form,
+            r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.19"/>"#,
+        )
+        .unwrap();
+        let mut args = Map::new();
+        args.insert("FormPath".into(), Value::String(form.display().to_string()));
+
+        let check = evaluate_format_guard(spec("unica.form.edit"), &args, &context(&root)).unwrap();
+        let FormatGuardCheck::Block { outcome, .. } = check else {
+            panic!("old standalone owner must block form edit");
+        };
+        assert_platform_reexport_warning(&outcome.warnings.join("\n"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1171,8 +1204,7 @@ mod tests {
             panic!("old direct EPF descriptor must block");
         };
         assert_eq!(diagnostic["ownerKind"], "external_processor");
-        assert!(outcome.warnings.join("\n").contains("повторная выгрузка"));
-        assert!(!outcome.warnings.join("\n").contains("migrate_format"));
+        assert_platform_reexport_warning(&outcome.warnings.join("\n"));
         let _ = std::fs::remove_dir_all(root);
     }
 
