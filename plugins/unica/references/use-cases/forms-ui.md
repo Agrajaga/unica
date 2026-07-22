@@ -29,4 +29,4 @@ source edits.
 - `references/specs/form-dsl-spec.md`
 - `references/specs/form-patterns.md`
 - `references/platform/development-standards.md`
-- [1C Design Guide](https://github.com/Oxotka/1CDesignGuide) — UX-правила и дизайн-рекомендации для элементов форм (поля, флажки, кнопки, гиперссылки, диалоги, подсказки и др.)
+
