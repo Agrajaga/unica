@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ingvarconsulting.github.io/unica/schemas/verify-8-3-27-xml-report.schema.json",
+  "type": "object",
+  "oneOf": [
+    {"type": "object", "required": ["verdict", "exitCode"], "properties": {"verdict": {"const": "pass"}, "exitCode": {"const": 0}}},
+    {"type": "object", "required": ["verdict", "exitCode"], "properties": {"verdict": {"const": "fail"}, "exitCode": {"const": 1}}},
+    {"type": "object", "required": ["verdict", "exitCode"], "properties": {"verdict": {"const": "source-error"}, "exitCode": {"const": 2}}},
+    {"type": "object", "required": ["verdict", "exitCode"], "properties": {"verdict": {"const": "inconclusive"}, "exitCode": {"const": 3}}}
+  ],
+  "required": ["schemaVersion", "profile", "verdict", "exitCode", "sources", "schemaCompilation", "files", "summary"],
+  "properties": {
+    "schemaVersion": {"type": "integer"},
+    "profile": {"type": "string"},
+    "verdict": {"type": "string", "enum": ["pass", "fail", "inconclusive", "source-error"]},
+    "exitCode": {"type": "integer", "enum": [0, 1, 2, 3]},
+    "sourceError": {"type": "string"},
+    "sources": {
+      "type": "object",
+      "properties": {
+        "runtime": {
+          "type": "object",
+          "required": ["kind", "sha256", "formatVersion", "platformVersion", "identityStatement"],
+          "properties": {
+            "kind": {"type": "string"},
+            "sha256": {"type": "string"},
+            "formatVersion": {"type": "integer"},
+            "platformVersion": {"type": "string"},
+            "identityStatement": {"type": "string"}
+          }
+        },
+        "edt": {
+          "type": "object",
+          "required": ["provided", "evidenceScope"],
+          "properties": {
+            "provided": {"type": "boolean"},
+            "evidenceScope": {"type": "string"}
+          }
+        }
+      }
+    },
+    "schemaCompilation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "targetNamespace", "status", "detail"],
+        "properties": {
+          "file": {"type": "string"},
+          "targetNamespace": {"type": "string"},
+          "status": {"type": "string", "enum": ["compiled", "known-source-incompatibility", "compile-error"]},
+          "detail": {"type": "string"}
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["caseId", "toolId", "xmlImpact", "path", "sha256", "rootQName", "coverage", "checks", "result", "requiredNextEvidence"],
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {"type": "string"},
+          "coverage": {"type": "string", "enum": ["strict", "advisory", "not-covered", "known-schema-incompatibility", "unknown"]},
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "status"],
+              "properties": {
+                "name": {"type": "string"},
+                "status": {"type": "string", "enum": ["pass", "fail", "unavailable"]}
+              }
+            }
+          },
+          "result": {"type": "string", "enum": ["pass", "fail", "inconclusive"]},
+          "requiredNextEvidence": {"type": "string"}
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["files", "passed", "failed", "inconclusive"],
+      "properties": {
+        "files": {"type": "integer"},
+        "passed": {"type": "integer"},
+        "failed": {"type": "integer"},
+        "inconclusive": {"type": "integer"}
+      }
+    }
+  }
+}
