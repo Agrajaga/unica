@@ -90,6 +90,7 @@ FIXTURE_HTML = """
   <table><tr><th>Name</th><th>Value</th></tr><tr><td>A</td><td>B</td></tr></table>
   <pre>Message("hello");</pre>
   <img src="/bin/download/Space/Page/example.png" alt="Example"/>
+  <a href="%20http://localhost/httpservice/hs/example">local HTTP example</a>
 </div>
 <footer>Copyright</footer>
 </body></html>
@@ -116,6 +117,11 @@ class ExtractionTests(unittest.TestCase):
             page.assets,
             ("https://kb.1ci.com/bin/download/Space/Page/example.png",),
         )
+
+    def test_whitespace_prefixed_absolute_example_is_not_a_guide_page(self):
+        page = guides.extract_page(FIXTURE_HTML, guides.DEVELOPER.root)
+        self.assertNotIn("localhost", "\n".join(page.page_links))
+        self.assertIn("(http://localhost/httpservice/hs/example)", page.markdown)
 
 
 class PublicationTests(unittest.TestCase):

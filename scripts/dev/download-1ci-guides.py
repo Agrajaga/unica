@@ -234,6 +234,12 @@ def _plain(node: Node | str) -> str:
     return "".join(_plain(child) for child in node.children)
 
 
+def _clean_link_target(value: str) -> str:
+    raw = unescape(value).strip()
+    decoded = unquote(raw).strip()
+    return decoded if urlsplit(decoded).scheme else raw
+
+
 def _inline(node: Node | str, page_url: str) -> str:
     if isinstance(node, str):
         return re.sub(r"\s+", " ", node)
@@ -247,10 +253,10 @@ def _inline(node: Node | str, page_url: str) -> str:
     if node.tag == "br":
         return "  \n"
     if node.tag == "a":
-        href = node.attrs.get("href", "")
+        href = _clean_link_target(node.attrs.get("href", ""))
         return f"[{content or href}]({urljoin(page_url, href)})" if href else content
     if node.tag == "img":
-        src = urljoin(page_url, node.attrs.get("src", ""))
+        src = urljoin(page_url, _clean_link_target(node.attrs.get("src", "")))
         alt = node.attrs.get("alt", "")
         return f"![{alt}]({src})" if src else ""
     return content
@@ -350,7 +356,7 @@ def extract_page(html: str, page_url: str) -> ExtractedPage:
         attribute = "src" if node.tag == "img" else "href" if node.tag == "a" else None
         if not attribute or not node.attrs.get(attribute):
             continue
-        absolute = urljoin(page_url, unescape(node.attrs[attribute]))
+        absolute = urljoin(page_url, _clean_link_target(node.attrs[attribute]))
         if _looks_like_asset(absolute):
             assets.add(absolute)
         elif guide_for_url(absolute):
