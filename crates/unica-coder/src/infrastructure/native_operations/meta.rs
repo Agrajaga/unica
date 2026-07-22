@@ -6098,7 +6098,7 @@ pub(crate) fn meta_compile_extra_ext_files(
         "ExchangePlan" => vec![(
             "Content.xml",
             format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<ExchangePlanContent xmlns=\"http://v8.1c.ru/8.3/xcf/extrnprops\" xmlns:xr=\"http://v8.1c.ru/8.3/xcf/readable\" version=\"{format_version}\"/>\r\n"
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<ExchangePlanContent xmlns=\"http://v8.1c.ru/8.3/xcf/extrnprops\" xmlns:xr=\"http://v8.1c.ru/8.3/xcf/readable\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" version=\"{format_version}\"/>\r\n"
             ),
         )],
         "BusinessProcess" => vec![(
@@ -12721,5 +12721,21 @@ pub(crate) fn invoke_mutation(
         "meta-edit" => Some(edit_meta(args, context)),
         "meta-remove" => Some(remove_metadata_object(args, context)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exchange_plan_content_matches_8_3_27() {
+        let files = meta_compile_extra_ext_files("ExchangePlan", "2.20");
+        let (name, content) = &files[0];
+        let expected =
+            include_str!("../../../../../tests/fixtures/platform_8_3_27/exchange_plan/Content.xml");
+
+        assert_eq!(*name, "Content.xml");
+        assert_eq!(content.replace("\r\n", "\n"), expected);
     }
 }

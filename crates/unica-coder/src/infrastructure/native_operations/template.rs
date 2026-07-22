@@ -741,15 +741,11 @@ mod tests {
     }
 
     #[test]
-    fn template_add_spreadsheet_matches_mxl_contract() {
+    fn template_add_spreadsheet_matches_platform_8_3_27_fixture() {
         let xml = template_content_xml("SpreadsheetDocument", ".xml").unwrap();
-        let document = roxmltree::Document::parse(&xml).unwrap();
-        let root = document.root_element();
+        let expected =
+            include_str!("../../../../../tests/fixtures/platform_8_3_27/mxl/Template.xml");
 
-        assert_eq!(root.tag_name().name(), "document");
-        assert_eq!(
-            root.tag_name().namespace(),
-            Some("http://v8.1c.ru/8.2/data/spreadsheet")
-        );
+        assert_eq!(xml, expected);
     }
 }

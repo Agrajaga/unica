@@ -15,6 +15,25 @@ use super::common::*;
 use super::{
     cf::*, cfe::*, form::*, interface::*, meta::*, mxl::*, role::*, subsystem::*, template::*,
 };
+
+pub(crate) const DCS_SCHEMA_NS: &str = "http://v8.1c.ru/8.1/data-composition-system/schema";
+
+pub(crate) fn require_dcs_root(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
+    let local_name = root.tag_name().name();
+    if local_name != "DataCompositionSchema" {
+        return Err(format!(
+            "Root element is '{local_name}', expected 'DataCompositionSchema'"
+        ));
+    }
+    let namespace = root.tag_name().namespace().unwrap_or("");
+    if namespace != DCS_SCHEMA_NS {
+        return Err(format!(
+            "Root namespace is '{namespace}' for DataCompositionSchema, expected '{DCS_SCHEMA_NS}'"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) struct DcsValidationReporter {
     pub(crate) errors: usize,
     pub(crate) warnings: usize,
@@ -96,7 +115,7 @@ pub(crate) fn analyze_dcs_info(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
 ) -> AdapterOutcome {
-    const NS_SCHEMA: &str = "http://v8.1c.ru/8.1/data-composition-system/schema";
+    const NS_SCHEMA: &str = DCS_SCHEMA_NS;
     const NS_SETTINGS: &str = "http://v8.1c.ru/8.1/data-composition-system/settings";
 
     let result = (|| -> Result<(String, Option<PathBuf>, PathBuf), String> {
@@ -108,6 +127,7 @@ pub(crate) fn analyze_dcs_info(
         let doc = Document::parse(text.trim_start_matches('\u{feff}'))
             .map_err(|err| format!("XML parse error in {}: {err}", resolved_path.display()))?;
         let root = doc.root_element();
+        require_dcs_root(root)?;
         let mode = string_arg(args, &["mode", "Mode"]).unwrap_or("overview");
         let out_file_label = string_arg(args, &["outFile", "OutFile"]).map(ToOwned::to_owned);
         let out_file = out_file_label
@@ -1468,7 +1488,7 @@ pub(crate) fn validate_dcs(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
 ) -> AdapterOutcome {
-    const NS_SCHEMA: &str = "http://v8.1c.ru/8.1/data-composition-system/schema";
+    const NS_SCHEMA: &str = DCS_SCHEMA_NS;
 
     let result = (|| -> Result<DcsValidationRun, String> {
         let template_path = resolve_dcs_validate_path(args, context)?;
@@ -1517,23 +1537,8 @@ pub(crate) fn validate_dcs(
         };
 
         let root = doc.root_element();
-        let root_local = root.tag_name().name();
-        if root_local != "DataCompositionSchema" {
-            report.error(format!(
-                "Root element is '{root_local}', expected 'DataCompositionSchema'"
-            ));
-        } else {
-            report.ok("Root element: DataCompositionSchema");
-        }
-        let root_ns = root.tag_name().namespace().unwrap_or("");
-        if root_ns != NS_SCHEMA {
-            report.error(format!(
-                "Default namespace is '{root_ns}', expected '{NS_SCHEMA}'"
-            ));
-        } else {
-            report.ok("Default namespace correct");
-        }
-        if report.stopped {
+        if let Err(error) = require_dcs_root(root) {
+            report.error(error);
             return dcs_validation_finish(
                 report,
                 &file_name,
@@ -1542,6 +1547,8 @@ pub(crate) fn validate_dcs(
                 resolved_path,
             );
         }
+        report.ok("Root element: DataCompositionSchema");
+        report.ok("Default namespace correct");
 
         let data_source_nodes = dcs_children(root, "dataSource", NS_SCHEMA);
         let mut data_source_names = HashSet::<String>::new();
@@ -4353,7 +4360,9 @@ pub(crate) fn edit_dcs(args: &Map<String, Value>, context: &WorkspaceContext) ->
         if xml_text.starts_with('\u{feff}') {
             xml_text = xml_text.trim_start_matches('\u{feff}').to_string();
         }
-        Document::parse(&xml_text).map_err(|err| format!("[ERROR] XML parse error: {err}"))?;
+        let document =
+            Document::parse(&xml_text).map_err(|err| format!("[ERROR] XML parse error: {err}"))?;
+        require_dcs_root(document.root_element()).map_err(|error| format!("[ERROR] {error}"))?;
 
         let original_line_ending = if xml_text.contains("\r\n") {
             "\r\n"
@@ -9109,6 +9118,63 @@ mod tests {
     use serde_json::{json, Map};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn dcs_info_rejects_wrong_root_namespace_without_output() {
+        let context = temp_context("dcs-info-wrong-root-ns");
+        let template_path = context.cwd.join("Template.xml");
+        let out_file = context.cwd.join("info.txt");
+        fs::write(
+            &template_path,
+            base_dcs_xml().replace(
+                "http://v8.1c.ru/8.1/data-composition-system/schema",
+                "urn:not-dcs",
+            ),
+        )
+        .unwrap();
+        let args = Map::from_iter([
+            ("TemplatePath".to_string(), json!("Template.xml")),
+            ("OutFile".to_string(), json!("info.txt")),
+        ]);
+
+        let outcome = analyze_dcs_info(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(!out_file.exists());
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("urn:not-dcs") && error.contains("DataCompositionSchema")));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn dcs_edit_rejects_wrong_root_namespace_without_write() {
+        let context = temp_context("dcs-edit-wrong-root-ns");
+        let template_path = context.cwd.join("Template.xml");
+        let original = base_dcs_xml()
+            .replace(
+                "http://v8.1c.ru/8.1/data-composition-system/schema",
+                "urn:not-dcs",
+            )
+            .into_bytes();
+        fs::write(&template_path, &original).unwrap();
+        let args = Map::from_iter([
+            ("TemplatePath".to_string(), json!("Template.xml")),
+            ("Operation".to_string(), json!("add-field")),
+            ("Value".to_string(), json!("Quantity: decimal(10,0)")),
+        ]);
+
+        let outcome = edit_dcs(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("urn:not-dcs") && error.contains("DataCompositionSchema")));
+        assert_eq!(fs::read(&template_path).unwrap(), original);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
 
     #[test]
     fn native_dcs_edit_accepts_documented_operations_without_script_fallback() {

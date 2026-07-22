@@ -26,6 +26,20 @@ use super::{
 const FORM_LOGFORM_NS: &str = "http://v8.1c.ru/8.3/xcf/logform";
 const FORM_V8_NS: &str = "http://v8.1c.ru/8.1/data/core";
 
+pub(crate) fn require_form_root(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
+    let local_name = root.tag_name().name();
+    if local_name != "Form" {
+        return Err(format!("Root element is '{local_name}', expected 'Form'"));
+    }
+    let namespace = root.tag_name().namespace().unwrap_or("");
+    if namespace != FORM_LOGFORM_NS {
+        return Err(format!(
+            "Root namespace is '{namespace}', expected '{FORM_LOGFORM_NS}'"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) struct FormValidationReporter {
     pub(crate) errors: usize,
     pub(crate) warnings: usize,
@@ -140,18 +154,17 @@ pub(crate) fn validate_form(
         let root = doc.root_element();
         let mut report = FormValidationReporter::new(&form_name, max_errors, detailed);
 
+        if let Err(error) = require_form_root(root) {
+            report.error(error);
+            let (ok, stdout, errors) = report.finalize(&form_name);
+            return Ok((ok, stdout, form_path, errors));
+        }
+
         let has_base_form = form_validation_child(root, "BaseForm").is_some();
-        if root.tag_name().name() != "Form" {
-            report.error(format!(
-                "Root element is '{}', expected 'Form'",
-                root.tag_name().name()
-            ));
-        } else {
-            match classify_root_version(root.attribute("version")) {
-                Ok(FormatCompatibility::Supported { .. }) => report.ok("Export format: 2.20"),
-                Ok(compatibility) => report.warn(format_compatibility_warning(&compatibility)),
-                Err(error) => report.error(error.to_string()),
-            }
+        match classify_root_version(root.attribute("version")) {
+            Ok(FormatCompatibility::Supported { .. }) => report.ok("Export format: 2.20"),
+            Ok(compatibility) => report.warn(format_compatibility_warning(&compatibility)),
+            Err(error) => report.error(error.to_string()),
         }
 
         if !report.stopped {
@@ -1034,6 +1047,16 @@ pub(crate) fn form_validate_types(
         if value.is_empty() {
             continue;
         }
+        if value.contains(':') {
+            if let Err(error) = require_form_type_qname_binding(*type_node, value) {
+                report.error(format!("12. Type \"{value}\": {error}"));
+                type_error_count += 1;
+                if report.stopped {
+                    return;
+                }
+                continue;
+            }
+        }
         if form_invalid_types().contains(&value) {
             report.error(format!(
                 "12. Type \"{value}\": invalid runtime/UI type (not valid in XDTO schema)"
@@ -1076,6 +1099,66 @@ pub(crate) fn form_validate_types(
             report.ok(format!("12. Types: {} values, all valid", type_nodes.len()));
         }
     }
+}
+
+pub(crate) fn require_form_type_qname_binding(
+    node: roxmltree::Node<'_, '_>,
+    value: &str,
+) -> Result<(), String> {
+    let Some((prefix, local_name)) = value.split_once(':') else {
+        return Ok(());
+    };
+    if local_name.contains(':') || !form_is_xml_ncname(prefix) || !form_is_xml_ncname(local_name) {
+        return Err("invalid QName syntax".to_string());
+    }
+    let namespace = node
+        .lookup_namespace_uri(Some(prefix))
+        .ok_or_else(|| format!("undeclared prefix '{prefix}'"))?;
+    if let Some((_, expected)) = form_edit_emitter_namespaces()
+        .into_iter()
+        .find(|(known_prefix, _)| *known_prefix == prefix)
+    {
+        if namespace != expected {
+            return Err(format!(
+                "prefix '{prefix}' is bound to '{namespace}', expected '{expected}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn form_is_xml_ncname(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(form_is_xml_ncname_start) && chars.all(form_is_xml_ncname_character)
+}
+
+pub(crate) fn form_is_xml_ncname_start(ch: char) -> bool {
+    matches!(
+        ch,
+        'A'..='Z'
+            | '_'
+            | 'a'..='z'
+            | '\u{00C0}'..='\u{00D6}'
+            | '\u{00D8}'..='\u{00F6}'
+            | '\u{00F8}'..='\u{02FF}'
+            | '\u{0370}'..='\u{037D}'
+            | '\u{037F}'..='\u{1FFF}'
+            | '\u{200C}'..='\u{200D}'
+            | '\u{2070}'..='\u{218F}'
+            | '\u{2C00}'..='\u{2FEF}'
+            | '\u{3001}'..='\u{D7FF}'
+            | '\u{F900}'..='\u{FDCF}'
+            | '\u{FDF0}'..='\u{FFFD}'
+            | '\u{10000}'..='\u{EFFFF}'
+    )
+}
+
+pub(crate) fn form_is_xml_ncname_character(ch: char) -> bool {
+    form_is_xml_ncname_start(ch)
+        || matches!(
+            ch,
+            '-' | '.' | '0'..='9' | '\u{00B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}'
+        )
 }
 
 pub(crate) fn form_is_data_type_declaration_type_node(node: roxmltree::Node<'_, '_>) -> bool {
@@ -1229,6 +1312,7 @@ pub(crate) fn analyze_form_info(
         let doc = Document::parse(text.trim_start_matches('\u{feff}'))
             .map_err(|err| format!("XML parse error in {}: {err}", form_path.display()))?;
         let root = doc.root_element();
+        require_form_root(root)?;
         let base_form = form_child(root, "BaseForm");
         let is_extension = base_form.is_some();
         let (form_name, object_context) = form_info_context(&form_path);
@@ -3713,7 +3797,13 @@ pub(crate) fn edit_form_with_mode(
         let mut xml_text = String::from_utf8(content_bytes.to_vec())
             .map_err(|err| format!("{} is not valid UTF-8: {err}", form_path.display()))?;
         let original_xml_text = xml_text.clone();
-        Document::parse(&xml_text).map_err(|err| format!("[ERROR] XML parse error: {err}"))?;
+        let form_root_start = {
+            let document = Document::parse(&xml_text)
+                .map_err(|err| format!("[ERROR] XML parse error: {err}"))?;
+            let root = document.root_element();
+            require_form_root(root).map_err(|error| format!("[ERROR] {error}"))?;
+            root.range().start
+        };
         if let Some(attributes) = defn.get("attributes").and_then(Value::as_array) {
             form_edit_validate_named_objects(&xml_text, attributes, "Attribute", "attribute")?;
         }
@@ -3721,12 +3811,6 @@ pub(crate) fn edit_form_with_mode(
             form_edit_validate_named_objects(&xml_text, commands, "Command", "command")?;
         }
         let planned_events = form_edit_plan_events(&defn, &xml_text)?;
-        let form_root_start = Document::parse(&xml_text)
-            .map_err(|err| format!("[ERROR] XML parse error: {err}"))?
-            .root_element()
-            .range()
-            .start;
-
         let form_name = form_edit_form_name(&form_path);
         let mut elem_ids = FormIdAllocator {
             next: form_edit_next_id(
@@ -3841,9 +3925,13 @@ pub(crate) fn edit_form_with_mode(
             }
         }
 
+        let emitted_type_qnames = form_edit_collect_emitted_type_qnames(&emitted_fragments)?;
         form_edit_ensure_emitted_namespaces(&mut xml_text, form_root_start, &emitted_fragments)?;
-        Document::parse(&xml_text)
+        let edited_document = Document::parse(&xml_text)
             .map_err(|err| format!("[ERROR] XML parse error after edit: {err}"))?;
+        let edited_root = edited_document.root_element();
+        require_form_root(edited_root).map_err(|error| format!("[ERROR] {error}"))?;
+        form_edit_validate_emitted_type_qnames(edited_root, &emitted_type_qnames)?;
         let changed = xml_text != original_xml_text;
         if changed && !mode.is_preview() {
             form_edit_write_preserving_bom(&form_path, &xml_text, bom)?;
@@ -5547,11 +5635,26 @@ pub(crate) fn form_edit_ensure_emitted_namespaces(
         .ok_or_else(|| "No opening <Form> tag found in form".to_string())?;
     let additions = {
         let root_opening = &xml_text[root_start..=root_open_end];
+        let mut standalone_root = root_opening[..root_opening.len() - 1].to_string();
+        standalone_root.push_str("/>");
+        let document = Document::parse(&standalone_root)
+            .map_err(|error| format!("[ERROR] Invalid <Form> opening tag: {error}"))?;
+        let root = document.root_element();
+        require_form_root(root).map_err(|error| format!("[ERROR] {error}"))?;
         let mut additions = String::new();
         for (prefix, uri) in form_edit_emitter_namespaces() {
             let needed = emitted_fragments.contains(&format!("{prefix}:"));
-            if needed && !form_edit_opening_tag_declares_namespace(root_opening, prefix) {
-                additions.push_str(&format!(" xmlns:{prefix}=\"{uri}\""));
+            if !needed {
+                continue;
+            }
+            match root.lookup_namespace_uri(Some(prefix)) {
+                Some(bound) if bound == uri => {}
+                Some(bound) => {
+                    return Err(format!(
+                        "[ERROR] Namespace prefix '{prefix}' is bound to '{bound}', expected '{uri}'"
+                    ));
+                }
+                None => additions.push_str(&format!(" xmlns:{prefix}=\"{uri}\"")),
             }
         }
         additions
@@ -5562,15 +5665,71 @@ pub(crate) fn form_edit_ensure_emitted_namespaces(
     Ok(())
 }
 
-pub(crate) fn form_edit_emitter_namespaces() -> [(&'static str, &'static str); 6] {
+pub(crate) fn form_edit_emitter_namespaces() -> [(&'static str, &'static str); 11] {
     [
         ("app", "http://v8.1c.ru/8.2/managed-application/core"),
         ("cfg", "http://v8.1c.ru/8.1/data/enterprise/current-config"),
+        (
+            "dcssch",
+            "http://v8.1c.ru/8.1/data-composition-system/schema",
+        ),
+        (
+            "dcsset",
+            "http://v8.1c.ru/8.1/data-composition-system/settings",
+        ),
+        ("dcscor", "http://v8.1c.ru/8.1/data-composition-system/core"),
+        ("ent", "http://v8.1c.ru/8.1/data/enterprise"),
         ("v8", FORM_V8_NS),
+        ("v8ui", "http://v8.1c.ru/8.1/data/ui"),
         ("xr", "http://v8.1c.ru/8.3/xcf/readable"),
         ("xs", "http://www.w3.org/2001/XMLSchema"),
         ("xsi", "http://www.w3.org/2001/XMLSchema-instance"),
     ]
+}
+
+pub(crate) fn form_edit_validate_emitted_type_qnames(
+    root: roxmltree::Node<'_, '_>,
+    emitted_type_qnames: &[String],
+) -> Result<(), String> {
+    for value in emitted_type_qnames {
+        if value.contains(':') {
+            require_form_type_qname_binding(root, value)
+                .map_err(|error| format!("[ERROR] Emitted Type \"{value}\": {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn form_edit_collect_emitted_type_qnames(
+    emitted_fragments: &str,
+) -> Result<Vec<String>, String> {
+    if emitted_fragments.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut wrapper = format!("<Form xmlns=\"{FORM_LOGFORM_NS}\"");
+    for (prefix, uri) in form_edit_emitter_namespaces() {
+        wrapper.push_str(&format!(" xmlns:{prefix}=\"{uri}\""));
+    }
+    wrapper.push('>');
+    wrapper.push_str(emitted_fragments);
+    wrapper.push_str("</Form>");
+
+    let document = Document::parse(&wrapper)
+        .map_err(|error| format!("[ERROR] XML parse error in emitted form fragment: {error}"))?;
+    Ok(document
+        .root_element()
+        .descendants()
+        .filter(|node| {
+            node.is_element()
+                && node.tag_name().name() == "Type"
+                && form_is_data_type_declaration_type_node(*node)
+        })
+        .filter_map(|node| {
+            let value = node.text().unwrap_or("").trim();
+            (!value.is_empty()).then(|| value.to_string())
+        })
+        .collect())
 }
 
 pub(crate) fn form_edit_opening_tag_declares_namespace(opening: &str, prefix: &str) -> bool {
@@ -7854,6 +8013,284 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn form_validate_rejects_wrong_root_namespace() {
+        let context = temp_context("validate-wrong-root-ns");
+        let form_path = context.cwd.join("Form.xml");
+        write_file(&form_path, &editable_contract_form("urn:not-logform", ""));
+
+        let outcome = validate_form(&form_path_args(&form_path), &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| { error.contains("urn:not-logform") && error.contains(FORM_LOGFORM_NS) }));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_info_rejects_wrong_root_namespace() {
+        let context = temp_context("info-wrong-root-ns");
+        let form_path = context.cwd.join("Form.xml");
+        write_file(&form_path, &editable_contract_form("urn:not-logform", ""));
+
+        let outcome = analyze_form_info(&form_path_args(&form_path), &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome.artifacts.is_empty());
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| { error.contains("urn:not-logform") && error.contains(FORM_LOGFORM_NS) }));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_rejects_wrong_root_namespace_without_write() {
+        let context = temp_context("edit-wrong-root-ns");
+        let form_path = context.cwd.join("Form.xml");
+        let original = editable_contract_form("urn:not-logform", "").into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let mut args = form_path_args(&form_path);
+        args.insert(
+            "definition".to_string(),
+            json!({"attributes": [{"name": "Added", "type": "string"}]}),
+        );
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| { error.contains("urn:not-logform") && error.contains(FORM_LOGFORM_NS) }));
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_declares_dcs_qname_namespaces() {
+        let context = temp_context("edit-dcs-qnames");
+        let form_path = context.cwd.join("Form.xml");
+        write_file(
+            &form_path,
+            &editable_contract_form(FORM_LOGFORM_NS, &format!(" xmlns:v8=\"{FORM_V8_NS}\"")),
+        );
+        let mut args = form_path_args(&form_path);
+        args.insert(
+            "definition".to_string(),
+            json!({
+                "attributes": [{
+                    "name": "DcsTypes",
+                    "type": "dcssch:DataCompositionSchema|dcsset:Filter|dcscor:Field"
+                }]
+            }),
+        );
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let updated = fs::read_to_string(&form_path).unwrap();
+        let document = Document::parse(&updated).unwrap();
+        let root = document.root_element();
+        for (prefix, expected) in [
+            (
+                "dcssch",
+                "http://v8.1c.ru/8.1/data-composition-system/schema",
+            ),
+            (
+                "dcsset",
+                "http://v8.1c.ru/8.1/data-composition-system/settings",
+            ),
+            ("dcscor", "http://v8.1c.ru/8.1/data-composition-system/core"),
+        ] {
+            assert_eq!(root.lookup_namespace_uri(Some(prefix)), Some(expected));
+        }
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_declares_v8ui_and_ent_qname_namespaces() {
+        let context = temp_context("edit-v8ui-ent-qnames");
+        let form_path = context.cwd.join("Form.xml");
+        write_file(
+            &form_path,
+            &editable_contract_form(FORM_LOGFORM_NS, &format!(" xmlns:v8=\"{FORM_V8_NS}\"")),
+        );
+        let mut args = form_path_args(&form_path);
+        args.insert(
+            "definition".to_string(),
+            json!({
+                "attributes": [{
+                    "name": "PlatformTypes",
+                    "type": "v8ui:Color|ent:AccountType"
+                }]
+            }),
+        );
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let updated = fs::read_to_string(&form_path).unwrap();
+        let document = Document::parse(&updated).unwrap();
+        let root = document.root_element();
+        assert_eq!(
+            root.lookup_namespace_uri(Some("v8ui")),
+            Some("http://v8.1c.ru/8.1/data/ui")
+        );
+        assert_eq!(
+            root.lookup_namespace_uri(Some("ent")),
+            Some("http://v8.1c.ru/8.1/data/enterprise")
+        );
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_rejects_emitted_prefix_bound_to_wrong_namespace_without_write() {
+        let context = temp_context("edit-wrong-emitted-prefix");
+        let form_path = context.cwd.join("Form.xml");
+        let original = editable_contract_form(
+            FORM_LOGFORM_NS,
+            &format!(" xmlns:v8=\"{FORM_V8_NS}\" xmlns:v8ui=\"urn:wrong-v8ui\""),
+        )
+        .into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let mut args = form_path_args(&form_path);
+        args.insert(
+            "definition".to_string(),
+            json!({"attributes": [{"name": "Color", "type": "v8ui:Color"}]}),
+        );
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome.errors.iter().any(|error| {
+            error.contains("v8ui")
+                && error.contains("urn:wrong-v8ui")
+                && error.contains("http://v8.1c.ru/8.1/data/ui")
+        }));
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_rejects_escaped_and_unbound_emitted_qnames_without_write() {
+        let cases = [
+            ("ampersand", "foo:A&B", "", "invalid QName syntax"),
+            ("less-than", "foo:A<B", "", "invalid QName syntax"),
+            ("undeclared", "foo:Type", "", "undeclared prefix 'foo'"),
+            (
+                "conflicting-known-prefix",
+                "v8ui:A<B",
+                " xmlns:v8ui=\"urn:wrong-v8ui\"",
+                "expected 'http://v8.1c.ru/8.1/data/ui'",
+            ),
+        ];
+
+        for (name, type_name, extra_namespaces, expected_error) in cases {
+            let context = temp_context(&format!("edit-emitted-qname-{name}"));
+            let form_path = context.cwd.join("Form.xml");
+            let original = editable_contract_form(
+                FORM_LOGFORM_NS,
+                &format!(" xmlns:v8=\"{FORM_V8_NS}\"{extra_namespaces}"),
+            )
+            .into_bytes();
+            fs::write(&form_path, &original).unwrap();
+            let mut args = form_path_args(&form_path);
+            args.insert(
+                "definition".to_string(),
+                json!({"attributes": [{"name": "UnsafeType", "type": type_name}]}),
+            );
+
+            let outcome = edit_form(&args, &context);
+
+            assert!(!outcome.ok, "{name}: {outcome:?}");
+            assert!(
+                outcome
+                    .errors
+                    .iter()
+                    .any(|error| error.contains(expected_error)),
+                "{name}: {outcome:?}"
+            );
+            assert_eq!(fs::read(&form_path).unwrap(), original, "{name}");
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn form_validate_rejects_undeclared_qname_prefix() {
+        let context = temp_context("validate-undeclared-type-prefix");
+        let form_path = context.cwd.join("Form.xml");
+        write_file(
+            &form_path,
+            &form_with_declared_type("", "missing:CatalogRef.Goods"),
+        );
+
+        let outcome = validate_form(&form_path_args(&form_path), &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome.errors.iter().any(|error| {
+            error.contains("missing:CatalogRef.Goods")
+                && error.contains("undeclared prefix 'missing'")
+        }));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_validate_rejects_known_qname_prefix_bound_to_wrong_namespace() {
+        let context = temp_context("validate-wrong-type-prefix-binding");
+        let form_path = context.cwd.join("Form.xml");
+        write_file(
+            &form_path,
+            &form_with_declared_type(" xmlns:cfg=\"urn:wrong-config\"", "cfg:CatalogRef.Goods"),
+        );
+
+        let outcome = validate_form(&form_path_args(&form_path), &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome.errors.iter().any(|error| {
+            error.contains("cfg:CatalogRef.Goods")
+                && error.contains("urn:wrong-config")
+                && error.contains("http://v8.1c.ru/8.1/data/enterprise/current-config")
+        }));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_validate_accepts_declared_config_qname_alias() {
+        let context = temp_context("validate-config-type-alias");
+        let form_path = context.cwd.join("Form.xml");
+        write_file(
+            &form_path,
+            &form_with_declared_type(
+                " xmlns:custom=\"http://v8.1c.ru/8.1/data/enterprise/current-config\"",
+                "custom:CatalogRef.Goods",
+            ),
+        );
+
+        let outcome = validate_form(&form_path_args(&form_path), &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    fn form_path_args(path: &Path) -> Map<String, Value> {
+        Map::from_iter([("FormPath".to_string(), json!(path.display().to_string()))])
+    }
+
+    fn editable_contract_form(namespace: &str, extra_namespaces: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Form xmlns=\"{namespace}\"{extra_namespaces} version=\"2.20\">\n\t<AutoCommandBar name=\"FormCommandBar\" id=\"-1\"/>\n\t<ChildItems/>\n\t<Attributes/>\n\t<Commands/>\n</Form>\n"
+        )
+    }
+
+    fn form_with_declared_type(extra_namespaces: &str, type_name: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Form xmlns=\"{FORM_LOGFORM_NS}\" xmlns:v8=\"{FORM_V8_NS}\"{extra_namespaces} version=\"2.20\">\n\t<AutoCommandBar name=\"FormCommandBar\" id=\"-1\"/>\n\t<ChildItems/>\n\t<Attributes>\n\t\t<Attribute name=\"Value\" id=\"1\">\n\t\t\t<Type><v8:Type>{type_name}</v8:Type></Type>\n\t\t</Attribute>\n\t</Attributes>\n\t<Commands/>\n</Form>\n"
+        )
     }
 
     fn empty_catalog_xml(line_ending: &str, trailing_newline: bool) -> String {

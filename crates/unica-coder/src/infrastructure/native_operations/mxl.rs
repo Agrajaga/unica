@@ -16,8 +16,24 @@ pub(crate) const MXL_DOCUMENT_NS: &str = "http://v8.1c.ru/8.2/data/spreadsheet";
 
 pub(crate) fn empty_spreadsheet_document_xml() -> String {
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<document xmlns=\"{MXL_DOCUMENT_NS}\" xmlns:style=\"http://v8.1c.ru/8.1/data/ui/style\" xmlns:v8=\"http://v8.1c.ru/8.1/data/core\" xmlns:v8ui=\"http://v8.1c.ru/8.1/data/ui\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n\t<languageSettings>\n\t\t<currentLanguage>ru</currentLanguage>\n\t\t<defaultLanguage>ru</defaultLanguage>\n\t\t<languageInfo>\n\t\t\t<id>ru</id>\n\t\t\t<code>Русский</code>\n\t\t\t<description>Русский</description>\n\t\t</languageInfo>\n\t</languageSettings>\n\t<columns><size>0</size></columns>\n\t<rows><size>0</size></rows>\n</document>"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<document xmlns=\"{MXL_DOCUMENT_NS}\" xmlns:style=\"http://v8.1c.ru/8.1/data/ui/style\" xmlns:v8=\"http://v8.1c.ru/8.1/data/core\" xmlns:v8ui=\"http://v8.1c.ru/8.1/data/ui\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n\t<languageSettings>\n\t\t<currentLanguage>ru</currentLanguage>\n\t\t<defaultLanguage>ru</defaultLanguage>\n\t\t<languageInfo>\n\t\t\t<id>ru</id>\n\t\t\t<code>Русский</code>\n\t\t\t<description>Русский</description>\n\t\t</languageInfo>\n\t</languageSettings>\n\t<columns>\n\t\t<size>0</size>\n\t</columns>\n\t<rowsItem>\n\t\t<index>0</index>\n\t\t<row>\n\t\t\t<empty>true</empty>\n\t\t</row>\n\t</rowsItem>\n\t<templateMode>true</templateMode>\n\t<vgRows>0</vgRows>\n</document>\n"
     )
+}
+
+pub(crate) fn require_mxl_document_root(root: roxmltree::Node<'_, '_>) -> Result<(), String> {
+    let local_name = root.tag_name().name();
+    if local_name != "document" {
+        return Err(format!(
+            "Root element is '{local_name}', expected 'document'"
+        ));
+    }
+    let namespace = root.tag_name().namespace().unwrap_or("");
+    if namespace != MXL_DOCUMENT_NS {
+        return Err(format!(
+            "Root namespace is '{namespace}', expected '{MXL_DOCUMENT_NS}'"
+        ));
+    }
+    Ok(())
 }
 use super::{
     cf::*, cfe::*, dcs::*, form::*, interface::*, meta::*, role::*, subsystem::*, template::*,
@@ -162,6 +178,7 @@ pub(crate) fn analyze_mxl_info(
         let doc = Document::parse(text.trim_start_matches('\u{feff}'))
             .map_err(|err| format!("XML parse error in {}: {err}", template_path.display()))?;
         let root = doc.root_element();
+        require_mxl_document_root(root)?;
         let include_text = bool_arg(args, &["withText", "WithText"]);
         let max_params = int_arg(args, &["maxParams", "MaxParams"]).unwrap_or(10) as usize;
 
@@ -184,9 +201,7 @@ pub(crate) fn analyze_mxl_info(
             .children()
             .filter(|node| role_info_element(*node, "rowsItem", None))
             .collect::<Vec<_>>();
-        let doc_height = child_text(root, "height", None)
-            .parse::<i64>()
-            .unwrap_or(row_nodes.len() as i64);
+        let doc_height = mxl_logical_height(root, &row_nodes);
         let mut row_map = Vec::<(i64, roxmltree::Node<'_, '_>)>::new();
         for row_item in &row_nodes {
             if let Ok(index) = child_text(*row_item, "index", None).parse::<i64>() {
@@ -590,6 +605,15 @@ pub(crate) fn validate_mxl(
             "=== Validation: Template.{template_display_name} ==="
         ));
         report.lines.push(String::new());
+        if let Err(error) = require_mxl_document_root(root) {
+            report.error(error);
+            return Ok(finish_mxl_validation(
+                report,
+                detailed,
+                &template_display_name,
+                template_path,
+            ));
+        }
 
         let line_count = mxl_direct_children(root, "line", Some(NS_D)).len();
         let font_count = mxl_direct_children(root, "font", None).len();
@@ -611,6 +635,7 @@ pub(crate) fn validate_mxl(
 
         let row_nodes = mxl_direct_children(root, "rowsItem", Some(NS_D));
         let doc_height = mxl_int_child(root, "height", Some(NS_D));
+        let is_empty_sentinel = is_platform_empty_mxl_sentinel(root, &row_nodes);
         let mut max_row_index = -1i64;
         for row_item in &row_nodes {
             if let Some(idx) = mxl_optional_int_child(*row_item, "index", Some(NS_D)) {
@@ -619,7 +644,11 @@ pub(crate) fn validate_mxl(
                 }
             }
         }
-        let expected_min_height = max_row_index + 1;
+        let expected_min_height = if is_empty_sentinel {
+            0
+        } else {
+            max_row_index + 1
+        };
         if doc_height >= expected_min_height {
             report.ok(format!(
                 "height ({doc_height}) >= max row index + 1 ({expected_min_height}), rowsItem count={}",
@@ -872,26 +901,12 @@ pub(crate) fn validate_mxl(
             }
         }
 
-        let checks = report.ok_count + report.errors + report.warnings;
-        let stdout = if report.errors == 0 && report.warnings == 0 && !detailed {
-            format!("=== Validation OK: Template.{template_display_name} ({checks} checks) ===\n")
-        } else {
-            report.lines.push(String::new());
-            report.lines.push(format!(
-                "=== Result: {} errors, {} warnings ({checks} checks) ===",
-                report.errors, report.warnings
-            ));
-            format!("{}\n", report.lines.join("\n"))
-        };
-        let ok = report.errors == 0;
-        let validation_errors = report
-            .lines
-            .iter()
-            .filter(|line| line.starts_with("[ERROR] "))
-            .cloned()
-            .collect::<Vec<_>>();
-
-        Ok((ok, stdout, template_path, validation_errors))
+        Ok(finish_mxl_validation(
+            report,
+            detailed,
+            &template_display_name,
+            template_path,
+        ))
     })();
 
     match result {
@@ -950,6 +965,7 @@ pub(crate) fn decompile_mxl(
         let doc = Document::parse(text.trim_start_matches('\u{feff}'))
             .map_err(|err| format!("XML parse error in {}: {err}", template_path.display()))?;
         let root = doc.root_element();
+        require_mxl_document_root(root)?;
 
         let raw_fonts = mxl_decompile_fonts(root, NS_D);
         let raw_lines = mxl_decompile_lines(root, NS_D);
@@ -1015,8 +1031,14 @@ pub(crate) fn decompile_mxl(
             });
         }
 
+        let row_nodes = mxl_direct_children(root, "rowsItem", Some(NS_D));
+        let is_empty_sentinel = is_platform_empty_mxl_sentinel(root, &row_nodes);
+        let logical_height = mxl_logical_height(root, &row_nodes);
         let mut row_data = BTreeMap::<i64, MxlDecompiledRow>::new();
-        for row_item in mxl_direct_children(root, "rowsItem", Some(NS_D)) {
+        for row_item in row_nodes {
+            if is_empty_sentinel {
+                break;
+            }
             let row_idx = mxl_int_child(row_item, "index", Some(NS_D));
             let index_to =
                 mxl_optional_int_child(row_item, "indexTo", Some(NS_D)).unwrap_or(row_idx);
@@ -1118,9 +1140,8 @@ pub(crate) fn decompile_mxl(
             format!("{json_text}\n")
         };
         let stderr = format!(
-            "     Areas: {}, Rows: {}, Columns: {total_columns}\n     Fonts: {}, Styles: {}, Merges: {}\n",
+            "     Areas: {}, Rows: {logical_height}, Columns: {total_columns}\n     Fonts: {}, Styles: {}, Merges: {}\n",
             named_areas.len(),
-            row_data.len(),
             raw_fonts.len(),
             style_count,
             merge_map.len()
@@ -1160,6 +1181,140 @@ pub(crate) fn decompile_mxl(
             command: None,
         },
     }
+}
+
+pub(crate) fn finish_mxl_validation(
+    mut report: MxlValidationReporter,
+    detailed: bool,
+    template_display_name: &str,
+    template_path: PathBuf,
+) -> (bool, String, PathBuf, Vec<String>) {
+    let checks = report.ok_count + report.errors + report.warnings;
+    let stdout = if report.errors == 0 && report.warnings == 0 && !detailed {
+        format!("=== Validation OK: Template.{template_display_name} ({checks} checks) ===\n")
+    } else {
+        report.lines.push(String::new());
+        report.lines.push(format!(
+            "=== Result: {} errors, {} warnings ({checks} checks) ===",
+            report.errors, report.warnings
+        ));
+        format!("{}\n", report.lines.join("\n"))
+    };
+    let ok = report.errors == 0;
+    let validation_errors = report
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("[ERROR] "))
+        .cloned()
+        .collect::<Vec<_>>();
+    (ok, stdout, template_path, validation_errors)
+}
+
+pub(crate) fn is_platform_empty_mxl_sentinel(
+    root: roxmltree::Node<'_, '_>,
+    row_nodes: &[roxmltree::Node<'_, '_>],
+) -> bool {
+    let root_children = root
+        .children()
+        .filter(roxmltree::Node::is_element)
+        .collect::<Vec<_>>();
+    let expected_root_children = [
+        "languageSettings",
+        "columns",
+        "rowsItem",
+        "templateMode",
+        "vgRows",
+    ];
+    if row_nodes.len() != 1
+        || root_children.len() != expected_root_children.len()
+        || !root_children
+            .iter()
+            .zip(expected_root_children)
+            .all(|(node, expected_name)| {
+                node.tag_name().name() == expected_name
+                    && node.tag_name().namespace() == Some(MXL_DOCUMENT_NS)
+            })
+    {
+        return false;
+    }
+
+    let column_children = root_children[1]
+        .children()
+        .filter(roxmltree::Node::is_element)
+        .collect::<Vec<_>>();
+    if column_children.len() != 1
+        || column_children[0].tag_name().name() != "size"
+        || column_children[0].tag_name().namespace() != Some(MXL_DOCUMENT_NS)
+        || column_children[0]
+            .text()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            != Some(0)
+        || root_children[3]
+            .text()
+            .is_none_or(|value| value.trim() != "true")
+        || root_children[4]
+            .text()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            != Some(0)
+    {
+        return false;
+    }
+
+    let row_item_children = root_children[2]
+        .children()
+        .filter(roxmltree::Node::is_element)
+        .collect::<Vec<_>>();
+    if row_item_children.len() != 2
+        || row_item_children[0].tag_name().name() != "index"
+        || row_item_children[0].tag_name().namespace() != Some(MXL_DOCUMENT_NS)
+        || row_item_children[0]
+            .text()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            != Some(0)
+        || row_item_children[1].tag_name().name() != "row"
+        || row_item_children[1].tag_name().namespace() != Some(MXL_DOCUMENT_NS)
+    {
+        return false;
+    }
+
+    let row = row_item_children[1];
+    let element_children = row
+        .children()
+        .filter(roxmltree::Node::is_element)
+        .collect::<Vec<_>>();
+    element_children.len() == 1
+        && element_children[0].tag_name().name() == "empty"
+        && element_children[0].tag_name().namespace() == Some(MXL_DOCUMENT_NS)
+        && element_children[0]
+            .text()
+            .is_some_and(|value| value.trim() == "true")
+}
+
+pub(crate) fn mxl_logical_height(
+    root: roxmltree::Node<'_, '_>,
+    row_nodes: &[roxmltree::Node<'_, '_>],
+) -> i64 {
+    if is_platform_empty_mxl_sentinel(root, row_nodes) {
+        return 0;
+    }
+
+    let declared_height = child_text(root, "height", None).parse::<i64>().unwrap_or(0);
+    let represented_height = row_nodes
+        .iter()
+        .filter_map(|row_item| {
+            let index = child_text(*row_item, "index", None).parse::<i64>().ok()?;
+            let index_to = child_text(*row_item, "indexTo", None)
+                .parse::<i64>()
+                .unwrap_or(index);
+            Some(index.max(index_to) + 1)
+        })
+        .max()
+        .unwrap_or(row_nodes.len() as i64);
+
+    declared_height
+        .max(represented_height)
+        .max(row_nodes.len() as i64)
+        .max(1)
 }
 
 pub(crate) fn mxl_decompile_fonts(root: roxmltree::Node<'_, '_>, ns: &str) -> Vec<MxlRawFont> {
@@ -2624,6 +2779,13 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
             });
         }
 
+        if global_row == 0 {
+            return Err(
+                "MXL definition must contain at least one row; a zero-row definition cannot preserve columns or named areas in the canonical platform 8.3.27 empty sentinel"
+                    .to_string(),
+            );
+        }
+
         lines.push("\t<templateMode>true</templateMode>".to_string());
         lines.push(format!(
             "\t<defaultFormatIndex>{default_format_index}</defaultFormatIndex>"
@@ -3046,5 +3208,324 @@ pub(crate) fn invoke_mutation(
     match operation {
         "mxl-compile" => Some(compile_mxl(args, context)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::UnicaApplication;
+
+    #[test]
+    fn empty_spreadsheet_document_has_no_rows_container() {
+        let xml = empty_spreadsheet_document_xml();
+        let document = Document::parse(&xml).unwrap();
+        let root = document.root_element();
+        let child_names = root
+            .children()
+            .filter(roxmltree::Node::is_element)
+            .map(|node| node.tag_name().name())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            child_names,
+            [
+                "languageSettings",
+                "columns",
+                "rowsItem",
+                "templateMode",
+                "vgRows"
+            ]
+        );
+        assert!(!xml.contains("<rows>"));
+    }
+
+    #[test]
+    fn mxl_validate_rejects_non_document_root() {
+        let (context, template_path) = write_test_mxl(
+            "validate-root",
+            &format!("<SpreadsheetDocument xmlns=\"{MXL_DOCUMENT_NS}\"/>"),
+        );
+
+        let outcome = validate_mxl(&path_args(&template_path), &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome.errors.iter().any(|error| {
+            error.contains("SpreadsheetDocument") && error.contains("expected 'document'")
+        }));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_validate_rejects_wrong_document_namespace() {
+        let (context, template_path) =
+            write_test_mxl("validate-namespace", "<document xmlns=\"urn:not-mxl\"/>");
+
+        let outcome = validate_mxl(&path_args(&template_path), &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("urn:not-mxl") && error.contains(MXL_DOCUMENT_NS)));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_validate_accepts_platform_8_3_27_empty_fixture() {
+        let context = test_context("validate-platform-empty");
+        let fixture = platform_mxl_fixture();
+
+        let outcome = validate_mxl(&path_args(&fixture), &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_validate_rejects_noncanonical_empty_sentinel_lookalike() {
+        let xml = empty_spreadsheet_document_xml().replace(
+            "<templateMode>true</templateMode>",
+            "<templateMode>false</templateMode>",
+        );
+        let (context, template_path) = write_test_mxl("validate-empty-lookalike", &xml);
+
+        let outcome = validate_mxl(&path_args(&template_path), &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("height=0")));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_info_reports_zero_rows_for_platform_8_3_27_empty_fixture() {
+        let context = test_context("info-platform-empty");
+        let fixture = platform_mxl_fixture();
+        let mut args = path_args(&fixture);
+        args.insert("format".to_string(), json!("json"));
+
+        let outcome = analyze_mxl_info(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let report: Value = serde_json::from_str(outcome.stdout.as_deref().unwrap()).unwrap();
+        assert_eq!(report["rows"], 0);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_info_preserves_explicit_height_for_first_empty_row() {
+        let xml = empty_spreadsheet_document_xml().replace(
+            "\t<vgRows>0</vgRows>",
+            "\t<height>1</height>\n\t<vgRows>0</vgRows>",
+        );
+        let (context, template_path) = write_test_mxl("info-first-empty-row", &xml);
+        let mut args = path_args(&template_path);
+        args.insert("format".to_string(), json!("json"));
+
+        let outcome = analyze_mxl_info(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let report: Value = serde_json::from_str(outcome.stdout.as_deref().unwrap()).unwrap();
+        assert_eq!(report["rows"], 1);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_info_does_not_treat_height_zero_lookalike_as_platform_empty() {
+        let xml = empty_spreadsheet_document_xml().replace(
+            "\t<vgRows>0</vgRows>",
+            "\t<height>0</height>\n\t<vgRows>0</vgRows>",
+        );
+        let (context, template_path) = write_test_mxl("info-height-zero-lookalike", &xml);
+        let mut args = path_args(&template_path);
+        args.insert("format".to_string(), json!("json"));
+
+        let outcome = analyze_mxl_info(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let report: Value = serde_json::from_str(outcome.stdout.as_deref().unwrap()).unwrap();
+        assert_eq!(report["rows"], 1);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_info_rejects_wrong_document_namespace() {
+        let (context, template_path) =
+            write_test_mxl("info-namespace", "<document xmlns=\"urn:not-mxl\"/>");
+
+        let outcome = analyze_mxl_info(&path_args(&template_path), &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome.artifacts.is_empty());
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("urn:not-mxl") && error.contains(MXL_DOCUMENT_NS)));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_decompile_rejects_wrong_root_without_output() {
+        let (context, template_path) = write_test_mxl(
+            "decompile-root",
+            "<Form xmlns=\"http://v8.1c.ru/8.3/xcf/logform\"/>",
+        );
+        let output_path = context.cwd.join("decompiled.json");
+        let mut args = path_args(&template_path);
+        args.insert(
+            "OutputPath".to_string(),
+            json!(output_path.display().to_string()),
+        );
+
+        let outcome = decompile_mxl(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(!output_path.exists());
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| error.contains("Form") && error.contains("expected 'document'")));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_decompile_counts_only_exact_platform_sentinel_as_zero_rows() {
+        let exact_context = test_context("decompile-platform-empty");
+        let exact = decompile_mxl(&path_args(&platform_mxl_fixture()), &exact_context);
+
+        assert!(exact.ok, "{exact:?}");
+        assert!(
+            exact
+                .stderr
+                .as_deref()
+                .is_some_and(|stderr| stderr.contains("Rows: 0")),
+            "{exact:?}"
+        );
+        let _ = fs::remove_dir_all(&exact_context.cwd);
+
+        let lookalike_xml = empty_spreadsheet_document_xml().replace(
+            "\t<vgRows>0</vgRows>",
+            "\t<height>0</height>\n\t<vgRows>0</vgRows>",
+        );
+        let (lookalike_context, lookalike_path) =
+            write_test_mxl("decompile-height-zero-lookalike", &lookalike_xml);
+        let lookalike = decompile_mxl(&path_args(&lookalike_path), &lookalike_context);
+
+        assert!(lookalike.ok, "{lookalike:?}");
+        assert!(
+            lookalike
+                .stderr
+                .as_deref()
+                .is_some_and(|stderr| stderr.contains("Rows: 1")),
+            "{lookalike:?}"
+        );
+        let _ = fs::remove_dir_all(&lookalike_context.cwd);
+
+        let missing_row_xml = empty_spreadsheet_document_xml().replace(
+            "\t<rowsItem>\n\t\t<index>0</index>\n\t\t<row>\n\t\t\t<empty>true</empty>\n\t\t</row>\n\t</rowsItem>\n",
+            "",
+        );
+        let (missing_row_context, missing_row_path) =
+            write_test_mxl("decompile-missing-sentinel-row", &missing_row_xml);
+        let missing_row = decompile_mxl(&path_args(&missing_row_path), &missing_row_context);
+
+        assert!(missing_row.ok, "{missing_row:?}");
+        assert!(
+            missing_row
+                .stderr
+                .as_deref()
+                .is_some_and(|stderr| stderr.contains("Rows: 1")),
+            "{missing_row:?}"
+        );
+        let _ = fs::remove_dir_all(&missing_row_context.cwd);
+    }
+
+    #[test]
+    fn mxl_compile_rejects_zero_row_definition_atomically_at_public_boundary() {
+        let context = test_context("compile-zero-row-public-boundary");
+        let source = context.cwd.join("src");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            context.cwd.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        )
+        .unwrap();
+        fs::write(
+            source.join("Configuration.xml"),
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Configuration/></MetaDataObject>"#,
+        )
+        .unwrap();
+        let definition_path = context.cwd.join("zero-rows.json");
+        fs::write(
+            &definition_path,
+            r#"{"columns":2,"areas":[{"name":"Empty","rows":[]}]}"#,
+        )
+        .unwrap();
+        let output_path = context.cwd.join("generated/nested/Template.xml");
+        let args = Map::from_iter([
+            ("cwd".to_string(), json!(context.cwd.display().to_string())),
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(output_path.display().to_string()),
+            ),
+            ("dryRun".to_string(), json!(false)),
+        ]);
+
+        let result = UnicaApplication::new()
+            .call_tool("unica.mxl.compile", &args)
+            .unwrap();
+
+        assert!(!result.ok, "{result:?}");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("at least one row")),
+            "{result:?}"
+        );
+        assert!(!output_path.exists());
+        assert!(!output_path.parent().unwrap().exists());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    fn path_args(path: &Path) -> Map<String, Value> {
+        Map::from_iter([(
+            "TemplatePath".to_string(),
+            json!(path.display().to_string()),
+        )])
+    }
+
+    fn platform_mxl_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/platform_8_3_27/mxl/Template.xml")
+    }
+
+    fn write_test_mxl(name: &str, xml: &str) -> (WorkspaceContext, PathBuf) {
+        let context = test_context(name);
+        let template_path = context.cwd.join("Template.xml");
+        fs::write(&template_path, xml).unwrap();
+        (context, template_path)
+    }
+
+    fn test_context(name: &str) -> WorkspaceContext {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let cwd = std::env::temp_dir().join(format!("unica-mxl-{name}-{nanos}"));
+        fs::create_dir_all(&cwd).unwrap();
+        WorkspaceContext {
+            cwd: cwd.clone(),
+            workspace_root: cwd.clone(),
+            cache_root: cwd.join(".build/unica"),
+            workspace_epoch: 0,
+        }
     }
 }

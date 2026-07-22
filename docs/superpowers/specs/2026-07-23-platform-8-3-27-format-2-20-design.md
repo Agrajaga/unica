@@ -2,233 +2,238 @@
 
 ## Status
 
-Design sections were approved in conversation on 2026-07-23. This written specification awaits user review. Implementation remains gated on that review.
+The fixed-profile design and implementation scope were approved in conversation
+on 2026-07-23. The current implementation supports one writable profile:
+platform 8.3.27 and configuration export format `2.20`.
 
-## Context
+Native migration and multiple format profiles are not implemented by this
+design. They are explicitly deferred future work and require a separate public
+contract and approval.
 
-Issue [#126](https://github.com/IngvarConsulting/unica/issues/126) proposes an optional, provenance-aware XDTO/XSD validation layer. Before designing that service further, the existing Unica XML tools need one coherent platform and export-format contract.
+## Authority
 
-The 1C:Enterprise 8.3.27 Developer Guide maps platform line 8.3.27 to configuration export format `2.20`. It also states that:
+The 1C:Enterprise 8.3.27 Developer Guide maps platform line 8.3.27 to export
+format `2.20`. It also states that:
 
-- all configuration objects exported to files use the same export format version;
-- the version is written to root XML files of configuration objects and to some subordinate root XML files;
-- absence of an explicit version means format `1.0`;
-- 8.3.27 can import export formats less than or equal to its own format.
+- all configuration objects exported to files use the same export format;
+- the version is present on object root XML files and on some subordinate root
+  files;
+- absence of a version on a version-owning root means format `1.0`;
+- platform 8.3.27 can import export formats less than or equal to `2.20`.
 
-The XDTO schemas exported from runtime 8.3.27.2074 are useful evidence, but they are not a universal schema for every configuration XML family. Some required schemas exist only in the EDT corpus, some runtime schemas are type libraries without global roots, and several real Unica fixtures do not validate strictly without compatibility work. Platform load and roundtrip therefore remain the authoritative compatibility check.
+The platform's ability to import an older format does not make that format a
+writable Unica profile. Unica writes only `2.20` in the current implementation.
+
+Runtime XDTO/XSD from exact build 8.3.27.2074 is useful evidence, but is not a
+universal contract for every configuration XML family. Some schemas exist only
+in the EDT corpus, some runtime schemas are type libraries without global
+roots, and some raw schemas contradict files accepted and emitted by the real
+platform. A platform 8.3.27 load and roundtrip remains the final compatibility
+proof for generated XML.
 
 ## Goals
 
-1. Make platform 8.3.27 and export format `2.20` the only writable profile currently supported by Unica.
-2. Detect unsupported source formats before any modifying operation writes files.
-3. Preserve read-only inspection and validation for unsupported formats while reporting the incompatibility.
-4. Offer an explicit, user-authorized migration path for older exports.
-5. Record and correct deviations between current writers, validators, documentation, the 8.3.27 schemas, and real platform output.
-6. Keep the internal boundary ready for multiple format profiles later without exposing unsupported profiles now.
+1. Keep `8.3.27 / 2.20` as the only writable platform-XML profile.
+2. Detect unsupported owner formats before a modifying operation writes.
+3. Let read-only inspection and validation continue where safe, with a distinct
+   compatibility warning.
+4. For older sources, refuse mutation and recommend an explicit user-driven
+   load and re-export using 1C:Enterprise 8.3.27 tooling.
+5. For newer sources, refuse mutation, never downgrade, and report that
+   platform 8.5 is not supported yet but is planned.
+6. Correct document-family deviations only when backed by code, schemas, EDT
+   contracts, or real-platform evidence.
 
 ## Non-goals
 
-- Supporting multiple platform or export-format profiles in this iteration.
-- Automatically migrating a source tree as a side effect of `add`, `edit`, or `compile`.
-- Downgrading formats newer than `2.20`.
-- Replacing existing semantic validators with XSD validation.
-- Treating the runtime 8.3.27.2074 schema set as a universal contract for all patches, configurations, and document families.
-- Implementing the full XDTO/XSD service proposed by issue #126.
+- Supporting more than one platform or export-format profile now.
+- Automatically migrating source as a side effect of any operation.
+- Providing a native migration endpoint in the current public MCP contract.
+- Rewriting only a root `version` attribute as a migration technique.
+- Downgrading a format newer than `2.20`.
+- Replacing semantic validators with raw XSD validation.
+- Treating the runtime 8.3.27.2074 schema archive as universal.
+- Implementing the complete XDTO/XSD service proposed by issue #126.
 
 ## Supported profile
 
-Unica has one active `FormatProfile`:
-
-| Property | Value |
+| Property | Current value |
 | --- | --- |
 | Platform line | `8.3.27` |
 | Configuration export format | `2.20` |
-| Runtime schema provenance used by the current research | `8.3.27.2074` |
+| Exact runtime build used by current platform proofs | `8.3.27.2074` |
 
-The exact patch build is recorded in runtime and schema provenance. It is not used to contradict the official line-wide mapping `8.3.27 -> 2.20`.
+`ACTIVE_FORMAT_PROFILE` owns the platform line and export format. Writers and
+validators do not maintain local version allowlists.
 
 ## Compatibility classification
 
-The format is determined from the root file of the configuration or extension dump. Legitimate subordinate XML files are not required to carry a `version` attribute.
+The effective version comes from the version-owning XML file for the selected
+source set or standalone artifact. A legitimate subordinate XML document may
+be versionless and inherit the source-set owner's format.
 
-| Source format | Classification | Modifying tools | Read-only tools | Migration offer |
+| Source format | Classification | Modifying tools | Read-only tools | User remediation |
 | --- | --- | --- | --- | --- |
-| missing on a root where absence denotes `1.0`, or `< 2.20` | `older` | warn and stop before the first write | continue with warning | yes |
-| `2.20` | `supported` | continue | continue | no |
-| `> 2.20` | `newer` | warn and stop before the first write | continue with warning | no downgrade |
-| malformed or not classifiable | `invalid` | error and stop | continue only as far as safe parsing permits | no |
-
-The central guard, not individual tools, owns this classification.
+| missing on a version-owning root, or `< 2.20` | `older` | stop before write | continue where parsing is safe, with warning | explicitly load and re-export with 1C 8.3.27 tooling |
+| `2.20` | `supported` | continue | continue | none |
+| `> 2.20` | `newer` | stop before write | continue where parsing is safe, with warning | no downgrade; wait for a supported newer profile |
+| malformed, unreadable, or ambiguous | `invalid` | stop before write | continue only as far as safe parsing permits | correct the source/owner selection |
 
 ## Architecture
 
-### Format profile
+### Central profile and owner resolution
 
-A single application-level format-profile component owns the supported platform line, export format, comparison rules, diagnostic codes, and user-facing messages. Writers and validators must not maintain independent allowlists such as `2.17 | 2.20 | 2.21`.
+The domain classifier compares numeric version components and treats a missing
+owner version as `1.0`. One source-set-aware owner resolver is shared by the
+application guard and native writers:
 
-The component is intentionally shaped so a future implementation can resolve a profile by platform and document family, but this iteration exposes only the fixed `8.3.27 / 2.20` profile.
+- CF and CFE use their source-set `Configuration.xml`;
+- EPF and ERF use the top-level sibling artifact descriptor;
+- recognized standalone version-owning roots own their version;
+- versionless DCS, MXL, and ClientApplicationInterface documents inherit a
+  resolved same-case source-set owner where applicable;
+- owner lookup is normalized and stops at the configured source-set/workspace
+  boundary rather than scanning to filesystem root.
+
+Missing, malformed, unreadable, wrong-QName, or ambiguous owners are structured
+`formatVersionInvalid` failures.
 
 ### Preflight guard
 
-Every public modifying tool calls the same preflight guard before constructing a write plan. The guard:
+Every public modifying platform-XML workflow declares an effective path policy.
+The guard resolves handler aliases, default target paths, and multi-input paths
+before the native handler or support guard runs. It blocks an incompatible
+owner before directory creation, temporary output, platform mutation, or file
+write. New CF, EPF, and ERF scaffolds use the active profile; CFE initialization
+also guards an optional base configuration.
 
-1. resolves the configuration or extension root;
-2. reads and classifies its export format;
-3. returns structured compatibility information;
-4. either authorizes planning or returns a no-write diagnostic.
+Read-only `info`, `validate`, `diff`, and decompile workflows receive the same
+classification as a warning and continue where their own parser can proceed.
+The incompatibility is returned separately from XML syntax or semantic errors.
 
-The guard runs before temporary output, support locks, platform calls that mutate an infobase, or filesystem writes. Batch operations perform preflight for their full input set before modifying any item.
+### Manual migration boundary
 
-### Read-only behavior
+Unica currently has no public native format-migration operation and never
+starts migration automatically. For an older source, the warning recommends an
+explicit operator action using 1C:Enterprise 8.3.27 tooling: load the source and
+re-export it, then retry the Unica mutation against the resulting `2.20` tree.
 
-`info` and `validate` operations retain their current structural and semantic analysis when it is safe. Their result includes the format mismatch as a distinct compatibility diagnostic; a format mismatch is not misreported as an XML syntax error.
+The machine-readable code `formatMigrationAvailable` means that an explicit
+manual remediation exists. It does not identify or imply a callable Unica tool.
 
-### Explicit migration
-
-Migration is exposed as two separately invoked public operations: `unica.cf.migrate_format` for configuration dumps and `unica.cfe.migrate_format` for extension dumps. A warning from another tool may recommend the matching operation, but must not invoke it automatically. Migration starts only after an explicit user tool call.
-
-For a source format older than `2.20`, migration uses the 8.3.27 platform as the transformer:
-
-1. complete a read-only preflight;
-2. create a disposable infobase and isolated staging directory;
-3. load the source dump with platform 8.3.27;
-4. dump the configuration or extension from the same platform into staging, producing `2.20`;
-5. run format, structural, semantic, and applicable XSD checks;
-6. load the staged result once more with platform 8.3.27;
-7. present or record the migration result and replace the source tree only within the explicitly requested migration operation.
-
-Plain replacement of the XML `version` attribute is forbidden because format revisions can change document structure and values.
-
-The migration must not attempt a downgrade from a format newer than `2.20`.
-
-### Transaction boundary
-
-No failed compatibility check or migration leaves a partially rewritten dump. Migration builds and verifies a complete staged tree first. Replacement uses a recoverable backup/rename protocol with rollback on failure. The implementation plan must specify the exact cross-platform filesystem protocol and its recovery tests.
-
-## Diagnostics
-
-Compatibility results contain at least:
-
-- `actualFormat`;
-- `targetFormat: "2.20"`;
-- `targetPlatform: "8.3.27"`;
-- `compatibility`: `supported`, `older`, `newer`, or `invalid`;
-- the dump root path;
-- one machine-readable diagnostic code.
-
-Required codes:
-
-- `formatVersionMismatch` for the common incompatibility envelope;
-- `formatMigrationAvailable` for an older source;
-- `platformVersionUnsupported` for a newer source;
-- `formatVersionInvalid` when the root cannot be classified.
-
-For a format newer than `2.20`, the user-facing text is:
+A source newer than `2.20` is never downgraded. The current user-facing text is:
 
 > Формат выгрузки `{actual}` новее поддерживаемого `2.20` для платформы 1С 8.3.27. Unica пока не поддерживает работу с этой выгрузкой. Поддержка платформы 1С 8.5 планируется в ближайших версиях.
 
-This message does not claim that the source was produced specifically by 8.5; the detected fact is only that its export format is newer than the 8.3.27 contract.
+This text does not infer that the source was created specifically by 8.5; only
+the export format is known to be newer than the 8.3.27 contract.
 
-Diagnostics and migration provenance must not expose credentials, connection strings, infobase identifiers, or unrelated local paths.
+## Diagnostics
 
-## Deviation inventory
+Compatibility diagnostics include:
 
-Before changing writers, implementation records a reviewed matrix with these columns:
+- `actualFormat` when it can be parsed;
+- `targetFormat: "2.20"`;
+- `targetPlatform: "8.3.27"`;
+- `compatibility`: `supported`, `older`, `newer`, or `invalid`;
+- the resolved owner path and owner kind;
+- one machine-readable code.
 
-- public tool and native operation;
-- document family and root;
-- current emitted or accepted namespace/version;
-- 8.3.27 contract;
-- evidence source: official guide, exact-build XSD, EDT schema, real platform export, or platform roundtrip;
-- required correction;
-- regression test.
+Current codes are:
 
-The initial confirmed candidates are:
+- `formatMigrationAvailable` for an older source and manual platform re-export;
+- `platformVersionUnsupported` for a newer source;
+- `formatVersionInvalid` for an owner that cannot be classified.
 
-1. the shared format detector falls back to `2.17`;
-2. the HomePage writer hard-codes `2.17`;
-3. CF/CFE validators accept `2.21`, while meta/form validators have different allowlists;
-4. `template.add` emits a spreadsheet namespace different from real MXL output;
-5. `ExchangePlanContent` differs between current code and specification.
+Diagnostics must not expose credentials, connection strings, infobase
+identifiers, or unrelated local paths.
 
-These are candidates, not permission to fix by textual substitution. Each correction requires document-family evidence. If code, tests, prose, and schema disagree, code and platform roundtrip evidence take precedence according to repository policy; the contradiction must be recorded rather than hidden.
+## Writer and document-family contract
+
+All newly generated version-bearing XML roots use the active `2.20` profile.
+This is an implementation invariant, not a claim that every emitted document
+family has completed a real-platform canonical roundtrip.
+
+Current real-platform proofs are narrower and explicit:
+
+- empty MXL uses the platform-produced direct sentinel sequence
+  `languageSettings, columns, rowsItem, templateMode, vgRows`;
+- ExchangePlan `Content.xml` uses the proven `xcf/extrnprops`
+  `ExchangePlanContent` QName with `xr`, `xs`, and `xsi` declarations;
+- `unica.cf.init` emits a fresh non-nil Configuration UUID, defaults the 8.3.27
+  compatibility properties, includes `TextToSpeech=false`, and is semantically
+  stable across two 8.3.27.2074 import/check/export cycles;
+- ClientApplicationInterface remains versionless and inherits `2.20` from the
+  same-case Configuration owner.
+
+Managed Form, DCS, and MXL consumers now enforce their exact proven root QNames.
+Form QName text must resolve through in-scope namespace bindings. These
+structural fixes do not by themselves prove every writer branch to be
+platform-canonical; the remaining corpus and roundtrip work is recorded in the
+deviation matrix.
 
 ## Validation authority
 
 Validation is layered:
 
 1. XML well-formedness;
-2. central export-format compatibility;
+2. central owner and export-format compatibility;
 3. existing Unica structural and semantic validation;
-4. XSD validation only for a compatibility-tested schema profile and document family;
-5. platform 8.3.27 load/roundtrip as the final compatibility proof for generated or migrated artifacts.
+4. XSD only for a compatibility-tested schema profile and document family;
+5. platform 8.3.27 load/roundtrip as final proof for generated artifacts.
 
-XSD failure remains separately attributed. The known runtime schema limitations from issue #126 prevent raw XSD results from silently replacing semantic validation or platform verification.
+XSD failures retain their provenance. Known raw-schema limitations must not be
+used to rewrite platform-valid XML.
 
-## Test strategy
+## Verification strategy
 
-### Guard tests
+### Guard and writer tests
 
-Use roots representing:
+- classify missing, older, supported, newer, and malformed owner versions;
+- prove mutation is blocked before handler/write and bytes remain unchanged;
+- prove read-only path aliases retain warnings and continue;
+- prove every mutating platform-XML descriptor has an effective owner path;
+- prove every generated version-owning root uses `2.20`.
 
-- missing version interpreted as `1.0`;
-- `2.17`;
-- `2.19`;
-- `2.20`;
-- `2.21`;
-- malformed version;
-- a legitimate subordinate XML without a version attribute.
+### Document-family tests
 
-For every modifying tool family, prove that unsupported input returns the shared diagnostic and leaves all files byte-identical. Prove that `2.20` reaches the existing operation.
+- compare proven MXL and ExchangePlan output with normalized platform fixtures;
+- reject wrong MXL, Form, and DCS root QNames before output or mutation;
+- validate Form QName prefix bindings and atomically repair emitted bindings;
+- retain existing semantic regression suites.
 
-### Writer tests
+### Platform checkpoints
 
-Every generated versioned root must use `2.20`. Namespace and structure fixtures must be taken from verified 8.3.27 output or a compatibility-tested schema. Tests that currently encode an older or newer default are migrated deliberately and reviewed by family.
+- retain exact platform build, commands, exit codes, and hashes for evidence;
+- distinguish a code/test contract from a completed platform roundtrip;
+- use the exhaustive public-tool XML corpus and platform gate to close remaining
+  writer-family canonicalization evidence.
 
-### Migration tests
-
-Cover:
-
-- explicit invocation requirement;
-- migration from no explicit version and representative older versions;
-- refusal of `2.21` and newer;
-- platform absence, wrong platform line, license failure, timeout, load failure, dump failure, and validation failure;
-- no source mutation before staged verification;
-- rollback after replacement failure;
-- successful staged and final loads on 8.3.27;
-- provenance containing the exact platform build without secrets.
-
-### Corpus and regression tests
-
-Run current real fixtures through the deviation matrix. XSD-incompatible families stay advisory until their schema profile is proven on the corpus. The repository test suite and package-contract tests remain required.
-
-## Documentation changes
-
-Public skill and reference prose must state:
-
-- Unica currently writes only platform 8.3.27 export format `2.20`;
-- older sources are read-only until the user explicitly requests migration;
-- newer sources are unsupported and are not downgraded;
-- read-only diagnostics remain available where safe;
-- support for multiple profiles is future work.
-
-Prompt-visible skills continue to use only public `unica.*` MCP tools.
+There are no native migration orchestration, staging-publication, migration
+receipt, or migration provenance tests in the current scope because that
+feature does not exist.
 
 ## Acceptance criteria
 
-- One central profile defines `8.3.27 / 2.20`; no modifying tool has an independent version allowlist.
-- Every modifying operation preflights before its first write.
-- Older formats produce a structured warning, no mutation, and an explicit migration recommendation.
-- Newer formats produce `platformVersionUnsupported`, the agreed 8.5 roadmap text, no mutation, and no downgrade recommendation.
-- Read-only tools report incompatibility separately and continue where safe.
-- Migration is never automatic and can start only through an explicit public operation.
-- Configuration and extension migration use `unica.cf.migrate_format` and `unica.cfe.migrate_format`, respectively.
-- Migration uses platform 8.3.27 and verified staging rather than attribute replacement.
-- Writers produce `2.20` and corrected document-family namespaces/structures backed by evidence.
-- The deviation matrix covers every current XML writer and validator in scope.
-- Platform roundtrip verifies generated and migrated configuration artifacts.
-- No credentials or connection details appear in diagnostics or provenance.
+- One central profile defines `8.3.27 / 2.20`.
+- Every modifying platform-XML operation resolves its effective owner before
+  the first write, or is an explicit new-dump operation using `2.20`.
+- Older formats produce a warning and no mutation, with a manual 1C 8.3.27
+  load/re-export recommendation and no invented public tool name.
+- Newer formats produce `platformVersionUnsupported`, the agreed 8.5 roadmap
+  text, no mutation, and no downgrade recommendation.
+- Read-only operations report incompatibility separately and continue where
+  safe.
+- Writers use `2.20`; platform-canonical claims are made only for families with
+  recorded real-platform evidence.
+- MXL, ExchangePlanContent, Form, DCS, and `cf.init` corrections are locked by
+  their focused regressions and platform evidence.
+- No automatic or native migration is exposed.
 
-## Future extension
+## Deferred future work
 
-Adding 1C:Enterprise 8.5 or another platform line will add a new `FormatProfile` and document-family compatibility evidence. It must not weaken the `8.3.27 / 2.20` behavior or infer platform versions solely from XML format numbers.
+Multiple profiles, including a future 1C 8.5 profile, require new per-family
+evidence and must not weaken the `8.3.27 / 2.20` behavior. A native migration
+workflow, if later approved, needs its own public API design, platform-selection
+policy, transaction/recovery model, security review, and tests. It is not an
+unfinished part of this implementation.
