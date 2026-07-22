@@ -225,6 +225,43 @@ git -c commit.gpgsign=false commit -m "fix: emit group left margin setting"
 
 ---
 
+### Task 3b: Reconcile documented input and table-column properties
+
+**Files:**
+- Modify: `crates/unica-coder/src/infrastructure/native_operations/form.rs`
+
+**Interfaces:**
+- Explicit input `choiceButton: true|false` emits the matching
+  `<ChoiceButton>` value.
+- Explicit input/column `showInHeader: true|false` emits `<ShowInHeader>`.
+- Input/column `horizontalAlign` and `headerHorizontalAlign` emit their named
+  XML tags after field-specific properties and before `InputHint`/companions.
+
+- [ ] **Step 1: Add a failing Rust regression test**
+
+Compile the exact prompt-visible input examples and assert all four properties,
+both choice-button boolean values, XML escaping, and schema-consistent order.
+Run the exact test and confirm RED on the currently dropped values.
+
+- [ ] **Step 2: Implement the narrow emitter support**
+
+Change `choiceButton` from false-only to explicit-boolean emission and add the
+three documented column/layout properties without broad generic-scalar scope.
+
+- [ ] **Step 3: Verify and commit**
+
+```bash
+cargo test -p unica-coder \
+  infrastructure::native_operations::form::tests::form_compile_emits_documented_input_column_properties \
+  -- --exact --nocapture
+cargo test -p unica-coder infrastructure::native_operations::form -- --nocapture
+cargo fmt --check
+git add crates/unica-coder/src/infrastructure/native_operations/form.rs
+git -c commit.gpgsign=false commit -m "fix: emit documented input column properties"
+```
+
+---
+
 ### Task 4: Preserve the merge base in PR change classification
 
 **Files:**
