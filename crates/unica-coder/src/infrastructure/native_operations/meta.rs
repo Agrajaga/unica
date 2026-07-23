@@ -1601,10 +1601,93 @@ mod edit_tests {
         stdout
     }
 
+    fn localized_text(items: &[(&str, &str)]) -> String {
+        items
+            .iter()
+            .map(|(language, content)| {
+                format!(
+                    "<v8:item><v8:lang>{language}</v8:lang><v8:content>{content}</v8:content></v8:item>"
+                )
+            })
+            .collect::<String>()
+    }
+
+    fn write_language_fixture(context: &WorkspaceContext, name: &str, code: &str) {
+        write_file(
+            &context.cwd.join("Languages").join(format!("{name}.xml")),
+            &format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+  <Language uuid="22222222-2222-4222-8222-222222222222">
+    <Properties>
+      <Name>{name}</Name>
+      <Synonym/>
+      <Comment/>
+      <LanguageCode>{code}</LanguageCode>
+    </Properties>
+  </Language>
+</MetaDataObject>
+"#
+            ),
+        );
+    }
+
+    fn validate_stdout_with_presentations(
+        test_name: &str,
+        synonym_items: &[(&str, &str)],
+        list_presentation_items: &[(&str, &str)],
+        configured_languages: &[(&str, &str)],
+    ) -> String {
+        let context = temp_context(test_name);
+        let object_path = context.cwd.join("Documents").join("SampleShipment.xml");
+        let synonym = format!("<Synonym>{}</Synonym>", localized_text(synonym_items));
+        let list_presentation = format!(
+            "<ListPresentation>{}</ListPresentation>",
+            localized_text(list_presentation_items)
+        );
+        let xml = sample_document_xml("<RegisterRecords/>")
+            .replace("<Synonym/>", &synonym)
+            .replace("<Comment/>", &format!("<Comment/>{list_presentation}"));
+        write_file(&object_path, &xml);
+
+        if !configured_languages.is_empty() {
+            let language_children = configured_languages
+                .iter()
+                .map(|(name, _)| format!("<Language>{name}</Language>"))
+                .collect::<String>();
+            write_file(
+                &context.cwd.join("Configuration.xml"),
+                &format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+  <Configuration uuid="33333333-3333-4333-8333-333333333333">
+    <Properties><Name>TestConfiguration</Name></Properties>
+    <ChildObjects>{language_children}</ChildObjects>
+  </Configuration>
+</MetaDataObject>
+"#
+                ),
+            );
+            for (name, code) in configured_languages {
+                write_language_fixture(&context, name, code);
+            }
+        }
+
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "ObjectPath".to_string(),
+            json!(object_path.to_string_lossy().to_string()),
+        );
+        let stdout = validate_meta(&args, &context).stdout.unwrap_or_default();
+
+        let _ = fs::remove_dir_all(&context.cwd);
+        stdout
+    }
+
     #[test]
-    fn validate_meta_warns_on_empty_synonym() {
+    fn validate_meta_allows_self_closing_synonym() {
         let stdout = validate_stdout_with_synonym("validate-empty-synonym", "<Synonym/>");
-        assert!(stdout.contains("Synonym is empty"), "{stdout}");
+        assert!(!stdout.contains("Synonym is empty"), "{stdout}");
     }
 
     #[test]
@@ -1620,6 +1703,65 @@ mod edit_tests {
         let synonym = "<Synonym><v8:item><v8:lang>ru</v8:lang><v8:content>Очень длинное наименование для командного интерфейса</v8:content></v8:item></Synonym>";
         let stdout = validate_stdout_with_synonym("validate-long-synonym", synonym);
         assert!(stdout.contains("longer than 38 characters"), "{stdout}");
+    }
+
+    #[test]
+    fn validate_meta_allows_empty_synonym() {
+        let stdout = validate_stdout_with_synonym(
+            "validate-empty-synonym-is-allowed",
+            "<Synonym><v8:item><v8:lang>en</v8:lang><v8:content/></v8:item></Synonym>",
+        );
+        assert!(!stdout.contains("Synonym is empty"), "{stdout}");
+    }
+
+    #[test]
+    fn validate_meta_checks_every_configured_language() {
+        let stdout = validate_stdout_with_presentations(
+            "validate-every-configured-language",
+            &[
+                ("ru", "Отгрузка"),
+                (
+                    "en",
+                    "A very long shipment title intended for the command interface",
+                ),
+            ],
+            &[],
+            &[("Русский", "ru"), ("English", "en")],
+        );
+        assert!(stdout.contains("language 'en'"), "{stdout}");
+        assert!(stdout.contains("longer than 38 characters"), "{stdout}");
+    }
+
+    #[test]
+    fn validate_meta_prefers_list_presentation_per_language() {
+        let stdout = validate_stdout_with_presentations(
+            "validate-list-presentation-per-language",
+            &[
+                ("ru", "Очень длинное наименование для командного интерфейса"),
+                ("en", "Shipment"),
+            ],
+            &[("ru", "Отгрузки")],
+            &[("Русский", "ru"), ("English", "en")],
+        );
+        assert!(!stdout.contains("language 'ru'"), "{stdout}");
+        assert!(!stdout.contains("longer than 38 characters"), "{stdout}");
+    }
+
+    #[test]
+    fn validate_meta_ignores_unconfigured_translation() {
+        let stdout = validate_stdout_with_presentations(
+            "validate-ignore-unconfigured-language",
+            &[
+                (
+                    "en",
+                    "A very long shipment title intended for the command interface",
+                ),
+                ("ru", "Отгрузка"),
+            ],
+            &[],
+            &[("Русский", "ru")],
+        );
+        assert!(!stdout.contains("longer than 38 characters"), "{stdout}");
     }
 
     #[test]
@@ -2162,7 +2304,14 @@ pub(crate) fn meta_validate_one(
             resolved_path,
         );
     }
-    meta_validate_check_properties(&mut report, props_node, name_node, &obj_name);
+    let language_codes = meta_validate_language_codes(config_dir.as_deref());
+    meta_validate_check_properties(
+        &mut report,
+        props_node,
+        name_node,
+        &obj_name,
+        &language_codes,
+    );
     if report.stopped {
         return meta_validate_finish(
             report,
@@ -2328,6 +2477,74 @@ pub(crate) fn meta_validate_config_dir(resolved_path: &Path) -> Option<PathBuf> 
     None
 }
 
+pub(crate) fn meta_validate_language_codes(config_dir: Option<&Path>) -> Vec<String> {
+    let Some(config_dir) = config_dir else {
+        return Vec::new();
+    };
+    let Ok(configuration_text) = fs::read_to_string(config_dir.join("Configuration.xml")) else {
+        return Vec::new();
+    };
+    let Ok(configuration_doc) = Document::parse(configuration_text.trim_start_matches('\u{feff}'))
+    else {
+        return Vec::new();
+    };
+    let configuration_root = configuration_doc.root_element();
+    let Some(configuration) = meta_info_child(configuration_root, "Configuration") else {
+        return Vec::new();
+    };
+    let Some(child_objects) = meta_info_child(configuration, "ChildObjects") else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    let mut language_codes = Vec::new();
+    for language_name in meta_info_children(child_objects, "Language")
+        .into_iter()
+        .map(meta_info_inner_text)
+        .filter(|name| !name.trim().is_empty())
+    {
+        let language_path = config_dir
+            .join("Languages")
+            .join(format!("{language_name}.xml"));
+        let Ok(language_text) = fs::read_to_string(language_path) else {
+            continue;
+        };
+        let Ok(language_doc) = Document::parse(language_text.trim_start_matches('\u{feff}')) else {
+            continue;
+        };
+        let language_root = language_doc.root_element();
+        let Some(language) = meta_info_child(language_root, "Language") else {
+            continue;
+        };
+        let language_code = meta_info_child(language, "Properties")
+            .and_then(|properties| meta_info_child_text(properties, "LanguageCode"))
+            .unwrap_or_default();
+        let language_code = language_code.trim();
+        if !language_code.is_empty() && seen.insert(language_code.to_string()) {
+            language_codes.push(language_code.to_string());
+        }
+    }
+    language_codes
+}
+
+pub(crate) fn meta_validate_localized_values(
+    node: Option<roxmltree::Node<'_, '_>>,
+) -> Vec<(Option<String>, String)> {
+    let Some(node) = node else {
+        return Vec::new();
+    };
+    meta_info_children(node, "item")
+        .into_iter()
+        .filter_map(|item| {
+            let language = meta_info_child_text(item, "lang")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            let text = meta_info_child_text(item, "content").unwrap_or_default();
+            (!text.trim().is_empty()).then_some((language, text))
+        })
+        .collect()
+}
+
 pub(crate) fn meta_validate_check_internal_info(
     report: &mut MetaValidationReporter,
     md_type: &str,
@@ -2437,6 +2654,7 @@ pub(crate) fn meta_validate_check_properties(
     props_node: Option<roxmltree::Node<'_, '_>>,
     name_node: Option<roxmltree::Node<'_, '_>>,
     obj_name: &str,
+    configured_language_codes: &[String],
 ) {
     let Some(props_node) = props_node else {
         report.error("3. Properties block missing");
@@ -2460,19 +2678,64 @@ pub(crate) fn meta_validate_check_properties(
             ));
         }
     }
-    let syn_text = meta_info_child(props_node, "Synonym")
-        .and_then(|node| meta_info_child(node, "item"))
-        .and_then(|node| meta_info_child(node, "content"))
-        .map(meta_info_inner_text)
-        .unwrap_or_default();
-    let syn_present = !syn_text.is_empty();
-    if !syn_present {
-        report.warn("3. Properties: Synonym is empty (fill it in, v8std 474)");
-    } else if syn_text.chars().count() > 38 {
-        report.warn(format!(
-            "3. Properties: Synonym '{syn_text}' is longer than 38 characters ({}) for the command interface",
-            syn_text.chars().count()
-        ));
+    let synonym_values = meta_validate_localized_values(meta_info_child(props_node, "Synonym"));
+    let list_presentation_values =
+        meta_validate_localized_values(meta_info_child(props_node, "ListPresentation"));
+    let syn_present = !synonym_values.is_empty();
+
+    let mut language_codes = configured_language_codes.to_vec();
+    if language_codes.is_empty() {
+        let mut seen = HashSet::new();
+        for language in list_presentation_values
+            .iter()
+            .chain(&synonym_values)
+            .filter_map(|(language, _)| language.as_ref())
+        {
+            if seen.insert(language.clone()) {
+                language_codes.push(language.clone());
+            }
+        }
+    }
+
+    if language_codes.is_empty() {
+        if list_presentation_values.is_empty() {
+            for (_, text) in &synonym_values {
+                meta_validate_warn_long_command_text(report, "Synonym", text, None);
+            }
+        } else {
+            for (_, text) in &list_presentation_values {
+                meta_validate_warn_long_command_text(report, "ListPresentation", text, None);
+            }
+        }
+    } else {
+        for language_code in &language_codes {
+            let list_values = list_presentation_values
+                .iter()
+                .filter(|(language, _)| language.as_deref() == Some(language_code.as_str()))
+                .collect::<Vec<_>>();
+            if list_values.is_empty() {
+                for (_, text) in synonym_values
+                    .iter()
+                    .filter(|(language, _)| language.as_deref() == Some(language_code.as_str()))
+                {
+                    meta_validate_warn_long_command_text(
+                        report,
+                        "Synonym",
+                        text,
+                        Some(language_code),
+                    );
+                }
+            } else {
+                for (_, text) in list_values {
+                    meta_validate_warn_long_command_text(
+                        report,
+                        "ListPresentation",
+                        text,
+                        Some(language_code),
+                    );
+                }
+            }
+        }
     }
     if check_ok {
         let syn_info = if syn_present {
@@ -2482,6 +2745,24 @@ pub(crate) fn meta_validate_check_properties(
         };
         report.ok(format!("3. Properties: Name=\"{obj_name}\", {syn_info}"));
     }
+}
+
+fn meta_validate_warn_long_command_text(
+    report: &mut MetaValidationReporter,
+    source: &str,
+    text: &str,
+    language: Option<&String>,
+) {
+    let length = text.chars().count();
+    if length <= 38 {
+        return;
+    }
+    let language_suffix = language
+        .map(|language| format!(", language '{language}'"))
+        .unwrap_or_default();
+    report.warn(format!(
+        "3. Properties: {source} '{text}' is longer than 38 characters ({length}) for the command interface{language_suffix}"
+    ));
 }
 
 pub(crate) fn meta_validate_check_property_values(
