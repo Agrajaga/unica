@@ -694,6 +694,15 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertIn('"sourceSet": "external-reports"', text)
         self.assertIn('"output": "build/external"', text)
 
+    def test_v8_runner_documents_c_parameter_for_bounded_external_epf(self) -> None:
+        skill_doc = self.skill_root() / "v8-runner" / "SKILL.md"
+        text = skill_doc.read_text(encoding="utf-8")
+
+        self.assertIn('"waitForExit": true', text)
+        self.assertIn('"c": "StartFeaturePlayer;', text)
+        self.assertIn("типизированное поле `c`", text)
+        self.assertIn("не через `rawKeys`", text)
+
     def test_v8_runner_metadata_describes_runtime_trigger_surface(self) -> None:
         skill_doc = self.skill_root() / "v8-runner" / "SKILL.md"
         text = skill_doc.read_text(encoding="utf-8")

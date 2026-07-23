@@ -15,7 +15,7 @@ Use MCP `unica.runtime.execute` and choose `operation` by intent:
 | Syntax check | `operation=syntax`, required `mode`, optional Designer flags or EDT `projects` |
 | Tests | `operation=test`, required `testRunner`, optional YaXUnit `testScope`/`module`, `fullOutput`, VA filters |
 | Client launch | `operation=launch`, required `clientMode`, optional MCP or direct launch flags |
-| Bounded external EPF | `operation=launch`, `clientMode=thin`, required `execute`, `output`, `stderrOutput`, `waitForExit=true`, `waitTimeoutMs` |
+| Bounded external EPF | `operation=launch`, `clientMode=thin`, required `execute`, `output`, `stderrOutput`, `waitForExit=true`, `waitTimeoutMs`; optional processing command in typed `c` |
 | Extension properties | `operation=extensions`, optional `sourceSet` or `sourceSets` |
 | Download runner tools | `operation=tools-download`, required `tool`, optional `sources`, `force` |
 
@@ -30,4 +30,5 @@ Operation-specific guardrails:
 - `load` does not support `mode=update`; use `mode=load` or `mode=merge` with `settings`.
 - `test` uses `fullOutput=true` for v8-runner `--full`; it is not a build full rebuild.
 - Bounded external EPF launch requires distinct stdout/stderr paths and rejects `/C`, `/Execute`, and `/Out` aliases in `rawKeys`; ordinary launch remains asynchronous.
+- Put the external processor command-line payload in typed `c` (mapped to `/C`), not in `rawKeys`; Vanessa Automation commonly uses `StartFeaturePlayer;VAParams=<path>`.
 - `tools-download` supports `sources=true` only for `tool=yaxunit` or `tool=client-mcp`.
