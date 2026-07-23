@@ -427,7 +427,7 @@ fn update_falls_back_to_one_build_after_stale_content() {
     fs::create_dir_all(db_path.parent().unwrap()).unwrap();
     fs::write(&db_path, "").unwrap();
     let mut job = test_background_job(&context, "update");
-    job.recovery_build = Some(job.primary.clone());
+    job.recovery_build = Some(inert_index_command(&context, "build"));
     let mut outputs = vec![
         IndexOutput::success("Updated in 0.1s"),
         IndexOutput::success(
@@ -473,7 +473,7 @@ fn update_falls_back_to_one_build_after_stale_content() {
 fn failed_recovery_preserves_stale_content_cause() {
     let context = test_context("stale-content-recovery-failed");
     let mut job = test_background_job(&context, "update");
-    job.recovery_build = Some(job.primary.clone());
+    job.recovery_build = Some(inert_index_command(&context, "build"));
     let mut outputs = vec![
         IndexOutput::success("Updated in 0.1s"),
         IndexOutput::success(
@@ -507,7 +507,7 @@ fn failed_recovery_preserves_stale_content_cause() {
 fn recovery_does_not_recurse_when_final_info_is_stale() {
     let context = test_context("stale-content-recovery-terminal");
     let mut job = test_background_job(&context, "update");
-    job.recovery_build = Some(job.primary.clone());
+    job.recovery_build = Some(inert_index_command(&context, "build"));
     let mut outputs = vec![
         IndexOutput::success("Updated in 0.1s"),
         IndexOutput::success(
@@ -774,8 +774,12 @@ where
                     );
                 }
                 other => {
+                    let final_status = other
+                        .stale_status()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("{other:?}"));
                     let message = format!(
-                        "rlm index update finished but info is stale (content); recovery build finished but info is still {other:?}"
+                        "rlm index update finished but info is stale (content); recovery build finished but info is still {final_status}"
                     );
                     let _ = write_status_path(
                         &job.status_path,
