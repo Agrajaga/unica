@@ -261,6 +261,7 @@ const RUNTIME_ARGS: &[&str] = &[
     "distributiveModules",
     "emptyHandlers",
     "execute",
+    "stderrOutput",
     "extension",
     "externalConnection",
     "externalConnectionServer",
@@ -305,6 +306,8 @@ const RUNTIME_ARGS: &[&str] = &[
     "unsupportedFunctional",
     "unreferenceProcedures",
     "usePrivilegedMode",
+    "waitForExit",
+    "waitTimeoutMs",
     "webClient",
     "workdir",
 ];
@@ -331,6 +334,7 @@ const RUNTIME_STRING_ARGS: &[&str] = &[
     "config",
     "connection",
     "execute",
+    "stderrOutput",
     "extension",
     "format",
     "mcpConfig",
@@ -466,6 +470,9 @@ const RUNTIME_LAUNCH_OPERATION_ARGS: &[&str] = &[
     "execute",
     "usePrivilegedMode",
     "output",
+    "stderrOutput",
+    "waitForExit",
+    "waitTimeoutMs",
     "rawKeys",
 ];
 const RUNTIME_EXTENSIONS_OPERATION_ARGS: &[&str] =
@@ -1355,13 +1362,17 @@ fn runtime_required_args(tool: &ToolSpec) -> Vec<&'static str> {
     vec!["operation"]
 }
 
-fn runtime_job_args(action: RuntimeJobAction) -> &'static [&'static str] {
+fn runtime_job_args(action: RuntimeJobAction) -> Vec<&'static str> {
     match action {
-        RuntimeJobAction::Start => RUNTIME_ARGS,
-        RuntimeJobAction::Status | RuntimeJobAction::Cancel => RUNTIME_JOB_STATUS_ARGS,
-        RuntimeJobAction::Wait => RUNTIME_JOB_WAIT_ARGS,
-        RuntimeJobAction::Logs => RUNTIME_JOB_LOGS_ARGS,
-        RuntimeJobAction::List => &[],
+        RuntimeJobAction::Start => RUNTIME_ARGS
+            .iter()
+            .copied()
+            .filter(|name| !matches!(*name, "waitForExit" | "waitTimeoutMs" | "stderrOutput"))
+            .collect(),
+        RuntimeJobAction::Status | RuntimeJobAction::Cancel => RUNTIME_JOB_STATUS_ARGS.to_vec(),
+        RuntimeJobAction::Wait => RUNTIME_JOB_WAIT_ARGS.to_vec(),
+        RuntimeJobAction::Logs => RUNTIME_JOB_LOGS_ARGS.to_vec(),
+        RuntimeJobAction::List => Vec::new(),
     }
 }
 
@@ -1377,6 +1388,14 @@ fn runtime_job_required_args(action: RuntimeJobAction) -> Vec<&'static str> {
 }
 
 fn property_schema(name: &str) -> Value {
+    if name == "waitTimeoutMs" {
+        return json!({
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 86_400_000
+        });
+    }
+
     let value_type = if matches!(
         name,
         "dryRun"
@@ -1429,6 +1448,7 @@ fn property_schema(name: &str) -> Value {
             | "unsupportedFunctional"
             | "unreferenceProcedures"
             | "usePrivilegedMode"
+            | "waitForExit"
             | "webClient"
             | "includeMethods"
             | "ignoreCase"
@@ -1445,6 +1465,7 @@ fn property_schema(name: &str) -> Value {
             | "MaxParams"
             | "maxParams"
             | "mcpPort"
+            | "waitTimeoutMs"
             | "maxOutputTokens"
             | "maxFiles"
             | "rangeStart"
@@ -1645,6 +1666,7 @@ fn expected_scalar_type(key: &str) -> Option<&'static str> {
             | "unsupportedFunctional"
             | "unreferenceProcedures"
             | "usePrivilegedMode"
+            | "waitForExit"
             | "webClient"
             | "includeMethods"
             | "ignoreCase"
@@ -1661,6 +1683,7 @@ fn expected_scalar_type(key: &str) -> Option<&'static str> {
             | "MaxParams"
             | "maxParams"
             | "mcpPort"
+            | "waitTimeoutMs"
             | "maxOutputTokens"
             | "maxFiles"
             | "rangeStart"
@@ -2158,6 +2181,11 @@ mod tests {
         assert!(schema["properties"].get("timeoutMs").is_none());
         assert_eq!(schema["properties"]["fullRebuild"]["type"], "boolean");
         assert_eq!(schema["properties"]["mcpPort"]["type"], "integer");
+        assert_eq!(schema["properties"]["waitForExit"]["type"], "boolean");
+        assert_eq!(schema["properties"]["waitTimeoutMs"]["type"], "integer");
+        assert_eq!(schema["properties"]["waitTimeoutMs"]["minimum"], 1);
+        assert_eq!(schema["properties"]["waitTimeoutMs"]["maximum"], 86_400_000);
+        assert_eq!(schema["properties"]["stderrOutput"]["type"], "string");
         assert!(schema["properties"]["operation"]["enum"]
             .as_array()
             .unwrap()
@@ -2215,6 +2243,56 @@ mod tests {
         let logs_schema = input_schema_for_tool(&job_logs);
         assert_eq!(logs_schema["required"], json!(["jobId"]));
         assert_eq!(logs_schema["properties"]["tailChars"]["type"], "integer");
+    }
+
+    #[test]
+    fn runtime_job_start_excludes_bounded_external_epf_arguments() {
+        let job_start = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.runtime.job.start")
+            .expect("runtime job start is registered");
+        let schema = input_schema_for_tool(&job_start);
+
+        for name in ["waitForExit", "waitTimeoutMs", "stderrOutput"] {
+            assert!(
+                schema["properties"].get(name).is_none(),
+                "{name} must remain exclusive to synchronous runtime.execute"
+            );
+
+            let mut args = json!({
+                "operation": "launch",
+                "clientMode": "thin"
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            args.insert(
+                name.to_string(),
+                match name {
+                    "waitForExit" => json!(true),
+                    "waitTimeoutMs" => json!(30_000),
+                    "stderrOutput" => json!("build/stderr.log"),
+                    _ => unreachable!(),
+                },
+            );
+
+            let error = validate_tool_arguments(job_start, &args, false)
+                .expect_err("bounded execution arguments must be rejected by runtime jobs");
+            assert!(error.contains(&format!("does not accept argument `{name}`")));
+        }
+
+        validate_tool_arguments(
+            job_start,
+            json!({
+                "operation": "launch",
+                "clientMode": "thin",
+                "c": "StartFeaturePlayer"
+            })
+            .as_object()
+            .unwrap(),
+            false,
+        )
+        .expect("ordinary runtime job launch arguments must remain supported");
     }
 
     #[test]

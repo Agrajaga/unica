@@ -39,6 +39,7 @@ source-set path itself has no stronger structural evidence.
 | Run syntax checks | `operation=syntax`, required `mode` |
 | Run tests | `operation=test`, required `testRunner` |
 | Launch client or Designer | `operation=launch`, required `clientMode` |
+| Run external EPF and wait | `operation=launch`, `clientMode=thin`, `execute`, distinct `output`/`stderrOutput`, `waitForExit=true`, bounded `waitTimeoutMs` |
 | Sync extension properties | `operation=extensions` |
 
 Applied `mode=incremental|partial` is temporarily fail-closed because the
