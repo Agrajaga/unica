@@ -2,6 +2,7 @@
 
 use crate::application::AdapterOutcome;
 use crate::domain::workspace::WorkspaceContext;
+use crate::infrastructure::platform_xml_owner::MXL_ROOT;
 use roxmltree::Document;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::common::*;
+use super::compile_transaction::CompileTransaction;
 
 pub(crate) const MXL_DOCUMENT_NS: &str = "http://v8.1c.ru/8.2/data/spreadsheet";
 
@@ -2359,17 +2361,17 @@ impl MxlFormatRegistry {
 }
 
 pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext) -> AdapterOutcome {
-    let write_result = (|| -> Result<(String, PathBuf), String> {
+    let write_result = (|| -> Result<(String, PathBuf, Vec<String>), String> {
         let json_path_raw = required_path(args, &["jsonPath", "JsonPath"], "JsonPath")?;
         let output_path_raw = required_path(args, &["outputPath", "OutputPath"], "OutputPath")?;
         let json_path = absolutize(json_path_raw, &context.cwd);
         if !json_path.exists() {
             return Err(format!("File not found: {}", json_path.display()));
         }
-        let json_text = fs::read_to_string(&json_path)
-            .map_err(|err| format!("failed to read {}: {err}", json_path.display()))?;
-        let defn: Value = serde_json::from_str(json_text.trim_start_matches('\u{feff}'))
-            .map_err(|err| format!("failed to parse MXL JSON: {err}"))?;
+        let mut transaction = CompileTransaction::new();
+        let defn =
+            FileBackedJson::read(&json_path, |err| format!("failed to parse MXL JSON: {err}"))?
+                .bind_to(&mut transaction)?;
 
         if !truthy_json_field(&defn, "columns") {
             return Err("Required field 'columns' is missing".to_string());
@@ -2484,18 +2486,6 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
         }
 
         let mut registry = MxlFormatRegistry::new();
-        let default_key = mxl_format_key(&MxlFormatProps {
-            width: Some(default_width),
-            ..Default::default()
-        });
-        let default_format_index = registry.register(
-            default_key,
-            MxlFormatProps {
-                width: Some(default_width),
-                ..Default::default()
-            },
-        );
-
         let mut col_format_map = std::collections::BTreeMap::<i64, usize>::new();
         for (column, width) in &col_width_map {
             let props = MxlFormatProps {
@@ -2560,6 +2550,18 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
                 }
             }
         }
+
+        let default_key = mxl_format_key(&MxlFormatProps {
+            width: Some(default_width),
+            ..Default::default()
+        });
+        let default_format_index = registry.register(
+            default_key,
+            MxlFormatProps {
+                width: Some(default_width),
+                ..Default::default()
+            },
+        );
 
         let mut lines = Vec::<String>::new();
         lines.push("<?xml version=\"1.0\" encoding=\"UTF-8\"?>".to_string());
@@ -2761,8 +2763,10 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
                     if !row_has_content {
                         lines.push("\t\t\t<empty>true</empty>".to_string());
                     } else {
+                        let mut expected_col = 0;
                         for cell in &row_cells {
-                            emit_mxl_cell(&mut lines, cell);
+                            emit_mxl_cell(&mut lines, cell, expected_col);
+                            expected_col = cell.col + 1;
                         }
                     }
                     lines.push("\t\t</row>".to_string());
@@ -2804,7 +2808,10 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
         }
         for item in &named_items {
             lines.push("\t<namedItem xsi:type=\"NamedItemCells\">".to_string());
-            lines.push(format!("\t\t<name>{}</name>", item.name));
+            lines.push(format!(
+                "\t\t<name>{}</name>",
+                escape_mxl_xml_text(&item.name)
+            ));
             lines.push("\t\t<area>".to_string());
             lines.push("\t\t\t<type>Rows</type>".to_string());
             lines.push(format!("\t\t\t<beginRow>{}</beginRow>", item.begin_row));
@@ -2827,7 +2834,7 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
         for font in &font_entries {
             lines.push(format!(
                 "\t<font faceName=\"{}\" height=\"{}\" bold=\"{}\" italic=\"{}\" underline=\"{}\" strikeout=\"{}\" kind=\"Absolute\" scale=\"100\"/>",
-                font.face, font.size, font.bold, font.italic, font.underline, font.strikeout
+                escape_mxl_xml_attribute(&font.face), font.size, font.bold, font.italic, font.underline, font.strikeout
             ));
         }
         for (_, format) in &registry.entries {
@@ -2835,12 +2842,18 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
         }
         lines.push("</document>".to_string());
 
+        let xml = format!("{}\n", lines.join("\n"));
+        Document::parse(&xml).map_err(|error| format!("compiled MXL is not valid XML: {error}"))?;
         let output_path = absolutize(output_path_raw.clone(), &context.cwd);
-        if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
-        }
-        write_utf8_bom(&output_path, &format!("{}\n", lines.join("\n")))?;
+        transaction.create_or_replace_bytes(&output_path, utf8_bom_bytes(&xml))?;
+        guard_active_format_owner_with_exact_root(
+            &mut transaction,
+            &output_path,
+            context,
+            MXL_ROOT,
+        )?;
+        let report = transaction
+            .commit_with_post_validation(|| require_mxl_post_validation(&output_path, context))?;
 
         let mut stdout = format!("[OK] Compiled: {}\n", output_path_raw.display());
         if let Some(page_name) = page_name {
@@ -2860,15 +2873,15 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
         ));
         stdout.push_str(&format!("     Merges: {}\n", merges.len()));
 
-        Ok((stdout, output_path))
+        Ok((stdout, output_path, report.cleanup_warnings))
     })();
 
     match write_result {
-        Ok((stdout, output_path)) => AdapterOutcome {
+        Ok((stdout, output_path, warnings)) => AdapterOutcome {
             ok: true,
             summary: "unica.mxl.compile completed with native spreadsheet writer".to_string(),
             changes: vec![format!("updated {}", output_path.display())],
-            warnings: Vec::new(),
+            warnings,
             errors: Vec::new(),
             artifacts: vec![output_path.display().to_string()],
             stdout: Some(stdout),
@@ -2887,6 +2900,32 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
             command: None,
         },
     }
+}
+
+fn require_mxl_post_validation(
+    template_path: &Path,
+    context: &WorkspaceContext,
+) -> Result<(), String> {
+    let validation_args = Map::from_iter([(
+        "TemplatePath".to_string(),
+        Value::String(template_path.display().to_string()),
+    )]);
+    let outcome = validate_mxl(&validation_args, context);
+    if outcome.ok {
+        return Ok(());
+    }
+    let detail = if outcome.errors.is_empty() {
+        outcome
+            .stdout
+            .unwrap_or_else(|| "validation returned no diagnostics".to_string())
+    } else {
+        outcome.errors.join("; ")
+    };
+    Err(format!(
+        "MXL validation failed for {}: {}",
+        template_path.display(),
+        detail.trim()
+    ))
 }
 
 pub(crate) fn parse_mxl_column_spec(spec: &str) -> Result<Vec<i64>, String> {
@@ -3089,16 +3128,32 @@ pub(crate) struct MxlNamedItem {
     pub(crate) end_row: i64,
 }
 
-pub(crate) fn emit_mxl_cell(lines: &mut Vec<String>, cell: &MxlCellInfo) {
+fn escape_mxl_xml_text(value: &str) -> String {
+    escape_xml(value).replace('\r', "&#13;")
+}
+
+fn escape_mxl_xml_attribute(value: &str) -> String {
+    escape_mxl_xml_text(value)
+        .replace('\t', "&#9;")
+        .replace('\n', "&#10;")
+}
+
+pub(crate) fn emit_mxl_cell(lines: &mut Vec<String>, cell: &MxlCellInfo, expected_col: i64) {
     lines.push("\t\t\t<c>".to_string());
-    lines.push(format!("\t\t\t\t<i>{}</i>", cell.col));
+    if cell.col != expected_col {
+        lines.push(format!("\t\t\t\t<i>{}</i>", cell.col));
+    }
     lines.push("\t\t\t\t<c>".to_string());
     lines.push(format!("\t\t\t\t\t<f>{}</f>", cell.format_idx));
     if let Some(param) = &cell.param {
-        lines.push(format!("\t\t\t\t\t<parameter>{param}</parameter>"));
+        lines.push(format!(
+            "\t\t\t\t\t<parameter>{}</parameter>",
+            escape_mxl_xml_text(param)
+        ));
         if let Some(detail) = &cell.detail {
             lines.push(format!(
-                "\t\t\t\t\t<detailParameter>{detail}</detailParameter>"
+                "\t\t\t\t\t<detailParameter>{}</detailParameter>",
+                escape_mxl_xml_text(detail)
             ));
         }
     }
@@ -3118,7 +3173,7 @@ pub(crate) fn emit_mxl_text(lines: &mut Vec<String>, text: &str) {
     lines.push("\t\t\t\t\t\t\t<v8:lang>ru</v8:lang>".to_string());
     lines.push(format!(
         "\t\t\t\t\t\t\t<v8:content>{}</v8:content>",
-        escape_xml(text)
+        escape_mxl_xml_text(text)
     ));
     lines.push("\t\t\t\t\t\t</v8:item>".to_string());
     lines.push("\t\t\t\t\t</tl>".to_string());
@@ -3177,7 +3232,7 @@ pub(crate) fn emit_mxl_format(lines: &mut Vec<String>, format: &MxlFormatProps) 
         lines.push("\t\t\t\t<v8:lang>ru</v8:lang>".to_string());
         lines.push(format!(
             "\t\t\t\t<v8:content>{}</v8:content>",
-            escape_xml(&format.number_format)
+            escape_mxl_xml_text(&format.number_format)
         ));
         lines.push("\t\t\t</v8:item>".to_string());
         lines.push("\t\t</format>".to_string());
@@ -3215,6 +3270,10 @@ pub(crate) fn invoke_mutation(
 mod tests {
     use super::*;
     use crate::application::UnicaApplication;
+    use crate::infrastructure::native_operations::compile_transaction::{
+        with_commit_failpoint, CommitFailpoint,
+    };
+    use crate::infrastructure::native_operations::single_file_publisher::with_before_commit_hook;
 
     #[test]
     fn empty_spreadsheet_document_has_no_rows_container() {
@@ -3495,11 +3554,596 @@ mod tests {
         let _ = fs::remove_dir_all(&context.cwd);
     }
 
+    #[test]
+    fn mxl_compile_directly_rejects_existing_wrong_root_without_write() {
+        let context = test_context("compile-existing-wrong-root");
+        let definition_path = context.cwd.join("definition.json");
+        let output_path = context.cwd.join("Template.xml");
+        fs::write(
+            &definition_path,
+            serde_json::to_vec(&json!({
+                "columns": 1,
+                "areas": [{
+                    "name": "Area",
+                    "rows": [{"cells": [{"col": 1, "text": "value"}]}]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let original = b"<garbage/>".to_vec();
+        fs::write(&output_path, &original).unwrap();
+        let args = Map::from_iter([
+            ("JsonPath".to_string(), json!(definition_path)),
+            ("OutputPath".to_string(), json!(output_path)),
+        ]);
+
+        let outcome = compile_mxl(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("declared platform XML target root")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&output_path).unwrap(), original);
+        assert!(outcome.changes.is_empty(), "{outcome:?}");
+        assert!(outcome.artifacts.is_empty(), "{outcome:?}");
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_compile_escapes_all_user_xml_text_and_attributes() {
+        let context = test_context("compile-xml-escaping");
+        let definition_path = context.cwd.join("definition.json");
+        let output_path = context.cwd.join("Template.xml");
+        let special = "A&B <C> \"quoted\"\tline\nnext\rreturn";
+        fs::write(
+            &definition_path,
+            serde_json::to_vec(&json!({
+                "columns": 1,
+                "fonts": {"default": {"face": special}},
+                "areas": [{
+                    "name": special,
+                    "rows": [{"cells": [{
+                        "col": 1,
+                        "param": special,
+                        "detail": special,
+                        "text": special
+                    }]}]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let args = Map::from_iter([
+            ("JsonPath".to_string(), json!(definition_path)),
+            ("OutputPath".to_string(), json!(output_path)),
+        ]);
+
+        let outcome = compile_mxl(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let bytes = fs::read(&output_path).unwrap();
+        let xml = std::str::from_utf8(&bytes)
+            .unwrap()
+            .trim_start_matches('\u{feff}');
+        let document = Document::parse(xml).expect("compiled MXL must be well-formed XML");
+        let root = document.root_element();
+        let named_item_name = root
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "namedItem")
+            .and_then(|node| {
+                node.children()
+                    .find(|child| child.is_element() && child.tag_name().name() == "name")
+            })
+            .and_then(|node| node.text());
+        let font_face = root
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "font")
+            .and_then(|node| node.attribute("faceName"));
+        let parameter = root
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "parameter")
+            .and_then(|node| node.text());
+        let detail = root
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "detailParameter")
+            .and_then(|node| node.text());
+
+        assert_eq!(named_item_name, Some(special));
+        assert_eq!(font_face, Some(special));
+        assert_eq!(parameter, Some(special));
+        assert_eq!(detail, Some(special));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_compile_invalid_xml_character_does_not_overwrite_existing_target() {
+        let context = test_context("compile-invalid-xml-character");
+        let definition_path = context.cwd.join("definition.json");
+        let output_path = context.cwd.join("Template.xml");
+        let original = b"existing-target-bytes".to_vec();
+        fs::write(
+            &definition_path,
+            serde_json::to_vec(&json!({
+                "columns": 1,
+                "areas": [{
+                    "name": "invalid\u{0001}name",
+                    "rows": [{"cells": [{"col": 1, "text": "value"}]}]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(&output_path, &original).unwrap();
+        let args = Map::from_iter([
+            ("JsonPath".to_string(), json!(definition_path)),
+            ("OutputPath".to_string(), json!(output_path)),
+        ]);
+
+        let outcome = compile_mxl(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert_eq!(fs::read(&output_path).unwrap(), original);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_compile_final_failure_restores_existing_target_bytes() {
+        let context = test_context("compile-final-failure");
+        let definition_path = context.cwd.join("definition.json");
+        let output_path = context.cwd.join("Template.xml");
+        let original = b"existing-target-bytes".to_vec();
+        fs::write(
+            &definition_path,
+            serde_json::to_vec(&json!({
+                "columns": 1,
+                "areas": [{
+                    "name": "Area",
+                    "rows": [{"cells": [{"col": 1, "text": "value"}]}]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(&output_path, &original).unwrap();
+        let args = Map::from_iter([
+            ("JsonPath".to_string(), json!(definition_path)),
+            ("OutputPath".to_string(), json!(output_path)),
+        ]);
+
+        let outcome = with_commit_failpoint(CommitFailpoint::PostWriteValidation, || {
+            compile_mxl(&args, &context)
+        });
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert_eq!(fs::read(&output_path).unwrap(), original);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_compile_rolls_back_if_format_owner_changes_during_publication() {
+        let context = test_context("compile-format-owner-race");
+        let source = context.cwd.join("src");
+        let output_path = source.join("Templates/Guarded/Ext/Template.xml");
+        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        fs::write(
+            context.cwd.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        )
+        .unwrap();
+        let owner = source.join("Configuration.xml");
+        let owner_before = br#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Configuration/></MetaDataObject>"#.to_vec();
+        fs::write(&owner, &owner_before).unwrap();
+        let definition_path = context.cwd.join("definition.json");
+        fs::write(
+            &definition_path,
+            serde_json::to_vec(&json!({
+                "columns": 1,
+                "areas": [{
+                    "name": "Area",
+                    "rows": [{"cells": [{"col": 1, "text": "value"}]}]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let args = Map::from_iter([
+            ("JsonPath".to_string(), json!(definition_path)),
+            ("OutputPath".to_string(), json!(output_path)),
+        ]);
+        let mut concurrent_owner = owner_before;
+        concurrent_owner.extend_from_slice(b" ");
+        let owner_for_hook = owner.clone();
+        let concurrent_for_hook = concurrent_owner.clone();
+
+        let outcome = with_before_commit_hook(
+            move |_| fs::write(&owner_for_hook, &concurrent_for_hook).unwrap(),
+            || compile_mxl(&args, &context),
+        );
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome.errors.join("\n").contains("read guard"),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&owner).unwrap(), concurrent_owner);
+        assert!(!source.join("Templates/Guarded/Ext/Template.xml").exists());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_compile_rolls_back_if_missing_wrapper_owner_appears_during_publication() {
+        let context = test_context("compile-wrapper-owner-race");
+        let source = context.cwd.join("src");
+        let output_path = source.join("Templates/Guarded/Ext/Template.xml");
+        let wrapper = source.join("Templates/Guarded.xml");
+        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        fs::write(
+            context.cwd.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        )
+        .unwrap();
+        fs::write(
+            source.join("Configuration.xml"),
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Configuration/></MetaDataObject>"#,
+        )
+        .unwrap();
+        let original_output = utf8_bom_bytes(&empty_spreadsheet_document_xml());
+        fs::write(&output_path, &original_output).unwrap();
+        let definition_path = context.cwd.join("definition.json");
+        fs::write(
+            &definition_path,
+            serde_json::to_vec(&json!({
+                "columns": 1,
+                "areas": [{
+                    "name": "Area",
+                    "rows": [{"cells": [{"col": 1, "text": "planned"}]}]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let args = Map::from_iter([
+            ("JsonPath".to_string(), json!(definition_path)),
+            ("OutputPath".to_string(), json!(output_path)),
+        ]);
+        let concurrent_wrapper = br#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.21"><Template/></MetaDataObject>"#.to_vec();
+        let wrapper_for_hook = wrapper.clone();
+        let concurrent_for_hook = concurrent_wrapper.clone();
+
+        let outcome = with_before_commit_hook(
+            move |_| fs::write(&wrapper_for_hook, &concurrent_for_hook).unwrap(),
+            || compile_mxl(&args, &context),
+        );
+
+        assert!(!outcome.ok, "{outcome:?}");
+        let error = outcome.errors.join("\n");
+        assert!(error.contains("absence guard"), "{error}");
+        assert!(error.contains("Guarded.xml"), "{error}");
+        assert_eq!(fs::read(&output_path).unwrap(), original_output);
+        assert_eq!(fs::read(&wrapper).unwrap(), concurrent_wrapper);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_compile_rolls_back_if_json_definition_changes_after_parse() {
+        let context = test_context("compile-json-input-race");
+        let definition_path = context.cwd.join("definition.json");
+        let output_path = context.cwd.join("Template.xml");
+        let original_output = utf8_bom_bytes(&empty_spreadsheet_document_xml());
+        fs::write(
+            &definition_path,
+            serde_json::to_vec(&json!({
+                "columns": 1,
+                "areas": [{
+                    "name": "Area",
+                    "rows": [{"cells": [{"col": 1, "text": "planned"}]}]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(&output_path, &original_output).unwrap();
+        let concurrent_definition = serde_json::to_vec(&json!({
+            "columns": 1,
+            "areas": [{
+                "name": "Area",
+                "rows": [{"cells": [{"col": 1, "text": "concurrent"}]}]
+            }]
+        }))
+        .unwrap();
+        let args = Map::from_iter([
+            ("JsonPath".to_string(), json!(definition_path)),
+            ("OutputPath".to_string(), json!(output_path)),
+        ]);
+        let definition_for_hook = definition_path.clone();
+        let concurrent_for_hook = concurrent_definition.clone();
+
+        let outcome = with_before_commit_hook(
+            move |_| fs::write(&definition_for_hook, &concurrent_for_hook).unwrap(),
+            || compile_mxl(&args, &context),
+        );
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome.errors.join("\n").contains("read guard"),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&definition_path).unwrap(), concurrent_definition);
+        assert_eq!(fs::read(&output_path).unwrap(), original_output);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_compile_semantic_validation_failure_rolls_back_create_and_replace() {
+        let context = test_context("compile-semantic-validation-rollback");
+        let definition_path = context.cwd.join("definition.json");
+        let replaced_path = context.cwd.join("Replaced.xml");
+        let created_path = context.cwd.join("Created.xml");
+        let original = utf8_bom_bytes(&empty_spreadsheet_document_xml().replace('\n', "\r\n"));
+        fs::write(
+            &definition_path,
+            serde_json::to_vec(&json!({
+                "columns": 1,
+                "areas": [{
+                    "name": "Area",
+                    "rows": [{"cells": [{"col": 2, "text": "outside column set"}]}]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(&replaced_path, &original).unwrap();
+
+        let compile_to = |output_path: &Path| {
+            compile_mxl(
+                &Map::from_iter([
+                    ("JsonPath".to_string(), json!(definition_path)),
+                    ("OutputPath".to_string(), json!(output_path)),
+                ]),
+                &context,
+            )
+        };
+
+        let replace_outcome = compile_to(&replaced_path);
+        let create_outcome = compile_to(&created_path);
+
+        for outcome in [&replace_outcome, &create_outcome] {
+            assert!(!outcome.ok, "{outcome:?}");
+            assert!(
+                outcome
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("column index 1 >= column count (1)")),
+                "{outcome:?}"
+            );
+        }
+        assert_eq!(fs::read(&replaced_path).unwrap(), original);
+        assert!(!created_path.exists());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn mxl_compile_matches_platform_first_cell_and_format_order() {
+        let xml = compile_test_mxl(
+            "compile-platform-first-cell",
+            &json!({
+                "columns": 1,
+                "areas": [{
+                    "name": "A",
+                    "rows": [{"cells": [{"col": 1, "text": "x"}]}]
+                }]
+            }),
+        );
+        let document = Document::parse(&xml).unwrap();
+        let root = document.root_element();
+        let row = root
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "row")
+            .unwrap();
+        let outer_cell = row
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "c")
+            .unwrap();
+
+        assert_eq!(direct_child_names(outer_cell), ["c"]);
+        let inner_cell = outer_cell
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "c")
+            .unwrap();
+        assert_eq!(direct_child_text(inner_cell, "f"), "1");
+        assert_eq!(direct_child_text(root, "defaultFormatIndex"), "2");
+
+        let formats = root
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "format")
+            .collect::<Vec<_>>();
+        assert_eq!(formats.len(), 2);
+        assert_eq!(
+            direct_child_name_texts(formats[0]),
+            ["font=0", "fillType=Text"]
+        );
+        assert_eq!(direct_child_name_texts(formats[1]), ["width=10"]);
+    }
+
+    #[test]
+    fn mxl_compile_omits_adjacent_cell_indices_and_emits_index_after_gap() {
+        let xml = compile_test_mxl(
+            "compile-platform-cell-indices",
+            &json!({
+                "columns": 4,
+                "areas": [{
+                    "name": "A",
+                    "rows": [{
+                        "cells": [
+                            {"col": 1, "text": "first"},
+                            {"col": 2, "text": "adjacent"},
+                            {"col": 4, "text": "after gap"}
+                        ]
+                    }]
+                }]
+            }),
+        );
+        let document = Document::parse(&xml).unwrap();
+        let row = document
+            .root_element()
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "row")
+            .unwrap();
+        let cells = row
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "c")
+            .collect::<Vec<_>>();
+
+        assert_eq!(cells.len(), 3);
+        assert_eq!(direct_child_names(cells[0]), ["c"]);
+        assert_eq!(direct_child_names(cells[1]), ["c"]);
+        assert_eq!(direct_child_names(cells[2]), ["i", "c"]);
+        assert_eq!(direct_child_text(cells[2], "i"), "3");
+    }
+
+    #[test]
+    fn mxl_compile_orders_explicit_widths_before_cells_and_default_width_last() {
+        let xml = compile_test_mxl(
+            "compile-platform-multi-column",
+            &json!({
+                "columns": 2,
+                "defaultWidth": 10,
+                "columnWidths": {"2": 20},
+                "styles": {"right": {"align": "right"}},
+                "areas": [{
+                    "name": "A",
+                    "rows": [{
+                        "cells": [
+                            {"col": 1, "text": "left"},
+                            {"col": 2, "text": "right", "style": "right"}
+                        ]
+                    }]
+                }]
+            }),
+        );
+        let document = Document::parse(&xml).unwrap();
+        let root = document.root_element();
+        let row = root
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "row")
+            .unwrap();
+        let cells = row
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "c")
+            .collect::<Vec<_>>();
+
+        assert_eq!(cells.len(), 2);
+        assert_eq!(direct_child_names(cells[0]), ["c"]);
+        assert_eq!(
+            direct_child_text(
+                cells[0]
+                    .children()
+                    .find(|node| node.is_element() && node.tag_name().name() == "c")
+                    .unwrap(),
+                "f"
+            ),
+            "2"
+        );
+        assert_eq!(direct_child_names(cells[1]), ["c"]);
+        assert_eq!(
+            direct_child_text(
+                cells[1]
+                    .children()
+                    .find(|node| node.is_element() && node.tag_name().name() == "c")
+                    .unwrap(),
+                "f"
+            ),
+            "3"
+        );
+        assert_eq!(direct_child_text(root, "defaultFormatIndex"), "4");
+
+        let columns_item = root
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "columnsItem")
+            .unwrap();
+        assert_eq!(direct_child_text(columns_item, "index"), "1");
+        let column = columns_item
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "column")
+            .unwrap();
+        assert_eq!(direct_child_text(column, "formatIndex"), "1");
+
+        let formats = root
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "format")
+            .collect::<Vec<_>>();
+        assert_eq!(formats.len(), 4);
+        assert_eq!(direct_child_name_texts(formats[0]), ["width=20"]);
+        assert_eq!(
+            direct_child_name_texts(formats[1]),
+            ["font=0", "fillType=Text"]
+        );
+        assert_eq!(
+            direct_child_name_texts(formats[2]),
+            ["font=0", "horizontalAlignment=Right", "fillType=Text"]
+        );
+        assert_eq!(direct_child_name_texts(formats[3]), ["width=10"]);
+    }
+
     fn path_args(path: &Path) -> Map<String, Value> {
         Map::from_iter([(
             "TemplatePath".to_string(),
             json!(path.display().to_string()),
         )])
+    }
+
+    fn compile_test_mxl(name: &str, definition: &Value) -> String {
+        let context = test_context(name);
+        let definition_path = context.cwd.join("definition.json");
+        let output_path = context.cwd.join("Template.xml");
+        fs::write(&definition_path, serde_json::to_vec(definition).unwrap()).unwrap();
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(output_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = compile_mxl(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let xml = fs::read_to_string(&output_path)
+            .unwrap()
+            .trim_start_matches('\u{feff}')
+            .to_string();
+        let _ = fs::remove_dir_all(&context.cwd);
+        xml
+    }
+
+    fn direct_child_names(node: roxmltree::Node<'_, '_>) -> Vec<String> {
+        node.children()
+            .filter(roxmltree::Node::is_element)
+            .map(|child| child.tag_name().name().to_string())
+            .collect()
+    }
+
+    fn direct_child_text(node: roxmltree::Node<'_, '_>, name: &str) -> String {
+        node.children()
+            .find(|child| child.is_element() && child.tag_name().name() == name)
+            .and_then(|child| child.text())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn direct_child_name_texts(node: roxmltree::Node<'_, '_>) -> Vec<String> {
+        node.children()
+            .filter(roxmltree::Node::is_element)
+            .map(|child| format!("{}={}", child.tag_name().name(), child.text().unwrap_or("")))
+            .collect()
     }
 
     fn platform_mxl_fixture() -> PathBuf {

@@ -1,4 +1,4 @@
-use super::operation_descriptors::native_operation_descriptor;
+use super::operation_descriptors::{native_operation_descriptor, native_path_alias_groups};
 use super::{RuntimeJobAction, ToolHandler, ToolSpec};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
@@ -62,6 +62,9 @@ const META_EDIT_OPERATIONS: &[&str] = &[
     "set-basedOn",
     "set-inputByString",
 ];
+const CFE_PATCH_METHOD_CONTEXTS: &[&str] = &["НаСервере", "НаКлиенте", "НаСервереБезКонтекста"];
+const CFE_PATCH_METHOD_INTERCEPTOR_TYPES: &[&str] = &["Before", "After"];
+const CFE_PATCH_METHOD_IDENTIFIER_PATTERN: &str = r"^[A-Za-z_А-Яа-яЁё][A-Za-z0-9_А-Яа-яЁё]*$";
 
 const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "BaseForm",
@@ -577,20 +580,99 @@ pub fn input_schema_for_tool(tool: &ToolSpec) -> Value {
         properties.insert(name.to_string(), property_schema_for_tool(tool, name));
     }
 
+    let mut required = required_args(tool);
+    let mut required_path_aliases = Vec::new();
+    if let ToolHandler::NativeOperation { operation, .. } = tool.handler {
+        for group in native_path_alias_groups(operation) {
+            if let Some(index) = required
+                .iter()
+                .position(|required| *required == group.canonical)
+            {
+                required.remove(index);
+                required_path_aliases.push(json!({
+                    "anyOf": group
+                        .aliases
+                        .iter()
+                        .map(|alias| json!({"required": [alias]}))
+                        .collect::<Vec<_>>()
+                }));
+            }
+        }
+    }
+
     let mut schema = json!({
         "type": "object",
         "additionalProperties": false,
         "properties": properties,
-        "required": required_args(tool),
+        "required": required,
     });
+    if !required_path_aliases.is_empty() {
+        schema["allOf"] = Value::Array(required_path_aliases);
+    }
     if tool.name == "unica.form.edit" {
-        schema["oneOf"] = json!([
+        schema["anyOf"] = json!([
             {"required": ["JsonPath"]},
             {"required": ["jsonPath"]},
             {"required": ["definition"]}
         ]);
     }
     schema
+}
+
+pub(crate) fn normalize_native_path_aliases(
+    tool: ToolSpec,
+    args: &Map<String, Value>,
+) -> Result<Map<String, Value>, String> {
+    let mut normalized = args.clone();
+    let ToolHandler::NativeOperation { operation, .. } = tool.handler else {
+        return Ok(normalized);
+    };
+
+    for group in native_path_alias_groups(operation) {
+        let present = group
+            .aliases
+            .iter()
+            .filter_map(|alias| args.get(*alias).map(|value| (*alias, value)))
+            .collect::<Vec<_>>();
+        if present.is_empty() {
+            continue;
+        }
+
+        let non_empty = present
+            .iter()
+            .copied()
+            .filter(|(_, value)| !is_empty_path_alias_value(value))
+            .collect::<Vec<_>>();
+        if let Some((_, expected)) = non_empty.first().copied() {
+            if non_empty.iter().any(|(_, value)| *value != expected) {
+                return Err(format!(
+                    "{} received conflicting path aliases with different non-empty values: {}",
+                    tool.name,
+                    non_empty
+                        .iter()
+                        .map(|(alias, _)| *alias)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+
+        let selected = non_empty
+            .first()
+            .or_else(|| present.first())
+            .map(|(_, value)| (*value).clone())
+            .expect("present path aliases cannot be empty");
+        for alias in group.aliases {
+            normalized.remove(*alias);
+        }
+        normalized.insert(group.canonical.to_string(), selected);
+    }
+
+    Ok(normalized)
+}
+
+fn is_empty_path_alias_value(value: &Value) -> bool {
+    value.as_str().is_some_and(|value| value.trim().is_empty())
 }
 
 pub fn validate_tool_arguments(
@@ -624,6 +706,7 @@ pub fn validate_tool_arguments(
     validate_template_add_arguments(tool, args)?;
     validate_support_arguments(tool, args, dry_run)?;
     validate_external_init_arguments(tool, args)?;
+    validate_cfe_patch_method_arguments(tool, args)?;
 
     if !dry_run || is_external_init_tool(tool) {
         for required in required_args(&tool) {
@@ -690,6 +773,96 @@ fn validate_code_patch_arguments(tool: ToolSpec, args: &Map<String, Value>) -> R
         ));
     }
     Ok(())
+}
+
+fn validate_cfe_patch_method_arguments(
+    tool: ToolSpec,
+    args: &Map<String, Value>,
+) -> Result<(), String> {
+    if tool.name != "unica.cfe.patch_method" {
+        return Ok(());
+    }
+    for aliases in [
+        &["MethodName", "methodName"][..],
+        &["Context", "context"][..],
+        &["InterceptorType", "interceptorType"][..],
+        &["IsFunction", "isFunction"][..],
+    ] {
+        validate_unique_alias_group(tool.name, args, aliases)?;
+    }
+    for name in ["MethodName", "methodName"] {
+        let Some(value) = args.get(name) else {
+            continue;
+        };
+        let value = value
+            .as_str()
+            .ok_or_else(|| format!("{} argument `{name}` must be string", tool.name))?;
+        if !is_cfe_patch_method_identifier(value) {
+            return Err(format!(
+                "{} argument `MethodName` must be a valid 1C identifier",
+                tool.name
+            ));
+        }
+    }
+    for name in ["Context", "context"] {
+        let Some(value) = args.get(name) else {
+            continue;
+        };
+        let value = value
+            .as_str()
+            .ok_or_else(|| format!("{} argument `{name}` must be string", tool.name))?;
+        if !CFE_PATCH_METHOD_CONTEXTS.contains(&value) {
+            return Err(format!(
+                "{} argument `Context` must be one of: {}",
+                tool.name,
+                CFE_PATCH_METHOD_CONTEXTS.join(", ")
+            ));
+        }
+    }
+    for name in ["InterceptorType", "interceptorType"] {
+        let Some(value) = args.get(name) else {
+            continue;
+        };
+        let value = value
+            .as_str()
+            .ok_or_else(|| format!("{} argument `{name}` must be string", tool.name))?;
+        if !CFE_PATCH_METHOD_INTERCEPTOR_TYPES.contains(&value) {
+            return Err(format!(
+                "{} argument `InterceptorType` must be one of: {}",
+                tool.name,
+                CFE_PATCH_METHOD_INTERCEPTOR_TYPES.join(", ")
+            ));
+        }
+    }
+    for name in ["IsFunction", "isFunction"] {
+        let Some(value) = args.get(name) else {
+            continue;
+        };
+        let value = value
+            .as_bool()
+            .ok_or_else(|| format!("{} argument `{name}` must be boolean", tool.name))?;
+        if value {
+            return Err(format!(
+                "{} v1 requires a parameterless procedure; a base method signature resolver for functions and parameterized methods is not implemented",
+                tool.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_cfe_patch_method_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let valid_start = |ch: char| {
+        ch == '_'
+            || ch.is_ascii_alphabetic()
+            || ('А'..='я').contains(&ch)
+            || matches!(ch, 'Ё' | 'ё')
+    };
+    valid_start(first) && chars.all(|ch| valid_start(ch) || ch.is_ascii_digit())
 }
 
 fn validate_external_init_arguments(
@@ -1530,6 +1703,27 @@ fn property_schema_for_tool(tool: &ToolSpec, name: &str) -> Value {
     if tool.name == "unica.meta.edit" && matches!(name, "Operation" | "operation") {
         return json!({ "type": "string", "enum": META_EDIT_OPERATIONS });
     }
+    if tool.name == "unica.cfe.patch_method" {
+        return match name {
+            "Context" | "context" => {
+                json!({ "type": "string", "enum": CFE_PATCH_METHOD_CONTEXTS })
+            }
+            "InterceptorType" | "interceptorType" => {
+                json!({ "type": "string", "enum": CFE_PATCH_METHOD_INTERCEPTOR_TYPES })
+            }
+            "MethodName" | "methodName" => json!({
+                "type": "string",
+                "minLength": 1,
+                "pattern": CFE_PATCH_METHOD_IDENTIFIER_PATTERN
+            }),
+            "IsFunction" | "isFunction" => json!({
+                "type": "boolean",
+                "const": false,
+                "description": "cfe.patch_method v1 supports parameterless procedures only; base method signature resolution is not implemented"
+            }),
+            _ => property_schema(name),
+        };
+    }
     if matches!(
         tool.handler,
         ToolHandler::RuntimeAdapter
@@ -1797,6 +1991,55 @@ mod tests {
     }
 
     #[test]
+    fn cfe_patch_method_contract_exposes_closed_bsl_argument_domains() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.cfe.patch_method")
+            .unwrap();
+        let schema = input_schema_for_tool(&tool);
+        assert_eq!(
+            schema["properties"]["Context"]["enum"],
+            json!(["НаСервере", "НаКлиенте", "НаСервереБезКонтекста"])
+        );
+        assert_eq!(
+            schema["properties"]["InterceptorType"]["enum"],
+            json!(["Before", "After"])
+        );
+        assert_eq!(
+            schema["properties"]["IsFunction"]["const"],
+            json!(false),
+            "v1 exposes procedure-only interception"
+        );
+        assert!(schema["properties"]["MethodName"]["pattern"].is_string());
+
+        let mut args = Map::from_iter([
+            ("ExtensionPath".to_string(), json!("ext")),
+            ("ModulePath".to_string(), json!("CommonModule.Server")),
+            ("MethodName".to_string(), json!("Run")),
+            ("InterceptorType".to_string(), json!("Before")),
+            ("Context".to_string(), json!("AtServer")),
+        ]);
+        let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+        assert!(error.contains("Context"), "{error}");
+        args.insert("Context".to_string(), json!("НаСервере"));
+        args.insert("MethodName".to_string(), json!("Bad-Name"));
+        let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+        assert!(error.contains("MethodName"), "{error}");
+        args.insert("MethodName".to_string(), json!("Run"));
+        args.insert(
+            "InterceptorType".to_string(),
+            json!("ModificationAndControl"),
+        );
+        let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+        assert!(error.contains("InterceptorType"), "{error}");
+        args.insert("InterceptorType".to_string(), json!("Before"));
+        args.insert("IsFunction".to_string(), json!(true));
+        let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+        assert!(error.contains("parameterless procedure"), "{error}");
+        assert!(error.contains("not implemented"), "{error}");
+    }
+
+    #[test]
     fn mutating_dry_run_does_not_require_payload() {
         let tool = tools()
             .into_iter()
@@ -1808,6 +2051,153 @@ mod tests {
     }
 
     #[test]
+    fn native_required_path_aliases_are_honest_json_schema_alternatives() {
+        let cases = [
+            (
+                "unica.cf.info",
+                vec![
+                    json!({"ConfigPath": "src"}),
+                    json!({"configPath": "src"}),
+                    json!({"Path": "src"}),
+                    json!({"path": "src"}),
+                    json!({"ConfigPath": "src", "configPath": "src"}),
+                ],
+            ),
+            (
+                "unica.meta.edit",
+                vec![
+                    json!({"ObjectPath": "Catalogs/Items.xml"}),
+                    json!({"objectPath": "Catalogs/Items.xml"}),
+                    json!({"Path": "Catalogs/Items.xml"}),
+                    json!({"path": "Catalogs/Items.xml"}),
+                ],
+            ),
+            (
+                "unica.form.edit",
+                vec![
+                    json!({"FormPath": "Ext/Form.xml", "definition": {}}),
+                    json!({"formPath": "Ext/Form.xml", "definition": {}}),
+                    json!({"Path": "Ext/Form.xml", "definition": {}}),
+                    json!({"path": "Ext/Form.xml", "definition": {}}),
+                    json!({
+                        "FormPath": "Ext/Form.xml",
+                        "JsonPath": "edit.json",
+                        "jsonPath": "edit.json"
+                    }),
+                ],
+            ),
+            (
+                "unica.interface.edit",
+                vec![
+                    json!({"CIPath": "Ext/CommandInterface.xml"}),
+                    json!({"ciPath": "Ext/CommandInterface.xml"}),
+                    json!({"Path": "Ext/CommandInterface.xml"}),
+                    json!({"path": "Ext/CommandInterface.xml"}),
+                ],
+            ),
+            (
+                "unica.subsystem.edit",
+                vec![
+                    json!({"SubsystemPath": "Subsystems/Sales.xml"}),
+                    json!({"subsystemPath": "Subsystems/Sales.xml"}),
+                    json!({"Path": "Subsystems/Sales.xml"}),
+                    json!({"path": "Subsystems/Sales.xml"}),
+                ],
+            ),
+            (
+                "unica.dcs.edit",
+                vec![
+                    json!({"TemplatePath": "Ext/Template.xml"}),
+                    json!({"templatePath": "Ext/Template.xml"}),
+                    json!({"Path": "Ext/Template.xml"}),
+                    json!({"path": "Ext/Template.xml"}),
+                ],
+            ),
+            (
+                "unica.form.compile",
+                vec![
+                    json!({"OutputPath": "Ext/Form.xml"}),
+                    json!({"outputPath": "Ext/Form.xml"}),
+                    json!({"OutputPath": "Ext/Form.xml", "outputPath": "Ext/Form.xml"}),
+                ],
+            ),
+        ];
+
+        for (tool_name, instances) in cases {
+            let tool = tools()
+                .into_iter()
+                .find(|tool| tool.name == tool_name)
+                .unwrap();
+            let schema = input_schema_for_tool(&tool);
+            let validator = jsonschema::validator_for(&schema).unwrap();
+            for instance in instances {
+                assert!(
+                    validator.is_valid(&instance),
+                    "{tool_name} schema rejected documented path aliases: {instance}; schema={schema}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_native_path_alias_group_normalizes_to_one_canonical_argument() {
+        for tool in tools() {
+            let ToolHandler::NativeOperation { operation, .. } = tool.handler else {
+                continue;
+            };
+            let schema = input_schema_for_tool(&tool);
+            let properties = schema["properties"].as_object().unwrap();
+            let mut seen = BTreeSet::new();
+            for group in native_path_alias_groups(operation) {
+                assert_eq!(
+                    group.aliases.first().copied(),
+                    Some(group.canonical),
+                    "{operation} canonical alias must be first"
+                );
+                for alias in group.aliases {
+                    assert!(
+                        seen.insert(*alias),
+                        "{operation} assigns path alias {alias} to more than one group"
+                    );
+                    assert!(
+                        properties.contains_key(*alias),
+                        "{operation} path alias {alias} is not public in its MCP schema"
+                    );
+                    let raw =
+                        Map::from_iter([(alias.to_string(), json!(format!("{operation}/value")))]);
+                    let normalized = normalize_native_path_aliases(tool, &raw).unwrap();
+                    assert_eq!(
+                        normalized.get(group.canonical),
+                        raw.get(*alias),
+                        "{operation} failed to normalize {alias} to {}",
+                        group.canonical
+                    );
+                    for removed in group.aliases {
+                        if *removed != group.canonical {
+                            assert!(
+                                !normalized.contains_key(*removed),
+                                "{operation} retained path alias {removed}"
+                            );
+                        }
+                    }
+                }
+
+                if group.aliases.len() > 1 {
+                    let raw = Map::from_iter([
+                        (group.aliases[0].to_string(), json!("first")),
+                        (group.aliases[1].to_string(), json!("second")),
+                    ]);
+                    let error = normalize_native_path_aliases(tool, &raw).unwrap_err();
+                    assert!(
+                        error.contains("conflicting path aliases"),
+                        "{operation}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn form_edit_contract_accepts_inline_definition_or_json_path() {
         let tool = tools()
             .into_iter()
@@ -1815,9 +2205,20 @@ mod tests {
             .unwrap();
         let schema = input_schema_for_tool(&tool);
         assert_eq!(schema["properties"]["definition"]["type"], "object");
-        assert_eq!(schema["required"], json!(["FormPath"]));
+        assert_eq!(schema["required"], json!([]));
         assert_eq!(
-            schema["oneOf"],
+            schema["allOf"],
+            json!([{
+                "anyOf": [
+                    {"required": ["FormPath"]},
+                    {"required": ["formPath"]},
+                    {"required": ["Path"]},
+                    {"required": ["path"]}
+                ]
+            }])
+        );
+        assert_eq!(
+            schema["anyOf"],
             json!([
                 {"required": ["JsonPath"]},
                 {"required": ["jsonPath"]},
@@ -2467,7 +2868,18 @@ mod tests {
         let schema = input_schema_for_tool(&dcs_info);
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["Raw"]["type"], "boolean");
-        assert_eq!(schema["required"], json!(["TemplatePath"]));
+        assert_eq!(schema["required"], json!([]));
+        assert_eq!(
+            schema["allOf"],
+            json!([{
+                "anyOf": [
+                    {"required": ["TemplatePath"]},
+                    {"required": ["templatePath"]},
+                    {"required": ["Path"]},
+                    {"required": ["path"]}
+                ]
+            }])
+        );
 
         let mut args = Map::new();
         args.insert(

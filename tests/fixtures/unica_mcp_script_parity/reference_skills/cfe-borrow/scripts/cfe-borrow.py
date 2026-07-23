@@ -179,11 +179,12 @@ GENERATED_TYPES = {
     ],
     "AccountingRegister": [
         {"prefix": "AccountingRegisterRecord", "category": "Record"},
-        {"prefix": "AccountingRegisterManager", "category": "Manager"},
-        {"prefix": "AccountingRegisterSelection", "category": "Selection"},
-        {"prefix": "AccountingRegisterList", "category": "List"},
+        {"prefix": "AccountingRegisterExtDimensions", "category": "ExtDimensions"},
         {"prefix": "AccountingRegisterRecordSet", "category": "RecordSet"},
         {"prefix": "AccountingRegisterRecordKey", "category": "RecordKey"},
+        {"prefix": "AccountingRegisterSelection", "category": "Selection"},
+        {"prefix": "AccountingRegisterList", "category": "List"},
+        {"prefix": "AccountingRegisterManager", "category": "Manager"},
     ],
     "CalculationRegister": [
         {"prefix": "CalculationRegisterRecord", "category": "Record"},
@@ -192,6 +193,7 @@ GENERATED_TYPES = {
         {"prefix": "CalculationRegisterList", "category": "List"},
         {"prefix": "CalculationRegisterRecordSet", "category": "RecordSet"},
         {"prefix": "CalculationRegisterRecordKey", "category": "RecordKey"},
+        {"prefix": "RecalculationsManager", "category": "Recalcs"},
     ],
     "ChartOfAccounts": [
         {"prefix": "ChartOfAccountsObject", "category": "Object"},
@@ -199,12 +201,15 @@ GENERATED_TYPES = {
         {"prefix": "ChartOfAccountsSelection", "category": "Selection"},
         {"prefix": "ChartOfAccountsList", "category": "List"},
         {"prefix": "ChartOfAccountsManager", "category": "Manager"},
+        {"prefix": "ChartOfAccountsExtDimensionTypes", "category": "ExtDimensionTypes"},
+        {"prefix": "ChartOfAccountsExtDimensionTypesRow", "category": "ExtDimensionTypesRow"},
     ],
     "ChartOfCharacteristicTypes": [
         {"prefix": "ChartOfCharacteristicTypesObject", "category": "Object"},
         {"prefix": "ChartOfCharacteristicTypesRef", "category": "Ref"},
         {"prefix": "ChartOfCharacteristicTypesSelection", "category": "Selection"},
         {"prefix": "ChartOfCharacteristicTypesList", "category": "List"},
+        {"prefix": "Characteristic", "category": "Characteristic"},
         {"prefix": "ChartOfCharacteristicTypesManager", "category": "Manager"},
     ],
     "ChartOfCalculationTypes": [
@@ -214,8 +219,11 @@ GENERATED_TYPES = {
         {"prefix": "ChartOfCalculationTypesList", "category": "List"},
         {"prefix": "ChartOfCalculationTypesManager", "category": "Manager"},
         {"prefix": "DisplacingCalculationTypes", "category": "DisplacingCalculationTypes"},
+        {"prefix": "DisplacingCalculationTypesRow", "category": "DisplacingCalculationTypesRow"},
         {"prefix": "BaseCalculationTypes", "category": "BaseCalculationTypes"},
+        {"prefix": "BaseCalculationTypesRow", "category": "BaseCalculationTypesRow"},
         {"prefix": "LeadingCalculationTypes", "category": "LeadingCalculationTypes"},
+        {"prefix": "LeadingCalculationTypesRow", "category": "LeadingCalculationTypesRow"},
     ],
     "BusinessProcess": [
         {"prefix": "BusinessProcessObject", "category": "Object"},
@@ -223,6 +231,7 @@ GENERATED_TYPES = {
         {"prefix": "BusinessProcessSelection", "category": "Selection"},
         {"prefix": "BusinessProcessList", "category": "List"},
         {"prefix": "BusinessProcessManager", "category": "Manager"},
+        {"prefix": "BusinessProcessRoutePointRef", "category": "RoutePointRef"},
     ],
     "Task": [
         {"prefix": "TaskObject", "category": "Object"},
@@ -263,7 +272,16 @@ TYPES_WITH_CHILD_OBJECTS = [
     "InformationRegister", "AccumulationRegister", "AccountingRegister", "CalculationRegister",
 ]
 
-COMMON_MODULE_PROPS = ["Global", "ClientManagedApplication", "Server", "ExternalConnection", "ClientOrdinaryApplication", "ServerCall"]
+COMMON_MODULE_PROPS = [
+    ("Global", "false"),
+    ("ClientManagedApplication", "false"),
+    ("Server", "false"),
+    ("ExternalConnection", "false"),
+    ("ClientOrdinaryApplication", "false"),
+    ("ServerCall", "false"),
+    ("Privileged", None),
+    ("ReturnValuesReuse", "DontUse"),
+]
 
 # Standard system fields to skip when collecting DataPath references
 STANDARD_FIELDS = [
@@ -297,7 +315,7 @@ def detect_format_version(d):
         if parent == d:
             break
         d = parent
-    return "2.17"
+    return "2.20"
 
 
 def get_child_indent(container):
@@ -488,7 +506,7 @@ def main():
         src_props = {}
         props_node = src_el.find(f"{{{MD_NS}}}Properties")
         if props_node is not None:
-            for prop_name in COMMON_MODULE_PROPS:
+            for prop_name, _default_value in COMMON_MODULE_PROPS:
                 prop_node = props_node.find(f"{{{MD_NS}}}{prop_name}")
                 if prop_node is not None:
                     src_props[prop_name] = (prop_node.text or "").strip()
@@ -566,8 +584,10 @@ def main():
         lines.append(f"\t\t\t<ExtendedConfigurationObject>{source_uuid}</ExtendedConfigurationObject>")
 
         if type_name == "CommonModule":
-            for prop_name in COMMON_MODULE_PROPS:
-                prop_val = source_props.get(prop_name, "false")
+            for prop_name, default_value in COMMON_MODULE_PROPS:
+                prop_val = source_props.get(prop_name, default_value)
+                if prop_val is None or (prop_name == "Privileged" and prop_val == "false"):
+                    continue
                 lines.append(f"\t\t\t<{prop_name}>{prop_val}</{prop_name}>")
 
         # DefinedType: emit the carried <Type> definition (needed for the alias to resolve, e.g. totals)
@@ -1200,7 +1220,12 @@ def main():
             '<?xml version="1.0" encoding="UTF-8"?>',
             f'<MetaDataObject {XMLNS_DECL} version="{format_version}">',
             f'\t<Form uuid="{new_form_uuid}">',
-            '\t\t<InternalInfo/>',
+            '\t\t<InternalInfo>',
+            '\t\t\t<xr:PropertyState>',
+            '\t\t\t\t<xr:Property>Form</xr:Property>',
+            '\t\t\t\t<xr:State>Extended</xr:State>',
+            '\t\t\t</xr:PropertyState>',
+            '\t\t</InternalInfo>',
             '\t\t<Properties>',
             '\t\t\t<ObjectBelonging>Adopted</ObjectBelonging>',
             f'\t\t\t<Name>{form_name}</Name>',
@@ -1513,21 +1538,22 @@ def main():
         save_text_bom(form_xml_file, "".join(parts))
         info(f"  Created: {form_xml_file}")
 
-        # 6. Create empty Module.bsl — but NEVER overwrite an existing one (re-borrow must
-        # not clobber user code added to the form module).
-        module_dir = os.path.join(form_xml_dir, "Form")
-        os.makedirs(module_dir, exist_ok=True)
-        module_bsl_file = os.path.join(module_dir, "Module.bsl")
+        # 6. The platform export does not contain a form module when the source form has
+        # no module. Do not invent an empty non-XML artifact: that changes the source
+        # contract and is not preserved by an 8.3.27 load/export cycle.
+        module_bsl_file = os.path.join(form_xml_dir, "Form", "Module.bsl")
         if os.path.isfile(module_bsl_file):
-            info("  Preserved existing Module.bsl")
+            print(f"[SKIP] Module.bsl already exists: {module_bsl_file} - not overwriting")
         else:
-            save_text_bom(module_bsl_file, "")
-            info(f"  Created: {module_bsl_file}")
+            info(
+                "  Module.bsl omitted because the borrowed form defines no "
+                f"extension module: {module_bsl_file}"
+            )
 
         # 7. Register form in parent object ChildObjects
         register_form_in_object(type_name, obj_name, form_name)
 
-        return [form_meta_file, form_xml_file, module_bsl_file]
+        return [form_meta_file, form_xml_file]
 
     # --- 9. Parse -Object into items ---
     items = []

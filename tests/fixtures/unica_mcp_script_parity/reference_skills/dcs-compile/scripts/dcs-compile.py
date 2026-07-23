@@ -5,10 +5,33 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import uuid
 
 from lxml import etree
+
+
+def run_post_validation(path):
+    validator = (
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        + "/dcs-validate/scripts/dcs-validate.py"
+    )
+    result = subprocess.run(
+        [sys.executable, validator, "-TemplatePath", path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    print()
+    print("--- Running dcs-validate ---")
+    sys.stdout.write(result.stdout)
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
 
 
 # ============================================================
@@ -841,7 +864,7 @@ def emit_input_parameters(lines, ip, indent):
     lines.append(f'{indent}</inputParameters>')
 
 
-def emit_field(lines, field_def, indent):
+def emit_field(lines, field_def, indent, include_value_type=True):
     if isinstance(field_def, str):
         f = parse_field_shorthand(field_def)
     else:
@@ -962,7 +985,7 @@ def emit_field(lines, field_def, indent):
             lines.append(f'{indent}\t</orderExpression>')
 
     # ValueType
-    if f.get('type'):
+    if include_value_type and f.get('type'):
         lines.append(f'{indent}\t<valueType>')
         emit_value_type(lines, f['type'], f'{indent}\t\t')
         lines.append(f'{indent}\t</valueType>')
@@ -1030,7 +1053,7 @@ def emit_data_set(lines, ds, indent, default_source, tag_name='dataSet'):
     # Fields
     if ds.get('fields'):
         for f in ds['fields']:
-            emit_field(lines, f, f'{indent}\t')
+            emit_field(lines, f, f'{indent}\t', ds_type != 'DataSetQuery')
 
     # DataSource (not for Union)
     if ds_type != 'DataSetUnion':
@@ -2657,13 +2680,13 @@ def emit_structure_item(lines, item, indent, short_group=False):
 
         emit_group_items(lines, item.get('groupBy') or item.get('groupFields'), f'{indent}\t')
 
+        emit_filter(lines, item.get('filter'), f'{indent}\t')
+
         # Emit order/selection only if specified — platform doesn't always emit them on group
         if item.get('order'):
             emit_order(lines, item['order'], f'{indent}\t', block_view_mode=item.get('orderViewMode'), block_user_setting_id=item.get('orderUserSettingID'))
         if item.get('selection'):
             emit_selection(lines, item['selection'], f'{indent}\t')
-
-        emit_filter(lines, item.get('filter'), f'{indent}\t')
 
         if item.get('conditionalAppearance'):
             emit_conditional_appearance(lines, item['conditionalAppearance'], f'{indent}\t')
@@ -2859,19 +2882,7 @@ def emit_settings_variants(lines, defn):
         if s.get('filter') or fvm is not None or fusid is not None:
             emit_filter(lines, s.get('filter'), '\t\t\t', block_view_mode=fvm, block_user_setting_id=fusid)
 
-        ovm, ousid = _block_vm('order'), _block_usid('order')
-        if s.get('order') or ovm is not None or ousid is not None:
-            emit_order(lines, s.get('order'), '\t\t\t', block_view_mode=ovm, block_user_setting_id=ousid)
-
-        cavm, causid = _block_vm('conditionalAppearance'), _block_usid('conditionalAppearance')
-        if s.get('conditionalAppearance') or cavm is not None or causid is not None:
-            emit_conditional_appearance(lines, s.get('conditionalAppearance'), '\t\t\t', block_view_mode=cavm, block_user_setting_id=causid)
-
-        # OutputParameters (platform does NOT emit <viewMode> on this block)
-        if s.get('outputParameters'):
-            emit_output_parameters(lines, s['outputParameters'], '\t\t\t')
-
-        # DataParameters
+        # DataParameters precede order/appearance/output in the fixed 8.3.27 XSD sequence.
         if s.get('dataParameters') == 'auto':
             # Auto-generate dataParameters for all non-hidden params.
             # Pattern follows 1C Designer / ERP persistence:
@@ -2914,6 +2925,18 @@ def emit_settings_variants(lines, defn):
         elif s.get('dataParameters'):
             emit_data_parameters(lines, s['dataParameters'], '\t\t\t')
 
+        ovm, ousid = _block_vm('order'), _block_usid('order')
+        if s.get('order') or ovm is not None or ousid is not None:
+            emit_order(lines, s.get('order'), '\t\t\t', block_view_mode=ovm, block_user_setting_id=ousid)
+
+        cavm, causid = _block_vm('conditionalAppearance'), _block_usid('conditionalAppearance')
+        if s.get('conditionalAppearance') or cavm is not None or causid is not None:
+            emit_conditional_appearance(lines, s.get('conditionalAppearance'), '\t\t\t', block_view_mode=cavm, block_user_setting_id=causid)
+
+        # OutputParameters (platform does NOT emit <viewMode> on this block)
+        if s.get('outputParameters'):
+            emit_output_parameters(lines, s['outputParameters'], '\t\t\t')
+
         # Structure (supports string shorthand)
         if s.get('structure'):
             struct_items = s['structure']
@@ -2924,10 +2947,6 @@ def emit_settings_variants(lines, defn):
             for item in struct_items:
                 emit_structure_item(lines, item, '\t\t\t')
 
-        # <dcsset:itemsViewMode> on settings — emit only if explicitly set
-        if s.get('itemsViewMode'):
-            lines.append(f'\t\t\t<dcsset:itemsViewMode>{esc_xml(str(s["itemsViewMode"]))}</dcsset:itemsViewMode>')
-
         # <dcsset:additionalProperties> — key/value свойства варианта
         if s.get('additionalProperties'):
             lines.append('\t\t\t<dcsset:additionalProperties>')
@@ -2936,6 +2955,10 @@ def emit_settings_variants(lines, defn):
                 lines.append(f'\t\t\t\t\t<v8:Value xsi:type="xs:string">{esc_xml(str(v))}</v8:Value>')
                 lines.append('\t\t\t\t</v8:Property>')
             lines.append('\t\t\t</dcsset:additionalProperties>')
+
+        # <dcsset:itemsViewMode> on settings — emit only if explicitly set
+        if s.get('itemsViewMode'):
+            lines.append(f'\t\t\t<dcsset:itemsViewMode>{esc_xml(str(s["itemsViewMode"]))}</dcsset:itemsViewMode>')
 
         lines.append('\t\t</dcsset:settings>')
         lines.append('\t</settingsVariant>')
@@ -3063,6 +3086,7 @@ def main():
     print(f"OK  {args.OutputPath}")
     print(f"    DataSets: {ds_count}  Fields: {field_count}  Calculated: {calc_count}  Totals: {total_count}  Params: {param_count}  Variants: {variant_count}")
     print(f"    Size: {file_size} bytes")
+    run_post_validation(output_path)
 
 
 if __name__ == '__main__':

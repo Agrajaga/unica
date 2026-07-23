@@ -139,6 +139,33 @@ def report_warn(msg):
     out_line(f"[WARN]  {msg}")
 
 
+def report_format_compatibility(raw_version):
+    actual = raw_version or "1.0"
+    try:
+        components = tuple(int(part) for part in actual.split("."))
+        if not components or any(part == "" for part in actual.split(".")):
+            raise ValueError
+    except ValueError:
+        report_error(f"invalid export format version {actual!r}")
+        return
+    target = (2, 20)
+    components += (0,) * max(0, len(target) - len(components))
+    target_cmp = target + (0,) * max(0, len(components) - len(target))
+    if components == target_cmp:
+        report_ok("Export format: 2.20")
+    elif components < target_cmp:
+        report_warn(
+            f"Export format {actual} is older than supported 2.20. "
+            "Unica will not migrate it automatically; re-export the source "
+            "explicitly with 1C:Enterprise 8.3.27, then retry."
+        )
+    else:
+        report_warn(
+            f"Export format {actual} is newer than supported 2.20; "
+            "platform 1C 8.5 support is planned in upcoming releases."
+        )
+
+
 def finalize():
     checks = ok_count + errors + warnings
     if errors == 0 and warnings == 0 and not detailed:
@@ -271,6 +298,21 @@ valid_property_values = {
     "Indexing":                     ["DontIndex", "Index", "IndexWithAdditionalOrder"],
     "DataHistory":                  ["Use", "DontUse"],
     "DependenceOnCalculationTypes": ["DontUse", "OnActionPeriod"],
+    "SubordinationUse":             ["ToFolders", "ToFoldersAndItems", "ToItems"],
+    "CatalogCodeSeries":            ["WholeCatalog", "WithinOwnerSubordination", "WithinSubordination"],
+    "ChartOfAccountsCodeSeries":    ["WholeChartOfAccounts", "WithinSubordination"],
+    "CharacteristicTypeCodeSeries": ["WholeCharacteristicKind", "WithinSubordination"],
+    "ChoiceMode":                   ["BothWays", "FromForm", "QuickChoice"],
+    "DocumentNumberPeriodicity":    ["Day", "Month", "Nonperiodical", "Quarter", "Year"],
+    "BusinessProcessNumberPeriodicity": ["Day", "Month", "Nonperiodical", "Quarter", "Year"],
+    "CalculationRegisterPeriodicity": ["Day", "Month", "Quarter", "Year"],
+    "PredefinedDataUpdate":         ["Auto", "AutoUpdate", "DontAutoUpdate"],
+    "HTTPMethod":                   [
+        "Any", "CONNECT", "COPY", "DELETE", "GET", "HEAD", "LOCK", "MERGE",
+        "MKCOL", "MOVE", "OPTIONS", "PATCH", "POST", "PROPFIND", "PROPPATCH",
+        "PUT", "TRACE", "UNLOCK",
+    ],
+    "TransferDirection":            ["In", "InOut", "Out"],
 }
 
 # Properties forbidden per type (would cause LoadConfigFromFiles error)
@@ -354,10 +396,7 @@ if root_ns != expected_ns:
 
 # Version attribute
 version = root.get("version", "")
-if not version:
-    report_warn("1. Missing version attribute on MetaDataObject")
-elif version not in ("2.17", "2.20"):
-    report_warn(f"1. Unusual version '{version}' (expected 2.17 or 2.20)")
+report_format_compatibility(version)
 
 # Detect type element -- exactly one child element in md namespace
 type_node = None

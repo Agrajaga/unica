@@ -4,10 +4,34 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
+#[cfg(all(test, unix))]
+pub(crate) fn create_test_directory_link(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(all(test, windows))]
+pub(crate) fn create_test_directory_link(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[cfg(all(test, not(any(unix, windows))))]
+pub(crate) fn create_test_directory_link(_target: &Path, _link: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "test directory links are unavailable on this host",
+    ))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PortablePermissions {
     permissions: fs::Permissions,
     key: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileIdentity {
+    volume: u64,
+    file: u64,
 }
 
 impl PortablePermissions {
@@ -62,8 +86,35 @@ pub(crate) fn hard_link_count(file: &fs::File) -> io::Result<u64> {
     Ok(file.metadata()?.nlink())
 }
 
+#[cfg(unix)]
+pub(crate) fn file_identity(file: &fs::File) -> io::Result<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    Ok(FileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    })
+}
+
 #[cfg(windows)]
 pub(crate) fn hard_link_count(file: &fs::File) -> io::Result<u64> {
+    Ok(u64::from(windows_file_information(file)?.nNumberOfLinks))
+}
+
+#[cfg(windows)]
+pub(crate) fn file_identity(file: &fs::File) -> io::Result<FileIdentity> {
+    let information = windows_file_information(file)?;
+    Ok(FileIdentity {
+        volume: u64::from(information.dwVolumeSerialNumber),
+        file: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+    })
+}
+
+#[cfg(windows)]
+fn windows_file_information(
+    file: &fs::File,
+) -> io::Result<windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION> {
     use std::mem::MaybeUninit;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -80,8 +131,7 @@ pub(crate) fn hard_link_count(file: &fs::File) -> io::Result<u64> {
     } else {
         // SAFETY: a nonzero result guarantees that GetFileInformationByHandle initialized the
         // entire BY_HANDLE_FILE_INFORMATION value.
-        let information = unsafe { information.assume_init() };
-        Ok(u64::from(information.nNumberOfLinks))
+        Ok(unsafe { information.assume_init() })
     }
 }
 
@@ -93,8 +143,106 @@ pub(crate) fn hard_link_count(_file: &fs::File) -> io::Result<u64> {
     ))
 }
 
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn file_identity(_file: &fs::File) -> io::Result<FileIdentity> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "file identity is not available on this host",
+    ))
+}
+
 pub(crate) fn install_file_no_clobber(source: &Path, target: &Path) -> io::Result<()> {
     fs::hard_link(source, target)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let target = CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
+    #[cfg(target_os = "linux")]
+    let no_replace_flag = libc::RENAME_NOREPLACE;
+    #[cfg(target_os = "android")]
+    let no_replace_flag = libc::RENAME_NOREPLACE as libc::c_uint;
+    // SAFETY: both C strings are NUL-terminated and remain live for the syscall. The raw syscall
+    // avoids a glibc-only symbol so this remains available on Linux musl; RENAME_NOREPLACE asks
+    // the kernel to fail atomically when the destination already exists.
+    let moved = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            no_replace_flag,
+        )
+    };
+    if moved == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_vendor = "apple")]
+pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+    let target = CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL"))?;
+    // SAFETY: both C strings are NUL-terminated and remain live for the call. RENAME_EXCL makes
+    // destination existence an atomic failure instead of replacing it.
+    let moved = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+    if moved == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both pointers reference NUL-terminated UTF-16 buffers for the call duration.
+    // Omitting MOVEFILE_REPLACE_EXISTING makes destination existence an atomic failure.
+    let moved = unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+    if moved == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+)))]
+pub(crate) fn rename_no_replace(_source: &Path, _target: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-replace rename is not available on this host",
+    ))
 }
 
 #[cfg(windows)]

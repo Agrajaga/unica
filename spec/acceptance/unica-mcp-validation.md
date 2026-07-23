@@ -107,10 +107,16 @@ python3.12 -m unittest discover -s tests/ci
 git diff --check
 ```
 
-BSP parity fixtures are intentionally byte-for-byte harvested. Their subtree is
-marked `-text -whitespace` in `.gitattributes`; fixture integrity is enforced by
-manifest `size`/`sha256`, while `git diff --check` remains required for the rest
-of the tree.
+BSP parity fixtures preserve the exact committed fixture bytes under
+`.gitattributes` `-text -whitespace`. Schema-v1 manifests may describe direct
+harvests. The current schema-v2 test fixture is instead a deterministic,
+declared projection from the harvested BSP `2.21` XML to the fixed `2.20`
+profile:
+`harvestedSize`/`harvestedSha256` identify the upstream bytes, while
+`size`/`sha256` identify the projected committed bytes. It must not be described
+as byte-identical to the upstream harvest. This immutable CI-fixture projection
+is not a supported migration or downgrade operation and is never applied to
+user source. `git diff --check` remains required for the rest of the tree.
 
 ## Skill Script Removal Acceptance
 

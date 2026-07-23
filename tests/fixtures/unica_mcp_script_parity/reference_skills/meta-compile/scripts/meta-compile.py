@@ -813,13 +813,15 @@ standard_attributes_by_type = {
     'DocumentJournal': ['Type', 'Ref', 'Date', 'Posted', 'DeletionMark', 'Number'],
 }
 
-def emit_standard_attribute(indent, attr_name):
+def emit_standard_attribute(indent, object_type, attr_name):
     X(f'{indent}<xr:StandardAttribute name="{attr_name}">')
     X(f'{indent}\t<xr:LinkByType/>')
     X(f'{indent}\t<xr:FillChecking>DontCheck</xr:FillChecking>')
     X(f'{indent}\t<xr:MultiLine>false</xr:MultiLine>')
     X(f'{indent}\t<xr:FillFromFillingValue>false</xr:FillFromFillingValue>')
     X(f'{indent}\t<xr:CreateOnInput>Auto</xr:CreateOnInput>')
+    reduction_mode = 'Deny' if object_type == 'Catalog' and attr_name == 'Owner' else 'TransformValues'
+    X(f'{indent}\t<xr:TypeReductionMode>{reduction_mode}</xr:TypeReductionMode>')
     X(f'{indent}\t<xr:MaxValue xsi:nil="true"/>')
     X(f'{indent}\t<xr:ToolTip/>')
     X(f'{indent}\t<xr:ExtendedEdit>false</xr:ExtendedEdit>')
@@ -847,12 +849,12 @@ def emit_standard_attributes(indent, object_type):
         return
     X(f'{indent}<StandardAttributes>')
     for a in attrs:
-        emit_standard_attribute(f'{indent}\t', a)
+        emit_standard_attribute(f'{indent}\t', object_type, a)
     X(f'{indent}</StandardAttributes>')
 
 def emit_tabular_standard_attributes(indent):
     X(f'{indent}<StandardAttributes>')
-    emit_standard_attribute(f'{indent}\t', 'LineNumber')
+    emit_standard_attribute(f'{indent}\t', 'TabularSection', 'LineNumber')
     X(f'{indent}</StandardAttributes>')
 
 # ---------------------------------------------------------------------------
@@ -983,6 +985,8 @@ def emit_tabular_section(indent, ts_name, columns, object_type, object_name):
     X(f'{indent}\t\t<ToolTip/>')
     X(f'{indent}\t\t<FillChecking>DontCheck</FillChecking>')
     emit_tabular_standard_attributes(f'{indent}\t\t')
+    if object_type != 'DataProcessor':
+        X(f'{indent}\t\t<LineNumberLength>9</LineNumberLength>')
     if object_type == 'Catalog':
         X(f'{indent}\t\t<Use>ForItem</Use>')
     X(f'{indent}\t</Properties>')
@@ -1833,7 +1837,7 @@ def emit_chart_of_accounts_properties(indent):
     X(f'{i}\t<xr:StandardTabularSection name="ExtDimensionTypes">')
     X(f'{i}\t\t<xr:StandardAttributes>')
     for st_attr in ['TurnoversOnly', 'Predefined', 'ExtDimensionType', 'LineNumber']:
-        emit_standard_attribute(f'{i}\t\t\t', st_attr)
+        emit_standard_attribute(f'{i}\t\t\t', 'ChartOfAccounts.ExtDimensionTypes', st_attr)
     X(f'{i}\t\t</xr:StandardAttributes>')
     X(f'{i}\t</xr:StandardTabularSection>')
     X(f'{i}</StandardTabularSections>')
@@ -2414,7 +2418,7 @@ def detect_format_version(d):
         if parent == d:
             break
         d = parent
-    return "2.17"
+    return "2.20"
 
 format_version = detect_format_version(output_dir)
 

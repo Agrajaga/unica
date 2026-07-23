@@ -87,7 +87,7 @@
         "ExternalReport"
       ]
     },
-    "{http://v8.1c.ru/8.3/MDClasses}Flowchart": {
+    "{http://v8.1c.ru/8.3/xcf/scheme}GraphicalSchema": {
       "id": "flowchart",
       "coverage": "not-covered",
       "version": "root"

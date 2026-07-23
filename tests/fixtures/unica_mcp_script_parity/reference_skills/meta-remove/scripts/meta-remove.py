@@ -354,11 +354,10 @@ def main():
                         # Remove preceding whitespace (tail of previous sibling or text of parent)
                         prev = child.getprevious()
                         if prev is not None:
-                            if prev.tail and prev.tail.strip() == "":
-                                prev.tail = prev.tail.rsplit("\n", 1)[0] + "\n" if "\n" in prev.tail else ""
-                                if not prev.tail.strip():
-                                    # Keep just the last newline+indent before the next element
-                                    pass
+                            if child.tail and child.tail.strip() == "":
+                                prev.tail = child.tail
+                        elif child.tail and child.tail.strip() == "":
+                            child_objects.text = child.tail
                         child_objects.remove(child)
                     print(f"[OK]    Removed <{obj_type}>{obj_name}</{obj_type}> from ChildObjects")
                     actions += 1

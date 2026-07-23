@@ -990,13 +990,15 @@ ChildObjects содержат `IntegrationServiceChannel` (каналы) — inl
 
 ### 7.2. Configuration.xml — Properties
 
-Набор свойств Properties **идентичен** в обеих версиях. Отличия только в значениях:
+В исследованных выгрузках набор непосредственных элементов в `Properties`
+совпадает. Меняются значения и допустимые элементы коллекций внутри этих
+свойств:
 
 | Свойство | Изменение |
 |----------|-----------|
 | `CompatibilityMode` | `Version8_3_24` → `Version8_3_24` / `Version8_3_27` (зависит от конфигурации) |
 | `ConfigurationExtensionCompatibilityMode` | аналогично |
-| `UsedMobileApplicationFunctionalities` | В v2.20 добавлена функциональность `TextToSpeech` |
+| `UsedMobileApplicationFunctionalities` | В v2.20 в коллекцию добавлено значение `TextToSpeech` |
 
 ### 7.3. Configuration.xml — ChildObjects
 

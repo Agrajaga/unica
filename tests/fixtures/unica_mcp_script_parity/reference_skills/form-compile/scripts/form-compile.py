@@ -3507,8 +3507,8 @@ GENERIC_SCALARS = [
     # Хвост: высота элемента списка (radio) / ширина выпадающего списка (input)
     ('ItemHeight', 'itemHeight', 'value'),
     ('DropListWidth', 'dropListWidth', 'value'),
-    # Хвост CI-форм: динамический заголовок (Page/Group) / расширенное ред. (input) / высота таблицы по строкам
-    ('TitleDataPath', 'titleDataPath', 'value'),
+    # Хвост CI-форм: расширенное ред. (input) / высота таблицы по строкам.
+    # TitleDataPath is emitted by Page/UsualGroup at its 8.3.27 schema position.
     ('ExtendedEdit', 'extendedEdit', 'bool'),
     ('MaxRowsCount', 'maxRowsCount', 'value'),
     ('AutoMaxRowsCount', 'autoMaxRowsCount', 'bool'),
@@ -4038,7 +4038,10 @@ def emit_group(lines, el, name, eid, indent):
         repr_val = repr_map.get(str(el['representation']), str(el['representation']))
         lines.append(f'{inner}<Representation>{repr_val}</Representation>')
 
-    # Использование текущей строки группы (после Representation, порядок XSD)
+    if el.get('titleDataPath'):
+        lines.append(f'{inner}<TitleDataPath>{esc_xml(str(el["titleDataPath"]))}</TitleDataPath>')
+
+    # Использование текущей строки группы (после TitleDataPath, порядок XSD 8.3.27)
     if el.get('currentRowUse'):
         lines.append(f'{inner}<CurrentRowUse>{el["currentRowUse"]}</CurrentRowUse>')
 
@@ -4231,6 +4234,8 @@ def emit_check(lines, el, name, eid, indent):
     if el.get('editMode'):
         lines.append(f'{inner}<EditMode>{el["editMode"]}</EditMode>')
     emit_column_pics(lines, el, inner)
+    emit_title_location(lines, el, inner, 'Right')
+
     # CheckBoxType: нет ключа → умный дефолт Auto; "" → подавить; значение → маппинг
     _cbt_map = {'auto': 'Auto', 'checkbox': 'CheckBox', 'switcher': 'Switcher', 'tumbler': 'Tumbler'}
     if 'checkBoxType' in el:
@@ -4238,8 +4243,6 @@ def emit_check(lines, el, name, eid, indent):
             lines.append(f'{inner}<CheckBoxType>{_cbt_map.get(str(el["checkBoxType"]).lower(), el["checkBoxType"])}</CheckBoxType>')
     else:
         lines.append(f'{inner}<CheckBoxType>Auto</CheckBoxType>')
-
-    emit_title_location(lines, el, inner, 'Right')
 
     emit_layout(lines, el, inner)
 
@@ -4449,9 +4452,6 @@ def emit_table(lines, el, name, eid, indent):
         lines.append(f'{inner}<ChangeRowOrder>{"true" if el["changeRowOrder"] is True else "false"}</ChangeRowOrder>')
     if el.get('autoInsertNewRow') is True:
         lines.append(f'{inner}<AutoInsertNewRow>true</AutoInsertNewRow>')
-    # RowFilter — nil-плейсхолдер (ключ присутствует → эмитим)
-    if 'rowFilter' in el:
-        lines.append(f'{inner}<RowFilter xsi:nil="true"/>')
     # Высота в строках (<HeightInTableRows>) — отдельное свойство от <Height> (высота элемента,
     # эмитится generic-ом emit_layout ниже). Таблица может нести оба (237 в корпусе).
     if el.get('heightInTableRows'):
@@ -4498,6 +4498,8 @@ def emit_table(lines, el, name, eid, indent):
         lines.append(f'{inner}<EnableDrag>{"true" if el["enableDrag"] else "false"}</EnableDrag>')
     if el.get('rowPictureDataPath'):
         lines.append(f'{inner}<RowPictureDataPath>{el["rowPictureDataPath"]}</RowPictureDataPath>')
+    # 8.3.27 writes the absent row filter explicitly after RowPictureDataPath.
+    lines.append(f'{inner}<RowFilter xsi:nil="true"/>')
     # RowsPicture — та же конвенция, что ValuesPicture (дефолт LoadTransparent=false; abs/TransparentPixel)
     emit_picture_ref(lines, el.get('rowsPicture'), 'RowsPicture', inner)
     # Использование текущей строки таблицы (pass-through; в корпусе соседствует с блоком дин-списка)
@@ -4611,6 +4613,8 @@ def emit_page(lines, el, name, eid, indent):
             _warn_unrecognized('page group orientation', el['group'], ('vertical', 'horizontalIfPossible', 'alwaysHorizontal'), name)
     if el.get('showTitle') is not None:
         lines.append(f'{inner}<ShowTitle>{"true" if el["showTitle"] else "false"}</ShowTitle>')
+    if el.get('titleDataPath'):
+        lines.append(f'{inner}<TitleDataPath>{esc_xml(str(el["titleDataPath"]))}</TitleDataPath>')
     # Формат значения пути к данным заголовка (<Format>; парный к titleDataPath страницы)
     if el.get('format'):
         emit_mltext(lines, inner, 'Format', el['format'])
@@ -4673,6 +4677,9 @@ def emit_button(lines, el, name, eid, indent, in_cmd_bar=False):
     if btn_type:
         lines.append(f'{inner}<Type>{btn_type}</Type>')
 
+    if el.get('representation'):
+        lines.append(f'{inner}<Representation>{el["representation"]}</Representation>')
+
     # CommandName
     if el.get('command'):
         lines.append(f'{inner}<CommandName>Form.Command.{el["command"]}</CommandName>')
@@ -4712,9 +4719,6 @@ def emit_button(lines, el, name, eid, indent, in_cmd_bar=False):
 
     # Picture
     emit_command_picture(lines, el.get('picture'), el.get('loadTransparent'), inner)
-
-    if el.get('representation'):
-        lines.append(f'{inner}<Representation>{el["representation"]}</Representation>')
 
     if el.get('locationInCommandBar'):
         lines.append(f'{inner}<LocationInCommandBar>{el["locationInCommandBar"]}</LocationInCommandBar>')
@@ -6019,12 +6023,35 @@ PROP_MAP = {
     "group": "Group",
 }
 
+FORM_ROOT_SCALAR_PROPERTY_ORDER = [
+    "Width", "Height", "WindowOpeningMode", "EnterKeyBehavior",
+    "AutoSaveDataInSettings", "SaveDataInSettings", "SaveWindowSettings",
+    "SettingsStorage", "AutoTitle", "AutoURL", "Group", "ChildrenAlign",
+    "HorizontalSpacing", "VerticalSpacing", "HorizontalAlign", "VerticalAlign",
+    "ChildItemsWidth", "AutoFillCheck", "Customizable", "Enabled", "ReadOnly",
+    "CommandBarLocation", "VerticalScroll", "ScalingMode", "Scale",
+    "ConversationsRepresentation", "ShowTitle", "ShowCloseButton",
+    "CollapseItemsByImportanceVariant", "UseForFoldersAndItems", "GroupList",
+    "AutoTime", "UsePostingMode", "RepostOnWrite", "ReportResult",
+    "DetailsData", "ReportFormType", "VariantAppearance", "AutoShowState",
+    "CustomSettingsFolder", "ReportResultViewMode",
+    "ViewModeApplicationOnSetReportResult",
+]
+
 
 def emit_properties(lines, props, indent):
     if not props:
         return
 
-    for p_name, p_value in props.items():
+    property_order = {name: index for index, name in enumerate(FORM_ROOT_SCALAR_PROPERTY_ORDER)}
+    ordered_props = sorted(
+        props.items(),
+        key=lambda item: property_order.get(
+            PROP_MAP.get(item[0], item[0][0].upper() + item[0][1:]),
+            len(property_order),
+        ),
+    )
+    for p_name, p_value in ordered_props:
         xml_name = PROP_MAP.get(p_name)
         if not xml_name:
             # Auto PascalCase
@@ -6055,7 +6082,7 @@ def detect_format_version(d):
         if parent == d:
             break
         d = parent
-    return "2.17"
+    return "2.20"
 
 
 def _normalize_elements(defn):
@@ -6463,6 +6490,27 @@ def main():
     props_clone = OrderedDict()
     if form_title and 'autoTitle' not in props_src:
         props_clone['autoTitle'] = False
+    main_attribute_type = next((
+        str(attr.get('type', ''))
+        for attr in (defn.get('attributes') or [])
+        if isinstance(attr, dict) and attr.get('main') is True
+    ), '')
+    if (
+        main_attribute_type.startswith('CatalogObject.')
+        and 'useForFoldersAndItems' not in props_src
+        and 'UseForFoldersAndItems' not in props_src
+    ):
+        props_clone['useForFoldersAndItems'] = 'Items'
+    if main_attribute_type.startswith(('ReportObject.', 'ExternalReportObject.')):
+        report_defaults = (
+            ('reportFormType', 'ReportFormType', 'Main'),
+            ('autoShowState', 'AutoShowState', 'Auto'),
+            ('reportResultViewMode', 'ReportResultViewMode', 'Auto'),
+            ('viewModeApplicationOnSetReportResult', 'ViewModeApplicationOnSetReportResult', 'Auto'),
+        )
+        for json_name, xml_name, default_value in report_defaults:
+            if json_name not in props_src and xml_name not in props_src:
+                props_clone[json_name] = default_value
     for k, v in props_src.items():
         if k != 'title':
             props_clone[k] = v

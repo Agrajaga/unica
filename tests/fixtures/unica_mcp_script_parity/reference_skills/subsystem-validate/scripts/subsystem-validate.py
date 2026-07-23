@@ -72,6 +72,33 @@ class Reporter:
         return '\r\n'.join(self.lines) + '\r\n'
 
 
+def report_format_compatibility(reporter, raw_version):
+    actual = raw_version or '1.0'
+    try:
+        components = tuple(int(part) for part in actual.split('.'))
+        if not components or any(part == '' for part in actual.split('.')):
+            raise ValueError
+    except ValueError:
+        reporter.error(f"invalid export format version {actual!r}")
+        return
+    target = (2, 20)
+    components += (0,) * max(0, len(target) - len(components))
+    target_cmp = target + (0,) * max(0, len(components) - len(target))
+    if components == target_cmp:
+        reporter.ok('Export format: 2.20')
+    elif components < target_cmp:
+        reporter.warn(
+            f'Export format {actual} is older than supported 2.20. '
+            'Unica will not migrate it automatically; re-export the source '
+            'explicitly with 1C:Enterprise 8.3.27, then retry.'
+        )
+    else:
+        reporter.warn(
+            f'Export format {actual} is newer than supported 2.20; '
+            'platform 1C 8.5 support is planned in upcoming releases.'
+        )
+
+
 def find_duplicates(items):
     seen = {}
     dupes = []
@@ -146,6 +173,7 @@ def main():
     if not r.stopped:
         root = xml_doc.getroot()
         version = root.get('version', '')
+        report_format_compatibility(r, version)
         sub_list = root.findall('md:Subsystem', NS)
         sub = sub_list[0] if sub_list else None
 
@@ -199,7 +227,7 @@ def main():
         r.lines.insert(0, header_line)
 
         if sub_name and IDENT_PATTERN.match(sub_name):
-            r.ok(f'3. Name: "{sub_name}" - valid identifier')
+            r.ok(f'3. Name: "{sub_name}" - valid Unicode XML NCName')
         elif not sub_name:
             r.error('3. Name: empty')
         else:

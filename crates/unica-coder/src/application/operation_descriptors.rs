@@ -28,7 +28,6 @@ pub(crate) enum FormatGuardPolicy {
     ExistingDump,
     OptionalExistingBase,
     NewDump,
-    None,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,6 +44,12 @@ pub(crate) enum SupportGuardPolicy {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PathAliasGroup {
+    pub canonical: &'static str,
+    pub aliases: &'static [&'static str],
+}
+
 const EMPTY: &[&str] = &[];
 pub(crate) const CF_PATH: &[&str] = &["ConfigPath", "configPath", "Path", "path"];
 const CONFIG_DIR: &[&str] = &["ConfigDir", "configDir"];
@@ -54,6 +59,7 @@ const EXTENSION_PATH: &[&str] = &["ExtensionPath", "extensionPath"];
 pub(crate) const CFE_VALIDATE_PATH: &[&str] = &["ExtensionPath", "extensionPath", "Path", "path"];
 const CFE_BORROW_SOURCE: &[&str] = &["ExtensionPath", "ConfigPath", "extensionPath", "configPath"];
 const CFE_INIT_BASE: &[&str] = &["ConfigPath", "configPath"];
+const CFE_INIT_OUTPUT: &[&str] = &["OutputDir", "outputDir", "ExtensionPath", "extensionPath"];
 pub(crate) const OBJECT_PATH: &[&str] = &["ObjectPath", "objectPath", "Path", "path"];
 const OBJECT_PATH_REQUIRED: &[&str] = &["ObjectPath"];
 const SRC_DIR: &[&str] = &["SrcDir", "srcDir"];
@@ -91,6 +97,99 @@ const EXTERNAL_INIT_REQUIRED: &[&str] = &["Name", "OutputDir"];
 const CODE_PATCH_PATH: &[&str] = &["path"];
 const CODE_PATCH_REQUIRED: &[&str] = &["path", "operation", "selector", "content", "position"];
 
+const JSON_PATH: &[&str] = &["JsonPath", "jsonPath"];
+const DEFINITION_FILE: &[&str] = &["DefinitionFile", "definitionFile"];
+const MODULE_PATH: &[&str] = &["ModulePath", "modulePath"];
+const PARENT_PATH: &[&str] = &["Parent", "parent"];
+
+const CF_PATH_GROUP: PathAliasGroup = path_alias_group("ConfigPath", CF_PATH);
+const CONFIG_DIR_GROUP: PathAliasGroup = path_alias_group("ConfigDir", CONFIG_DIR);
+const OUTPUT_DIR_GROUP: PathAliasGroup = path_alias_group("OutputDir", OUTPUT_DIR);
+const OUT_FILE_GROUP: PathAliasGroup = path_alias_group("OutFile", OUT_FILE);
+const EXTENSION_PATH_GROUP: PathAliasGroup = path_alias_group("ExtensionPath", EXTENSION_PATH);
+const CFE_VALIDATE_PATH_GROUP: PathAliasGroup =
+    path_alias_group("ExtensionPath", CFE_VALIDATE_PATH);
+const CFE_INIT_OUTPUT_GROUP: PathAliasGroup = path_alias_group("OutputDir", CFE_INIT_OUTPUT);
+const OBJECT_PATH_GROUP: PathAliasGroup = path_alias_group("ObjectPath", OBJECT_PATH);
+const SRC_DIR_GROUP: PathAliasGroup = path_alias_group("SrcDir", SRC_DIR);
+const FORM_PATH_GROUP: PathAliasGroup = path_alias_group("FormPath", FORM_PATH);
+const CI_PATH_GROUP: PathAliasGroup = path_alias_group("CIPath", CI_PATH);
+const SUBSYSTEM_PATH_GROUP: PathAliasGroup = path_alias_group("SubsystemPath", SUBSYSTEM_PATH);
+const OUTPUT_PATH_GROUP: PathAliasGroup = path_alias_group("OutputPath", OUTPUT_PATH);
+const TEMPLATE_PATH_GROUP: PathAliasGroup = path_alias_group("TemplatePath", TEMPLATE_PATH);
+const RIGHTS_PATH_GROUP: PathAliasGroup = path_alias_group("RightsPath", RIGHTS_PATH);
+const SUPPORT_PATH_GROUP: PathAliasGroup = path_alias_group("Path", SUPPORT_PATH);
+const JSON_PATH_GROUP: PathAliasGroup = path_alias_group("JsonPath", JSON_PATH);
+const DEFINITION_FILE_GROUP: PathAliasGroup = path_alias_group("DefinitionFile", DEFINITION_FILE);
+const MODULE_PATH_GROUP: PathAliasGroup = path_alias_group("ModulePath", MODULE_PATH);
+const PARENT_PATH_GROUP: PathAliasGroup = path_alias_group("Parent", PARENT_PATH);
+
+const CF_EDIT_PATH_GROUPS: &[PathAliasGroup] = &[CF_PATH_GROUP, DEFINITION_FILE_GROUP];
+const CF_READ_PATH_GROUPS: &[PathAliasGroup] = &[CF_PATH_GROUP, OUT_FILE_GROUP];
+const CF_INIT_PATH_GROUPS: &[PathAliasGroup] = &[OUTPUT_DIR_GROUP];
+const SUPPORT_PATH_GROUPS: &[PathAliasGroup] = &[SUPPORT_PATH_GROUP];
+const CFE_TWO_ROOT_PATH_GROUPS: &[PathAliasGroup] = &[EXTENSION_PATH_GROUP, CF_PATH_GROUP];
+const CFE_INIT_PATH_GROUPS: &[PathAliasGroup] = &[CF_PATH_GROUP, CFE_INIT_OUTPUT_GROUP];
+const CFE_PATCH_METHOD_PATH_GROUPS: &[PathAliasGroup] = &[EXTENSION_PATH_GROUP, MODULE_PATH_GROUP];
+const CFE_VALIDATE_PATH_GROUPS: &[PathAliasGroup] = &[CFE_VALIDATE_PATH_GROUP, OUT_FILE_GROUP];
+const COMPILE_TO_DIR_PATH_GROUPS: &[PathAliasGroup] = &[JSON_PATH_GROUP, OUTPUT_DIR_GROUP];
+const META_EDIT_PATH_GROUPS: &[PathAliasGroup] = &[OBJECT_PATH_GROUP, DEFINITION_FILE_GROUP];
+const OBJECT_READ_PATH_GROUPS: &[PathAliasGroup] = &[OBJECT_PATH_GROUP, OUT_FILE_GROUP];
+const META_REMOVE_PATH_GROUPS: &[PathAliasGroup] = &[CONFIG_DIR_GROUP];
+const SRC_DIR_PATH_GROUPS: &[PathAliasGroup] = &[SRC_DIR_GROUP];
+const OBJECT_PATH_GROUPS: &[PathAliasGroup] = &[OBJECT_PATH_GROUP];
+const FORM_COMPILE_PATH_GROUPS: &[PathAliasGroup] =
+    &[JSON_PATH_GROUP, OBJECT_PATH_GROUP, OUTPUT_PATH_GROUP];
+const FORM_EDIT_PATH_GROUPS: &[PathAliasGroup] = &[FORM_PATH_GROUP, JSON_PATH_GROUP];
+const FORM_READ_PATH_GROUPS: &[PathAliasGroup] = &[FORM_PATH_GROUP];
+const INTERFACE_EDIT_PATH_GROUPS: &[PathAliasGroup] = &[CI_PATH_GROUP, DEFINITION_FILE_GROUP];
+const INTERFACE_READ_PATH_GROUPS: &[PathAliasGroup] = &[CI_PATH_GROUP, OUT_FILE_GROUP];
+const SUBSYSTEM_COMPILE_PATH_GROUPS: &[PathAliasGroup] =
+    &[OUTPUT_DIR_GROUP, PARENT_PATH_GROUP, DEFINITION_FILE_GROUP];
+const SUBSYSTEM_EDIT_PATH_GROUPS: &[PathAliasGroup] =
+    &[SUBSYSTEM_PATH_GROUP, DEFINITION_FILE_GROUP];
+const SUBSYSTEM_READ_PATH_GROUPS: &[PathAliasGroup] = &[SUBSYSTEM_PATH_GROUP, OUT_FILE_GROUP];
+const DCS_COMPILE_PATH_GROUPS: &[PathAliasGroup] = &[OUTPUT_PATH_GROUP, DEFINITION_FILE_GROUP];
+const DCS_EDIT_PATH_GROUPS: &[PathAliasGroup] = &[TEMPLATE_PATH_GROUP, DEFINITION_FILE_GROUP];
+const DCS_READ_PATH_GROUPS: &[PathAliasGroup] = &[TEMPLATE_PATH_GROUP, OUT_FILE_GROUP];
+const MXL_READ_PATH_GROUPS: &[PathAliasGroup] = &[TEMPLATE_PATH_GROUP, SRC_DIR_GROUP];
+const COMPILE_TO_PATH_GROUPS: &[PathAliasGroup] = &[JSON_PATH_GROUP, OUTPUT_PATH_GROUP];
+const RIGHTS_READ_PATH_GROUPS: &[PathAliasGroup] = &[RIGHTS_PATH_GROUP, OUT_FILE_GROUP];
+
+pub(crate) fn native_path_alias_groups(operation: &str) -> &'static [PathAliasGroup] {
+    match operation {
+        "cf-edit" => CF_EDIT_PATH_GROUPS,
+        "cf-info" | "cf-validate" => CF_READ_PATH_GROUPS,
+        "cf-init" => CF_INIT_PATH_GROUPS,
+        "support-edit" => SUPPORT_PATH_GROUPS,
+        "cfe-borrow" | "cfe-diff" => CFE_TWO_ROOT_PATH_GROUPS,
+        "cfe-init" => CFE_INIT_PATH_GROUPS,
+        "cfe-patch-method" => CFE_PATCH_METHOD_PATH_GROUPS,
+        "cfe-validate" => CFE_VALIDATE_PATH_GROUPS,
+        "meta-compile" | "role-compile" => COMPILE_TO_DIR_PATH_GROUPS,
+        "meta-edit" => META_EDIT_PATH_GROUPS,
+        "meta-info" | "meta-validate" => OBJECT_READ_PATH_GROUPS,
+        "meta-remove" => META_REMOVE_PATH_GROUPS,
+        "help-add" | "form-remove" | "template-add" | "template-remove" => SRC_DIR_PATH_GROUPS,
+        "form-add" => OBJECT_PATH_GROUPS,
+        "form-compile" => FORM_COMPILE_PATH_GROUPS,
+        "form-edit" => FORM_EDIT_PATH_GROUPS,
+        "form-info" | "form-validate" => FORM_READ_PATH_GROUPS,
+        "interface-edit" => INTERFACE_EDIT_PATH_GROUPS,
+        "interface-validate" => INTERFACE_READ_PATH_GROUPS,
+        "subsystem-compile" => SUBSYSTEM_COMPILE_PATH_GROUPS,
+        "subsystem-edit" => SUBSYSTEM_EDIT_PATH_GROUPS,
+        "subsystem-info" | "subsystem-validate" => SUBSYSTEM_READ_PATH_GROUPS,
+        "dcs-compile" => DCS_COMPILE_PATH_GROUPS,
+        "dcs-edit" => DCS_EDIT_PATH_GROUPS,
+        "dcs-info" | "dcs-validate" => DCS_READ_PATH_GROUPS,
+        "mxl-decompile" | "mxl-info" | "mxl-validate" => MXL_READ_PATH_GROUPS,
+        "mxl-compile" => COMPILE_TO_PATH_GROUPS,
+        "role-info" | "role-validate" => RIGHTS_READ_PATH_GROUPS,
+        _ => &[],
+    }
+}
+
 pub(crate) fn native_operation_descriptor(operation: &str) -> Option<&'static OperationDescriptor> {
     NATIVE_OPERATION_DESCRIPTORS
         .iter()
@@ -103,7 +202,7 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         CODE_PATCH_REQUIRED,
         CODE_PATCH_PATH,
         CODE_PATCH_PATH,
-        FormatGuardPolicy::None,
+        FormatGuardPolicy::ExistingDump,
         Some(path_guard(
             CODE_PATCH_PATH,
             SupportGuardRequirement::Editable,
@@ -162,7 +261,7 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
     descriptor_with_format(
         "cfe-init",
         EMPTY,
-        OUTPUT_DIR,
+        CFE_INIT_OUTPUT,
         CFE_INIT_BASE,
         FormatGuardPolicy::OptionalExistingBase,
         None,
@@ -215,11 +314,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         FormatPathPolicy::HandlerResolved,
         Some(path_guard(OBJECT_PATH, SupportGuardRequirement::Editable)),
     ),
-    descriptor(
+    descriptor_with_paths(
         "meta-info",
         OBJECT_PATH_REQUIRED,
         OUT_FILE,
         OBJECT_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
         None,
     ),
     descriptor(
@@ -229,11 +330,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         CONFIG_DIR,
         Some(meta_remove_guard()),
     ),
-    descriptor(
+    descriptor_with_paths(
         "meta-validate",
         OBJECT_PATH_REQUIRED,
         OUT_FILE,
         OBJECT_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
         None,
     ),
     descriptor_with_paths(
@@ -270,7 +373,15 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         FORM_PATH,
         Some(path_guard(FORM_PATH, SupportGuardRequirement::Editable)),
     ),
-    descriptor("form-info", FORM_PATH_REQUIRED, EMPTY, FORM_PATH, None),
+    descriptor_with_paths(
+        "form-info",
+        FORM_PATH_REQUIRED,
+        EMPTY,
+        FORM_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
+        None,
+    ),
     descriptor_with_paths(
         "form-remove",
         EMPTY,
@@ -280,7 +391,15 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         FormatPathPolicy::DefaultSrcObject,
         Some(object_name_guard(SupportGuardRequirement::Editable)),
     ),
-    descriptor("form-validate", FORM_PATH_REQUIRED, EMPTY, FORM_PATH, None),
+    descriptor_with_paths(
+        "form-validate",
+        FORM_PATH_REQUIRED,
+        EMPTY,
+        FORM_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
+        None,
+    ),
     descriptor(
         "interface-edit",
         CI_PATH_REQUIRED,
@@ -288,11 +407,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         CI_PATH,
         Some(path_guard(CI_PATH, SupportGuardRequirement::Editable)),
     ),
-    descriptor(
+    descriptor_with_paths(
         "interface-validate",
         CI_PATH_REQUIRED,
         OUT_FILE,
         CI_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
         None,
     ),
     descriptor(
@@ -369,11 +490,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         TEMPLATE_PATH,
         None,
     ),
-    descriptor(
+    descriptor_with_paths(
         "dcs-validate",
         TEMPLATE_PATH_REQUIRED,
         OUT_FILE,
         TEMPLATE_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
         None,
     ),
     descriptor_with_format(
@@ -398,11 +521,13 @@ pub(super) const NATIVE_OPERATION_DESCRIPTORS: &[OperationDescriptor] = &[
         TEMPLATE_PATH,
         None,
     ),
-    descriptor(
+    descriptor_with_paths(
         "mxl-validate",
         TEMPLATE_PATH_REQUIRED,
         EMPTY,
         TEMPLATE_PATH,
+        FormatGuardPolicy::ExistingDump,
+        FormatPathPolicy::HandlerResolved,
         None,
     ),
     descriptor(
@@ -504,4 +629,11 @@ const fn meta_remove_guard() -> SupportGuardPolicy {
 
 const fn object_name_guard(requirement: SupportGuardRequirement) -> SupportGuardPolicy {
     SupportGuardPolicy::ObjectName { requirement }
+}
+
+const fn path_alias_group(
+    canonical: &'static str,
+    aliases: &'static [&'static str],
+) -> PathAliasGroup {
+    PathAliasGroup { canonical, aliases }
 }

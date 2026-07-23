@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
+import os
 import re
 import stat
 import subprocess
@@ -17,12 +19,27 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from lxml import etree
 
+try:
+    from scripts.dev.xml_lexical import LexicalXmlError, raw_root_attribute
+except ModuleNotFoundError:
+    from xml_lexical import LexicalXmlError, raw_root_attribute
+
 
 XS_NS = "http://www.w3.org/2001/XMLSchema"
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
+CORE_NS = "http://v8.1c.ru/8.1/data/core"
+MD_CLASSES_NS = "http://v8.1c.ru/8.3/MDClasses"
+QNAME_TEXT_ELEMENTS = {
+    f"{{{CORE_NS}}}Type",
+    f"{{{CORE_NS}}}TypeSet",
+    f"{{{MD_CLASSES_NS}}}XDTOReturningValueType",
+    f"{{{MD_CLASSES_NS}}}XDTOValueType",
+}
 REPORT_SCHEMA_NAME = "verify-8-3-27-xml-report.schema.json"
 MANIFEST_SCHEMA_URI_PREFIX = "unica-manifest-xsd://schema/"
 BLOCKED_SCHEMA_URI_PREFIX = "unica-blocked-xsd://dependency/"
+FIXED_PROFILE = "1c-8.3.27-export-2.20"
+_CANONICAL_CORPUS_VERIFIER = None
 
 
 class SourceError(RuntimeError):
@@ -41,6 +58,23 @@ class RuntimeEvidence(dict):
 
     def __del__(self):
         self.close()
+
+
+def _canonical_corpus_verifier():
+    global _CANONICAL_CORPUS_VERIFIER
+    if _CANONICAL_CORPUS_VERIFIER is not None:
+        return _CANONICAL_CORPUS_VERIFIER
+    script = Path(__file__).with_name("verify-8-3-27-platform.py")
+    spec = importlib.util.spec_from_file_location(
+        "unica_verify_8_3_27_platform_contract",
+        script,
+    )
+    if spec is None or spec.loader is None:
+        raise SourceError(f"cannot load canonical corpus verifier: {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _CANONICAL_CORPUS_VERIFIER = module
+    return module
 
 
 def _private_copy_with_sha256(source: Path, destination: Path, label: str) -> str:
@@ -478,7 +512,12 @@ def verified_runtime(path: Path | str, profile: dict) -> dict:
 
 
 def _is_canonical_relative_path(raw, suffix: str | None = None) -> bool:
-    if not isinstance(raw, str) or not raw or "\\" in raw or "\0" in raw:
+    if (
+        not isinstance(raw, str)
+        or not raw
+        or "\\" in raw
+        or any(ord(character) < 0x20 for character in raw)
+    ):
         return False
     pure = PurePosixPath(raw)
     windows = PureWindowsPath(raw)
@@ -660,31 +699,190 @@ def _safe_corpus_path(root: Path, raw: str) -> Path:
     return candidate
 
 
+def _safe_corpus_directory(root: Path, raw: str) -> Path:
+    if not _is_canonical_relative_path(raw):
+        raise CorpusError(f"unsafe corpus directory or non-canonical path: {raw}")
+    candidate = root
+    for part in PurePosixPath(raw).parts:
+        candidate = candidate / part
+        if candidate.is_symlink():
+            raise CorpusError(f"corpus symlink is forbidden: {raw}")
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+    except (OSError, ValueError) as error:
+        raise CorpusError(f"corpus directory escapes root: {raw}") from error
+    if not resolved.is_dir():
+        raise CorpusError(f"listed corpus directory is missing: {raw}")
+    return resolved
+
+
 def _read_corpus_snapshot(path: Path, raw: str) -> tuple[bytes, str]:
     """Read once into immutable bytes while hashing the exact same stream."""
     digest = hashlib.sha256()
     blocks = []
+    descriptor = None
     try:
-        with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                blocks.append(block)
-                digest.update(block)
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise CorpusError(
+                f"corpus XML snapshot is not one private regular file: {raw}"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
+            os, "O_NOFOLLOW", 0
+        )
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_mode,
+            opened.st_nlink,
+            opened.st_size,
+            opened.st_mtime_ns,
+        )
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        if identity != before_identity or not stat.S_ISREG(opened.st_mode):
+            raise CorpusError(f"corpus XML snapshot identity changed before open: {raw}")
+        size = 0
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            blocks.append(block)
+            digest.update(block)
+            size += len(block)
+        after = os.fstat(descriptor)
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        final_path = path.lstat()
+        final_identity = (
+            final_path.st_dev,
+            final_path.st_ino,
+            final_path.st_mode,
+            final_path.st_nlink,
+            final_path.st_size,
+            final_path.st_mtime_ns,
+        )
+        if (
+            after_identity != identity
+            or final_identity != identity
+            or size != opened.st_size
+        ):
+            raise CorpusError(f"corpus XML snapshot changed while reading: {raw}")
+    except CorpusError:
+        raise
     except OSError as error:
-        raise CorpusError(f"cannot read corpus file for hashing: {raw}: {error}") from error
+        raise CorpusError(
+            f"cannot capture immutable corpus XML snapshot {raw}: {error}"
+        ) from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     return b"".join(blocks), digest.hexdigest()
 
 
+def _corpus_empty_directory_paths(root: Path) -> list[str]:
+    """Capture the minimal empty-directory topology of the corpus tree."""
+    result = []
+
+    def visit(directory: Path) -> None:
+        try:
+            entries = sorted(directory.iterdir(), key=lambda entry: entry.name)
+        except OSError as error:
+            raise CorpusError(f"cannot enumerate corpus directory {directory}: {error}") from error
+        if not entries and directory != root:
+            result.append(directory.relative_to(root).as_posix())
+        for entry in entries:
+            if entry.is_symlink():
+                raise CorpusError(
+                    f"corpus symlink is forbidden: {entry.relative_to(root)}"
+                )
+            try:
+                if entry.is_dir():
+                    visit(entry)
+                elif not entry.is_file():
+                    raise CorpusError(
+                        f"special corpus entry is forbidden: {entry.relative_to(root)}"
+                    )
+            except OSError as error:
+                raise CorpusError(
+                    f"cannot inspect corpus entry {entry.relative_to(root)}: {error}"
+                ) from error
+
+    visit(root)
+    return sorted(result)
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
 def _load_corpus(manifest_path: Path, expected_profile: str) -> tuple[dict, Path, list[dict]]:
+    manifest_path = Path(manifest_path).absolute()
+    canonical_verifier = None
+    canonical_corpus = None
+    if expected_profile == FIXED_PROFILE:
+        canonical_verifier = _canonical_corpus_verifier()
+        try:
+            canonical_corpus = canonical_verifier.load_corpus(manifest_path)
+        except canonical_verifier.SourceError as error:
+            raise CorpusError(f"canonical corpus validation failed: {error}") from error
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8"),
+            object_pairs_hook=_unique_json_object,
+        )
+    except (OSError, UnicodeDecodeError, ValueError) as error:
         raise CorpusError(f"invalid corpus manifest: {error}") from error
     if not isinstance(manifest, dict):
         raise CorpusError("corpus manifest root must be an object")
+    expected_keys = {"schemaVersion", "profile", "emptyDirectoryPaths", "cases"}
+    if set(manifest) != expected_keys:
+        raise CorpusError(
+            "corpus manifest has invalid shape; "
+            f"expected keys={sorted(expected_keys)}, actual keys={sorted(manifest)}"
+        )
     schema_version = manifest.get("schemaVersion")
-    if not _is_json_integer(schema_version) or schema_version != 1 or manifest.get("profile") != expected_profile:
-        raise CorpusError("corpus schemaVersion/profile mismatch")
+    if not _is_json_integer(schema_version) or schema_version != 2:
+        raise CorpusError("corpus schemaVersion must be 2")
+    if manifest.get("profile") != expected_profile:
+        raise CorpusError("corpus profile mismatch")
     root = manifest_path.parent
+    declared_empty_directories = manifest.get("emptyDirectoryPaths")
+    if not isinstance(declared_empty_directories, list) or any(
+        not _is_canonical_relative_path(path)
+        for path in declared_empty_directories
+    ):
+        raise CorpusError(
+            "corpus emptyDirectoryPaths must contain canonical relative POSIX paths"
+        )
+    if declared_empty_directories != sorted(set(declared_empty_directories)):
+        raise CorpusError("corpus emptyDirectoryPaths must be sorted and unique")
+    actual_empty_directories = _corpus_empty_directory_paths(root)
+    if declared_empty_directories != actual_empty_directories:
+        raise CorpusError(
+            "corpus empty directory inventory is not exact; "
+            f"declared={declared_empty_directories}, actual={actual_empty_directories}"
+        )
     files = []
     seen_paths = set()
     seen_identities = set()
@@ -707,52 +905,119 @@ def _load_corpus(manifest_path: Path, expected_profile: str) -> tuple[dict, Path
         xml_impact = case.get("xmlImpact")
         if not isinstance(xml_impact, str) or not xml_impact.strip():
             raise CorpusError(f"corpus case xmlImpact must be a non-empty string: {case_id}")
+        workspace_path = case.get("workspacePath")
+        pre_snapshot_path = case.get("preSnapshotPath")
+        workspace = _safe_corpus_directory(root, workspace_path)
+        pre_snapshot = _safe_corpus_directory(root, pre_snapshot_path)
+        try:
+            workspace.relative_to(root.resolve(strict=True))
+            pre_snapshot.relative_to(root.resolve(strict=True))
+        except ValueError as error:
+            raise CorpusError(f"corpus case directories escape root: {case_id}") from error
+        if workspace == pre_snapshot:
+            raise CorpusError(f"workspacePath and preSnapshotPath must differ: {case_id}")
+
+        pre_files = case.get("preFiles")
+        if not isinstance(pre_files, list):
+            raise CorpusError(f"corpus case preFiles must be a list: {case_id}")
         if not isinstance(case.get("files"), list) or not case["files"]:
             raise CorpusError("corpus case has no files list")
-        for entry in case["files"]:
-            if not isinstance(entry, dict):
-                raise CorpusError(f"corpus file entry must be an object: {case_id}")
-            raw = entry.get("path")
-            if not isinstance(raw, str) or raw in seen_paths:
-                raise CorpusError(f"duplicate or missing corpus file: {raw}")
-            seen_paths.add(raw)
-            path = _safe_corpus_path(root, raw)
-            if not path.is_file():
-                raise CorpusError(f"listed corpus file is missing: {raw}")
-            try:
-                file_stat = path.stat()
-            except OSError as error:
-                raise CorpusError(f"cannot inspect corpus file: {raw}: {error}") from error
-            identity = (file_stat.st_dev, file_stat.st_ino)
-            if identity in seen_identities:
-                raise CorpusError(f"duplicate corpus paths reference the same file: {raw}")
-            seen_identities.add(identity)
-            declared_hash = entry.get("sha256")
-            if not isinstance(declared_hash, str) or re.fullmatch(r"[0-9a-f]{64}", declared_hash) is None:
-                raise CorpusError(f"corpus SHA-256 is invalid: {raw}")
-            snapshot, actual_hash = _read_corpus_snapshot(path, raw)
-            if actual_hash != declared_hash:
-                raise CorpusError(f"corpus hash mismatch: {raw}")
-            if not isinstance(entry.get("family"), str) or not entry["family"].strip():
-                raise CorpusError(f"corpus file has no family: {raw}")
-            if not isinstance(entry.get("seed"), bool):
-                raise CorpusError(f"corpus file must explicitly declare seed: {raw}")
-            if "newStandalone" in entry and not isinstance(entry["newStandalone"], bool):
-                raise CorpusError(f"newStandalone must be boolean: {raw}")
-            if "ownerPath" in entry and not _is_canonical_relative_path(entry["ownerPath"], suffix=".xml"):
-                raise CorpusError(f"ownerPath must be a canonical corpus XML path: {raw}")
-            files.append({
-                **entry,
-                "caseId": case_id,
-                "toolId": tool_id,
-                "xmlImpact": xml_impact,
-                "_snapshot": snapshot,
-            })
+        pre_paths = []
+        for snapshot_kind, entries, directory_path in (
+            ("pre", pre_files, pre_snapshot_path),
+            ("post", case["files"], workspace_path),
+        ):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise CorpusError(f"corpus file entry must be an object: {case_id}")
+                if snapshot_kind == "pre":
+                    required = {"path", "sha256", "family"}
+                    allowed = required | {"ownerPath"}
+                    if set(entry) - allowed or not required.issubset(entry):
+                        raise CorpusError(
+                            f"preFiles entry has invalid shape: {case_id}: {sorted(entry)}"
+                        )
+                raw = entry.get("path")
+                if not isinstance(raw, str) or raw in seen_paths:
+                    raise CorpusError(f"duplicate or missing corpus file: {raw}")
+                path = _safe_corpus_path(root, raw)
+                prefix = f"{directory_path}/"
+                if not raw.startswith(prefix):
+                    raise CorpusError(
+                        f"{snapshot_kind} corpus file is outside its snapshot directory: {raw}"
+                    )
+                logical_path = raw[len(prefix) :]
+                if not logical_path:
+                    raise CorpusError(f"corpus file has no logical path: {raw}")
+                seen_paths.add(raw)
+                if not path.is_file():
+                    raise CorpusError(f"listed corpus file is missing: {raw}")
+                try:
+                    file_stat = path.stat()
+                except OSError as error:
+                    raise CorpusError(f"cannot inspect corpus file: {raw}: {error}") from error
+                if file_stat.st_nlink != 1:
+                    raise CorpusError(
+                        f"corpus XML hardlink alias references the same file "
+                        f"(link count {file_stat.st_nlink}): {raw}"
+                    )
+                identity = (file_stat.st_dev, file_stat.st_ino)
+                if identity in seen_identities:
+                    raise CorpusError(f"duplicate corpus paths reference the same file: {raw}")
+                seen_identities.add(identity)
+                declared_hash = entry.get("sha256")
+                if not isinstance(declared_hash, str) or re.fullmatch(r"[0-9a-f]{64}", declared_hash) is None:
+                    raise CorpusError(f"corpus SHA-256 is invalid: {raw}")
+                snapshot, actual_hash = _read_corpus_snapshot(path, raw)
+                if actual_hash != declared_hash:
+                    raise CorpusError(f"corpus hash mismatch: {raw}")
+                if not isinstance(entry.get("family"), str) or not entry["family"].strip():
+                    raise CorpusError(f"corpus file has no family: {raw}")
+                normalized = {
+                    **entry,
+                    "caseId": case_id,
+                    "toolId": tool_id,
+                    "xmlImpact": xml_impact,
+                    "snapshotKind": snapshot_kind,
+                    "logicalPath": logical_path,
+                    "_snapshot": snapshot,
+                }
+                if snapshot_kind == "pre":
+                    normalized["seed"] = True
+                    pre_paths.append(raw)
+                else:
+                    if not isinstance(entry.get("seed"), bool):
+                        raise CorpusError(f"corpus file must explicitly declare seed: {raw}")
+                    if "newStandalone" in entry and not isinstance(entry["newStandalone"], bool):
+                        raise CorpusError(f"newStandalone must be boolean: {raw}")
+                if "ownerPath" in entry and not _is_canonical_relative_path(entry["ownerPath"], suffix=".xml"):
+                    raise CorpusError(f"ownerPath must be a canonical corpus XML path: {raw}")
+                if snapshot_kind == "pre" and "ownerPath" in entry and not entry["ownerPath"].startswith(f"{pre_snapshot_path}/"):
+                    raise CorpusError(f"preFiles ownerPath is outside preSnapshotPath: {raw}")
+                files.append(normalized)
+        if pre_paths != sorted(set(pre_paths)):
+            raise CorpusError(f"preFiles paths must be sorted and unique: {case_id}")
+
+        pre_owner_versions = case.get("preOwnerVersions")
+        if not isinstance(pre_owner_versions, dict):
+            raise CorpusError(f"preOwnerVersions must be an object: {case_id}")
+        if list(pre_owner_versions) != sorted(pre_owner_versions):
+            raise CorpusError(f"preOwnerVersions must be sorted: {case_id}")
+        for owner_path, version in pre_owner_versions.items():
+            if (
+                not _is_canonical_relative_path(owner_path, suffix=".xml")
+                or not owner_path.startswith(f"{pre_snapshot_path}/")
+                or owner_path not in pre_paths
+                or version != "2.20"
+            ):
+                raise CorpusError(f"invalid preOwnerVersions declaration: {case_id}")
     if not files:
         raise CorpusError("empty or unprocessed corpus")
     for path in root.rglob("*"):
         if path.is_symlink():
             raise CorpusError(f"corpus symlink is forbidden: {path.relative_to(root)}")
+        if path.suffix.lower() == ".xml" and not path.is_file():
+            raise CorpusError(f"special XML entry is forbidden: {path.relative_to(root)}")
     actual_xml = {
         path.relative_to(root).as_posix()
         for path in root.rglob("*")
@@ -761,11 +1026,33 @@ def _load_corpus(manifest_path: Path, expected_profile: str) -> tuple[dict, Path
     unlisted = sorted(actual_xml - seen_paths)
     if unlisted:
         raise CorpusError(f"unlisted XML in corpus: {unlisted[0]}")
+    final_empty_directories = _corpus_empty_directory_paths(root)
+    if final_empty_directories != declared_empty_directories:
+        raise CorpusError(
+            "corpus empty directory topology changed while being validated; "
+            f"declared={declared_empty_directories}, actual={final_empty_directories}"
+        )
+    if canonical_corpus is not None:
+        final_snapshot = canonical_verifier.snapshot_regular_tree(root)
+        if final_snapshot != canonical_corpus["snapshot"]:
+            raise CorpusError(
+                "canonical corpus regular-file or directory topology changed "
+                "during static verification"
+            )
     return manifest, root, files
 
 
 def _qname(root) -> str:
     return str(etree.QName(root))
+
+
+def _raw_root_version(payload: bytes, label: str) -> str | None:
+    try:
+        return raw_root_attribute(payload, "version")
+    except LexicalXmlError as error:
+        raise CorpusError(
+            f"cannot inspect raw root version in corpus XML {label}: {error}"
+        ) from error
 
 
 def _unresolved_qname_prefix(root) -> str | None:
@@ -777,7 +1064,7 @@ def _unresolved_qname_prefix(root) -> str | None:
                 prefix = value.split(":", 1)[0]
                 if prefix not in node.nsmap:
                     return prefix
-        if etree.QName(node).localname in {"Type", "ValueType"}:
+        if str(etree.QName(node)) in QNAME_TEXT_ELEMENTS:
             value = (node.text or "").strip()
             if ":" in value:
                 prefix = value.split(":", 1)[0]
@@ -787,7 +1074,7 @@ def _unresolved_qname_prefix(root) -> str | None:
 
 
 def verify_corpus(manifest_path: Path | str, profile: dict, runtime: dict, edt: dict | None) -> tuple[dict, int]:
-    _, _root, entries = _load_corpus(Path(manifest_path), profile["profile"])
+    manifest, _root, entries = _load_corpus(Path(manifest_path), profile["profile"])
     listed = {entry["path"]: entry for entry in entries}
     families_by_id = {}
     for expected_qname, configured in profile.get("families", {}).items():
@@ -795,6 +1082,43 @@ def verify_corpus(manifest_path: Path | str, profile: dict, runtime: dict, edt: 
         if family_id in families_by_id:
             raise SourceError(f"duplicate configured family id: {family_id}")
         families_by_id[family_id] = (expected_qname, configured)
+    for case in manifest["cases"]:
+        case_id = case["id"]
+        declared_pre_owners = case["preOwnerVersions"]
+        actual_pre_owners = {}
+        for entry in entries:
+            if entry["caseId"] != case_id or entry["snapshotKind"] != "pre":
+                continue
+            selected = families_by_id.get(entry.get("family"))
+            if selected is None or selected[1].get("sourceSetOwner") is not True:
+                continue
+            try:
+                xml_root = etree.fromstring(
+                    entry["_snapshot"],
+                    parser=etree.XMLParser(no_network=True, resolve_entities=False),
+                )
+            except etree.XMLSyntaxError:
+                continue
+            if _qname(xml_root) != selected[0]:
+                continue
+            owner_namespace = etree.QName(xml_root).namespace
+            owner_type = next(
+                (
+                    etree.QName(child).localname
+                    for child in xml_root
+                    if isinstance(child.tag, str)
+                    and etree.QName(child).namespace == owner_namespace
+                ),
+                None,
+            )
+            if owner_type in selected[1].get("sourceSetOwnerTypes", []):
+                actual_pre_owners[entry["path"]] = _raw_root_version(
+                    entry["_snapshot"], entry["path"]
+                )
+        if actual_pre_owners != declared_pre_owners:
+            raise CorpusError(
+                f"preOwnerVersions do not exactly match pre-snapshot owners: {case_id}"
+            )
     rows = []
     violation = False
     inconclusive = False
@@ -823,7 +1147,7 @@ def verify_corpus(manifest_path: Path | str, profile: dict, runtime: dict, edt: 
             checks.append({"name": "qnamePrefixes", "status": "pass"})
         version_mode = family.get("version", "none")
         if version_mode == "root":
-            actual = xml_root.get("version")
+            actual = _raw_root_version(entry["_snapshot"], entry["path"])
             status = "pass" if actual == profile["exportVersion"] else "fail"
             checks.append({"name": "exportVersion", "status": status, "actual": actual, "expected": profile["exportVersion"]})
             violation |= status == "fail"
@@ -838,9 +1162,13 @@ def verify_corpus(manifest_path: Path | str, profile: dict, runtime: dict, edt: 
                     raise CorpusError(f"ownerPath is not a profile-marked source-set owner descriptor: {owner_path}")
                 if owner.get("caseId") != entry.get("caseId"):
                     raise CorpusError(f"ownerPath must reference a source-set owner in the same case: {owner_path}")
+                if owner.get("snapshotKind") != entry.get("snapshotKind"):
+                    raise CorpusError(
+                        f"ownerPath must remain inside the same pre/post snapshot: {owner_path}"
+                    )
                 try:
                     owner_root = etree.fromstring(owner["_snapshot"], parser=etree.XMLParser(no_network=True, resolve_entities=False))
-                    actual = owner_root.get("version")
+                    actual = _raw_root_version(owner["_snapshot"], owner_path)
                 except etree.XMLSyntaxError as error:
                     actual = None
                     checks.append({"name": "ownerVersion", "status": "fail", "detail": str(error)})
@@ -1157,8 +1485,11 @@ def _error_report(profile_id: object, error: Exception) -> dict:
 
 def _read_json_object(path: Path, label: str) -> dict:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_unique_json_object,
+        )
+    except (OSError, UnicodeDecodeError, ValueError) as error:
         raise SourceError(f"invalid {label}: {error}") from error
     if not isinstance(value, dict):
         raise SourceError(f"invalid {label}: root must be an object")
@@ -1169,7 +1500,12 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-xsd-zip", required=True, type=Path)
     parser.add_argument("--edt-xdto-jar", required=True, type=Path)
-    parser.add_argument("--corpus", required=True, type=Path)
+    parser.add_argument(
+        "--corpus",
+        required=True,
+        type=Path,
+        help="path to the immutable corpus-manifest.json",
+    )
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--profile", type=Path, default=Path(__file__).with_name("verify-8-3-27-xml-profile.json"), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)

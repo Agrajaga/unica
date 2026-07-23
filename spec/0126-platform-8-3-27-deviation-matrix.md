@@ -1,152 +1,284 @@
-# Issue 126: platform 8.3.27 deviation matrix
+# Issue 126: platform 8.3.27 / export 2.20 XML contract
 
-## Authority and scope
+## Decision and scope
 
-The official source is
-`docs-local/1ci/8.3.27/en/developer/Chapter_2._Managing_configurations/2.17._Dumping_configurations_to_files_Restoring_configurations_from_files/2.17.2._Export_format_versions/index.md`.
-Its export table maps platform `8.3.27` to format `2.20`, treats a missing
-version on a version-owning root as `1.0`, and permits platform 8.3.27 to import
-formats less than or equal to `2.20`.
+Unica's only writable platform-export profile is:
 
-Unica's current contract is narrower: `8.3.27 / 2.20` is the only writable
-profile. The table below describes current behavior after the active-profile
-writer work, the source-set-aware owner guard through commit `41a3ec0`, the
-`cf.init` platform correction in `c3b31e3`, and the Task 6 document-contract
-changes in this worktree.
+- platform: `8.3.27`;
+- export format: `2.20`.
 
-Status vocabulary:
+This document records the compatibility boundary and the audit of every public
+native mutator in that boundary, including operations whose platform payload is
+non-XML. The corpus has a complete public-mutator/case inventory and covers the
+mandatory representative branches listed below. It does not claim exhaustive
+coverage of every possible combination of public arguments.
 
-- **fixed/guarded**: code and tests enforce the fixed profile or no-write
-  compatibility boundary;
-- **proven/fixed**: a real 8.3.27.2074 load/check/export checkpoint established
-  the stated document contract and the implementation matches it;
-- **contract fixed; platform proof pending**: the known deviation is fixed by
-  authoritative code/schema evidence, but the full writer branch has not yet
-  completed a real-platform canonical roundtrip;
-- **schema-profile limitation**: raw XSD cannot be treated as the platform
-  contract for that family.
+This is the prerequisite writer/profile phase of issue #126. It does not yet
+add the proposed optional capability-driven XDTO/XSD service or multi-profile
+dispatch. That design is the next phase.
 
-## Shared current behavior
+## Contract authority
 
-`ACTIVE_FORMAT_PROFILE` centrally defines platform `8.3.27` and export format
-`2.20`. The application guard and native writers share one owner resolver:
+The sources answer different questions and are used in this order:
 
-- CF/CFE use source-set `Configuration.xml`;
-- EPF/ERF use their sibling top-level artifact descriptor;
-- recognized standalone version-owning XML owns its version;
-- subordinate versionless XML inherits its same-case source-set owner;
-- lookup is path-normalized and bounded by the selected source set/workspace.
-
-For every guarded mutation, an older, newer, malformed, unreadable, or
-ambiguous owner stops the operation before the first write. New CF/EPF/ERF
-scaffolds write `2.20`; CFE initialization writes `2.20` and guards its optional
-base. Read-only tools warn and continue where their parser can safely proceed.
-The exhaustive operation-descriptor test locks the effective handler paths and
-aliases for every mutating platform-XML operation.
-
-## Tool matrix
-
-| Tool(s) | Current behavior | Status / evidence | Remaining platform work |
-| --- | --- | --- | --- |
-| `unica.cf.edit` | Resolves the actual Configuration owner; incompatible owners block atomically. HomePage output uses the active `2.20` profile. | fixed/guarded; `cf_edit_home_page_uses_active_format`, handler-path and byte-snapshot guard tests | Platform-canonical roundtrip for each edit branch remains part of the public-tool corpus gate. |
-| `unica.cf.info`, `unica.cf.validate` | Directory/file aliases resolve to the same Configuration owner as the handler. Older/newer formats return a read-only warning and compatibility diagnostic; structural/semantic analysis continues where safe. | fixed/guarded; `read_only_path_aliases_warn_for_older_directory_owned_inputs` | No writer output; retain corpus coverage for diagnostic paths. |
-| `unica.cf.init` | Creates `2.20` owner roots, a fresh non-nil `Configuration/@uuid`, default 8.3.27 compatibility values, and `TextToSpeech=false`. ClientApplicationInterface remains versionless. | **proven/fixed** by public-call source -> import/check/export -> second import/check/export on 8.3.27.2074; semantic gate passed | None for the minimal scaffold contract proved by Task 8. New optional branches need their own evidence. |
-| `unica.support.edit` | XML impact is none; it edits the support-state binary only. The containing owner is nevertheless guarded before mutation. | fixed/guarded; descriptor coverage and XML-map equality corpus case | No XML canonicalization applies. The existing event name still overstates XML impact and is a separate semantic cleanup. |
-| `unica.cfe.borrow` | Guards both CF and CFE owners and emits borrowed version-owning form roots as `2.20`, rather than copying an older subordinate version. | fixed/guarded; active-writer and multi-owner tests | Full platform roundtrip of all borrow branches is pending. |
-| `unica.cfe.diff` | Read-only guard evaluates the declared extension and configuration inputs and continues with a warning. The current response reports the first incompatible resolved owner. | fixed/guarded for no-write safety | Aggregating both incompatibilities in one response is diagnostic improvement work, not a write-safety gap. |
-| `unica.cfe.init` | Emits only `2.20`; an optional base is classified before the output directory is created. Unsupported bases produce no artifacts. | fixed/guarded; no-base, supported-base, older/newer-base regressions | Full platform-canonical extension scaffold roundtrip is pending. |
-| `unica.epf.init`, `unica.erf.init` | New external descriptors and generated version-owning roots use `2.20`. These are explicit new-dump operations. | fixed profile; active-writer tests | Complete EPF/ERF platform roundtrip and branch corpus remain pending. |
-| `unica.cfe.patch_method` | XML impact is none; it patches BSL only. The extension owner is still guarded before mutation. | fixed/guarded; descriptor and XML-map equality coverage | No XML canonicalization applies. |
-| `unica.cfe.validate` | Resolves directory/file aliases to the extension Configuration owner, warns on incompatible format, and continues read-only where safe. | fixed/guarded | No writer output. |
-| `unica.meta.compile` | Containing/new descriptors use `2.20`; unsupported existing owners fail before creation. ExchangePlan `Content.xml` uses the proven platform QName and namespace set. | fixed/guarded generally; ExchangePlan branch **proven/fixed** | Platform roundtrips for the other metadata kinds remain pending in the exhaustive corpus. |
-| `unica.meta.edit`, `unica.meta.remove` | Resolve the effective metadata/Configuration owner and block unsupported mutation before planning or filesystem changes. | fixed/guarded; handler-path, default-path, and byte-snapshot tests | Per-operation platform-canonical deltas remain pending. |
-| `unica.meta.info`, `unica.meta.validate` | Read-only compatibility warning comes from the resolved owner; existing semantic inspection/validation continues. | fixed/guarded | Batch aggregation in `meta.validate` remains separate diagnostic work. |
-| `unica.meta.profile` | Indexed read-only metadata access performs no filesystem mutation and has no writer constraint. | aligned read-only behavior | No XML output. |
-| `unica.help.add` | The default `SrcDir/ObjectName` target resolves its containing owner before mkdir/write; generated descriptor uses `2.20`. | fixed/guarded; default-path and active-writer tests | Full platform roundtrip is pending. |
-| `unica.form.add`, `unica.form.compile` | Effective object/output paths are guarded before creation; generated version-owning Form roots use `2.20`. `form.compile` guards both output and inferred/explicit object input. | fixed/guarded | Full generated-form canonical roundtrip across element branches is pending. |
-| `unica.form.edit` | Guarded owner plus exact `{http://v8.1c.ru/8.3/xcf/logform}Form` root. Emitted QName bindings are repaired or conflicting bindings fail atomically before write. | contract fixed; platform proof pending; root/QName regressions | Exhaustive real-platform roundtrip of edit branches is pending. |
-| `unica.form.info`, `unica.form.validate` | Require the exact managed-form root. QName text prefixes must resolve, canonical prefixes must use canonical URIs, and declared aliases remain valid. Owner incompatibility is a read-only warning. | contract fixed; platform proof pending | Continue corpus/platform validation for real forms. |
-| `unica.form.remove` | Default object target resolves to its owner and incompatible formats block before removal. | fixed/guarded | Platform delta proof is pending. |
-| `unica.interface.edit` | Containing owner is guarded and emitted version-owning CommandInterface output uses `2.20`. | fixed/guarded; active-writer tests | Full platform roundtrip is pending. |
-| `unica.interface.validate` | Read-only owner warning is separate from existing structural validation. | fixed/guarded | No writer output. |
-| `unica.subsystem.compile`, `unica.subsystem.edit` | Output/effective subsystem paths resolve through the central owner guard; generated version-owning roots use `2.20`. Missing owner version is classified as `1.0`, not silently defaulted. | fixed/guarded; active-writer and owner tests | Full platform roundtrip is pending. |
-| `unica.subsystem.info`, `unica.subsystem.validate` | Read-only compatibility warning is attached and analysis continues where safe. | fixed/guarded | No writer output. |
-| `unica.template.add` | Descriptor uses `2.20` and format resolution occurs before target directory creation. Spreadsheet content reuses the exact normalized platform empty-MXL emitter. | spreadsheet branch **proven/fixed**; descriptor fixed/guarded | DCS and other template branches still need their corpus/platform checkpoints. |
-| `unica.template.remove` | Default target resolves through the containing owner and incompatible formats block before removal. | fixed/guarded | Platform delta proof is pending. |
-| `unica.dcs.compile` | Versionless DCS content inherits a guarded `2.20` owner; new version-owning descriptor output uses the active profile. | fixed/guarded | Full generated DCS canonical roundtrip remains pending. Raw XSD root case is advisory. |
-| `unica.dcs.edit` | Requires exact `{http://v8.1c.ru/8.1/data-composition-system/schema}DataCompositionSchema` before planning/write; wrong QName is atomic failure. | contract fixed; platform proof pending | Full edit roundtrip is pending. |
-| `unica.dcs.info`, `unica.dcs.validate` | Share the same exact uppercase root contract. Owner incompatibility warns read-only; wrong QName fails before optional info output. | contract fixed; platform proof pending | Raw runtime XSD lowercase global remains a verifier-profile limitation. |
-| `unica.mxl.compile` | Correct spreadsheet `document` QName; existing owner is guarded while genuinely new standalone content is allowed. Empty generation uses the canonical sentinel. | empty-document branch **proven/fixed**; guard fixed | Non-empty JSON feature branches need platform roundtrip coverage. |
-| `unica.mxl.decompile`, `unica.mxl.info`, `unica.mxl.validate` | Require exact `{http://v8.1c.ru/8.2/data/spreadsheet}document`. The exact platform empty sentinel is logical height zero; lookalikes are not. Wrong root fails before output. Owner mismatch warns read-only. | **proven/fixed** for root and empty-sentinel contract | Raw XSD rejection of platform `columns` remains a verifier-profile limitation. |
-| `unica.role.compile` | Rights and descriptor writers use the active profile and are guarded by the resolved owner. | fixed/guarded; active-writer tests | Full Rights platform roundtrip is pending; runtime schema is type-only. |
-| `unica.role.info`, `unica.role.validate` | Directory aliases resolve to `Ext/Rights.xml`; owner incompatibility warns and semantic analysis continues. | fixed/guarded | Raw XSD cannot validate a nonexistent global `Rights` declaration. |
-
-## Real-platform proof retained by Task 6
-
-The Task 6 probe used `/opt/1cv8/8.3.27.2074/ibcmd` (`8.3.27.2074`) with
-evidence retained at `/tmp/unica-ibcmd-8327-evidence.GKkWas`:
-
-- the old empty MXL shape failed import in log 15;
-- corrected MXL import/check/export succeeded in logs 16-18;
-- canonical MXL reimport/check/re-export succeeded in logs 25-27 and log 28
-  proved byte identity;
-- ExchangePlanContent import/check/export succeeded in logs 21-23 and log 24
-  recorded the exact QName, namespace set, version, and hashes.
-
-Platform files use UTF-8 BOM, CRLF, and no final newline. Repository fixtures
-normalize only those lexical properties to no BOM, LF, and one final LF:
-
-| Fixture | Original platform file | Normalized repository fixture |
-| --- | --- | --- |
-| empty MXL `Template.xml` | 785 bytes; SHA-256 `197eee7ae5f2912997f63cd9a1a4475085d139b7db68587c21c77a56e682d0df` | 761 bytes; SHA-256 `cfd17d8b9fb43b4d8650ba0a3e35aacd9bcc1c3b7d01c55a275a439ebff24836` |
-| ExchangePlan `Content.xml` | 265 bytes; SHA-256 `22b5a6dcdfad07f29c3af911a487edc1c7c1222e5415ab65ca366d77f85181eb` | 262 bytes; SHA-256 `e4aa7daee39d8b0c0443c10e14f62f4ebb8d56044339433b8f8784cd1e5cc8fe` |
-
-The runtime XSD archive SHA-256 is
-`e7539a02520cf7bd73585d80b038c2c95078aac281d3700842a5f3a1f3c0c204`.
-The EDT 8.3.27 JAR supporting the ExchangePlan QName has SHA-256
-`a0c13bbff0527503c23cde14fb10f07742223c6e7d85bf9f06a753cfcc3707b8`.
-
-## `cf.init` platform proof retained by Task 8
-
-The public `UnicaApplication::call_tool("unica.cf.init", ...)` path generated an
-untouched source tree at `/tmp/unica-task8-cf-init.Ipo6EN/source`. With
-`ibcmd 8.3.27.2074`, source import/apply/check/export and a second
-import/check/export all exited successfully. Canonical XML comparison proved
-semantic equality for source -> export1 and export1 -> export2, excluding only
-the platform-generated `ConfigDumpInfo.xml` and XML lexical formatting.
-
-Across source, export1, and export2:
-
-- `Configuration/@uuid` is present and non-nil;
-- Configuration and Language owner roots remain `2.20`;
-- the default compatibility properties are `Version8_3_27`;
-- `TextToSpeech=false` is present;
-- ClientApplicationInterface remains versionless and inherits the same-case
-  Configuration owner's `2.20` format.
-
-Task 8 established this proof; Task 6 does not claim authorship of its code.
-
-## Resolved and remaining cross-family work
-
-| Area | Current conclusion |
+| Source | What it establishes |
 | --- | --- |
-| Export version | **fixed/guarded**: one active profile; version-owning writers use `2.20`; no local writer fallback or validator allowlist controls the contract. |
-| Owner resolution | **fixed/guarded**: CF, CFE, EPF, ERF, standalone, aliases, defaults, and multi-input handler paths resolve through the shared owner boundary. |
-| Empty MXL | **proven/fixed** against an 8.3.27.2074 byte-stable roundtrip. |
-| ExchangePlanContent | **proven/fixed** against EDT XDTO and an 8.3.27.2074 roundtrip. |
-| Fresh CF scaffold | **proven/fixed** by the Task 8 two-cycle platform checkpoint. |
-| Other writer branches | Version/guard contract is fixed, but full platform-canonical proof remains pending in the exhaustive public-tool corpus and platform gate. |
-| Raw XSD strictness | Schema-profile limitations remain: uppercase DCS platform root versus lowercase raw global, platform MXL `columns`, CAI `uuid`, and type-only roles schema. They are not permission to alter platform-valid XML. |
+| Official 8.3.27 export-version documentation | Platform `8.3.27` maps to export format `2.20`; a missing version on a version-owning root means `1.0`; the platform may import older formats. |
+| Runtime XSD export from 8.3.27.2074 | XDTO element/type structure where the exported schema is complete enough to compile and exposes a document root. |
+| EDT 8.3.27 XDTO declarations | Declaration evidence for metadata, managed-form, and external-property families that the runtime XSD export does not expose as complete dump-document schemas. |
+| Exact `ibcmd 8.3.27.2074` roundtrip | For each selected corpus checkpoint, decisive evidence that that exact emitted source tree or external artifact is accepted and semantically stable across two cycles. It does not prove unselected argument combinations or intent that a serializer omitted before import. |
+| Unica code and tests | The repository contract that applies the profile, rejects unsafe writes, and keeps the evidence inventory reproducible. |
 
-## Migration boundary
+Official documentation is local at
+`docs-local/1ci/8.3.27/en/developer/Chapter_2._Managing_configurations/2.17._Dumping_configurations_to_files_Restoring_configurations_from_files/2.17.2._Export_format_versions/index.md`.
 
-Unica exposes no native format-migration operation and never migrates as a side
-effect. For an older source, read-only operations warn and mutations are
-refused. The warning recommends an explicit user-driven migration using
-1C:Enterprise 8.3.27 tooling: load the source, re-export it as `2.20`, and retry
-the Unica operation. The diagnostic code `formatMigrationAvailable` denotes
-that manual remediation; it is not a public tool name.
+Pinned evidence identities:
 
-For a source newer than `2.20`, read-only operations warn and mutations are
-refused with `platformVersionUnsupported`. Unica states that platform 8.5 is not
-supported yet but is planned, and never offers a downgrade.
+| Evidence | SHA-256 |
+| --- | --- |
+| Runtime XSD archive, 56 packages, `platformVersion=8.3.27.2074` | `e7539a02520cf7bd73585d80b038c2c95078aac281d3700842a5f3a1f3c0c204` |
+| EDT bundle `com._1c.g5.v8.dt.platform_v8.3.27`, version `1.0.300.v202603181342` | `a0c13bbff0527503c23cde14fb10f07742223c6e7d85bf9f06a753cfcc3707b8` |
+| `/opt/1cv8/8.3.27.2074/ibcmd` | `e00f3c945fb6f60bb2802151df1b4e7ee4f3caaf7c9e24a981020af575fda6e5` |
+| Complete `/opt/1cv8/8.3.27.2074` install tree: 4337 files and 96 directories, including path, entry type, mode, size, and file content | `5eb8897c4f7e95876572f2f36943439b0d57e47688314b622f5771e5a22df0ef` |
+
+The fact that 8.3.27 can import a format below `2.20` does not make that format
+writable by Unica. Import compatibility and the Unica writer contract are
+separate decisions.
+
+The fixed-profile contract follows exact 8.3.27 behavior when it is narrower
+than a permissive XSD declaration. XSD establishes allowed structure where it
+is usable; it does not override a normalization or rejection reproduced by the
+exact platform.
+
+## Compatibility boundary
+
+The format is resolved from the version-owning XML root for the selected source
+set. Versionless subordinate XML inherits that owner. CF, CFE, EPF, ERF,
+recognized standalone documents, path aliases, defaults, and multi-input
+operations use the same bounded owner resolver.
+
+| Resolved input | Read-only operation | Mutation |
+| --- | --- | --- |
+| `< 2.20`, including a missing owner version interpreted as `1.0` | Warn and continue only where the existing parser can safely do so. | Refuse before the first write and propose an explicit user-driven re-export with 1C:Enterprise 8.3.27. |
+| exact raw literal `2.20` | Work normally. | Work normally. |
+| `> 2.20` | Warn that the newer profile is unsupported. | Refuse before the first write; state that platform 8.5 support is not available yet but is planned; never offer a downgrade. |
+| Malformed, numerically equal but not exact (`2.20.0`, `02.20`, or `2.020`), entity-spelled (`2.&#50;0`, `&#x32;.20`, or `2.2&#48;`), unreadable, ambiguous, or missing required owner | Report invalid/ambiguous source evidence. | Refuse before the first write. |
+| Genuinely new output with no containing source set | Not applicable. | Follow the fixed operation profile: write `2.20` only when that document root owns an export version; do not invent `version` on versionless DCS/MXL roots. |
+
+Unica never migrates or downgrades as a side effect and exposes no native
+format-migration operation. For an older source, the user must load and
+re-export it explicitly with the target platform, then retry the Unica
+operation.
+
+Only the exact raw lexical slice of the `version` attribute, before XML entity
+decoding, may equal `2.20`. Numeric component comparison classifies genuinely
+older or newer values; it does not canonicalize an alternative spelling of the
+supported value. Existing operation-declared Form, DCS, and MXL targets are
+checked by exact QName before writing, including `.XML` and suffixless target
+paths. Correct versionless DCS/MXL documents and genuinely absent outputs remain
+valid because those roots do not own an export version.
+
+The roadmap wording for `>2.20` is product copy, not provenance detection: an
+export version alone does not prove that the source was produced by platform
+8.5.
+
+### Transaction boundary
+
+For mutating calls, the public preflight is repeated inside the handler against
+the effective XML dependencies. Bytes used to derive a mutation are bound to
+the compile transaction as exact preimages, and cooperating Unica writers use
+the same advisory publication locks. The atomicity regressions prove that
+reported validation, I/O, and detected concurrent-change failures do not leave
+the planned source-tree mutation partially applied.
+
+This is not a claim of crash-atomic multi-file storage. Advisory locks do not
+stop Designer, scripts, or other non-Unica writers; path normalization and
+no-follow checks do not retain permanent open-handle identity across every
+external rename; and a process, operating-system, or power failure can interrupt
+several filesystem renames. Rollback is attempted for reported publication
+failures, while rollback cleanup failures are returned as warnings.
+
+## Resolved deviations and known boundaries
+
+| Area | Contract enforced for 8.3.27 / 2.20 |
+| --- | --- |
+| Shared format boundary | All public native platform-XML mutations declare their effective input/output paths and pass the shared owner guard before planning filesystem changes. New version-owning roots use the active profile. Read aliases reach the same compatibility diagnostic. |
+| `cf.init` and `cf.edit` | A fresh non-nil Configuration UUID, 8.3.27 compatibility defaults, `TextToSpeech=false`, and owner-only versions are emitted. Home page `OneColumn` contains the required `Column` node. ClientApplicationInterface remains versionless and inherits the Configuration owner. |
+| `cfe.init` and `cfe.borrow` | Optional base owners are checked before output creation. A borrowed source descriptor must have the exact MD namespace/root, exactly one expected object tag, an exact `Properties/Name`, and a valid non-nil UUID. Borrowed managed forms are emitted as `2.20` roots and include the platform `InternalInfo/PropertyState` structure instead of copying an incompatible subordinate version. |
+| `epf.init` and `erf.init` | External descriptors and managed-form roots are created with the active profile and are validated as complete external artifacts. |
+| Managed forms | The exact `{http://v8.1c.ru/8.3/xcf/logform}Form` root is required. QName bindings, attributes, parameters, columns, paths, and element layout follow the 8.3.27 declaration model. `HeaderDataPath` is rejected on `UsualGroup` because it belongs to the unsupported `ColumnGroup`; collection paths must address declared collection columns; `RowPictureDataPath` must be a subpath of the table `DataPath`; and an absent table filter is emitted as canonical `RowFilter xsi:nil="true"`. The platform child order is fixed for groups, input fields, check boxes, buttons, and tables. Type input is fully parsed and validated before any XML is emitted or written. |
+| DCS emitted-XML contract | The exact `{http://v8.1c.ru/8.1/data-composition-system/schema}DataCompositionSchema` root is required. The mapped `dcs.compile` subset and the selected operation-specific `dcs.edit` branches use the 8.3.27 child order. Exact-platform canonical behavior narrows the permissive XSD where necessary: `dataSetLink/required=true` is omitted while `false` is retained; `DefinedType.*` in `valueType` is rejected because 8.3.27 removes it on roundtrip and callers must provide expanded constituent types; `StandardPeriod` start/end dates are emitted only for `Custom`; and an empty details-group `groupItems` container is omitted. Type input on mapped branches is parsed and validated before emission/write. This is not a blanket guarantee for the full JSON DSL. |
+| DCS semantic mapping gaps | `dcs.compile` does not serialize field `role`, field `orderExpression`/`order`, field/calculated-field `appearance`, field `availableValues`, root templates/bindings, settings `userFields`/`additionalProperties`, or parameter `inputParameters`/`nilValue`; a parameter `value` array is not mapped as repeated values. Field shorthand `@role`/`#restrict` is also lossy. Parameter `availableValues`, settings/group `order`, settings `conditionalAppearance`, settings `dataParameters[].nilValue`, and object-form restrictions are separate mapped branches. These omissions are outside XSD/platform acceptance because the omitted nodes never reach `ibcmd`; no coverage is claimed for their JSON-to-XML fidelity. |
+| Type descriptions | `Type*`, then `TypeSet*`, then `TypeId*`, then Number/String/Date/Binary qualifiers. Multiplicity, qualifier values, and XSD group order are preserved. String length is `0..1024`; number digits are `0..38`; fraction digits cannot exceed total digits; fixed-length zero and invalid sign/namespace/type spellings are rejected atomically. |
+| MXL | The spreadsheet document root, empty-document sentinel, gap indices, row/cell/style order, and generated template content match accepted 8.3.27 documents. |
+| `unica.template.*` metadata templates | Binary, text, HTML, spreadsheet, and DCS Template-object branches use their selected descriptors/content; empty DCS Template-object settings use the platform shape. This is distinct from embedded DCS schema `templates`, which `dcs.compile` does not map. Removal updates the containing owner atomically. |
+| Metadata | All 23 exposed `meta.compile` kinds have their selected property/child-order branches represented in the corpus. Register and chart layouts were corrected. Business-process Flowchart is a `GraphicalSchema`; ExchangePlan Content uses the platform QName; DefinedType, `ValueStorage`, task addressing, attributes, resources, and tabular sections use the bounded type-description serializer. The EventSubscription checkpoint deliberately supplies DSL `String(10)` and proves canonical source identity as `xs:string` with `StringQualifiers/Length=0` and `AllowedLength=Variable`. |
+| Other metadata-associated writers | Help, command interface, subsystem compile/edit, and Rights descriptors use their 8.3.27 roots/order and the active owner profile. |
+| Edit/remove operations | The immutable corpus records the expected pre/post XML delta and directory topology for its selected `form.remove`, `meta.edit/remove`, `template.remove`, and create-or-modify cases. Removing the last form, metadata object of a type, or template also removes the resulting empty `Forms`, metadata-type, or `Templates` directory. The removal is bound to one full transaction snapshot: an existing sibling is preserved and a late sibling aborts with rollback. Atomic validation tests cover invalid type/root/owner paths. Neither statement extends platform proof to unselected operation arguments. |
+| `unica.cfe.patch_method` | The exact EDT 8.3.27 type/role intersection used by the v1 grammar contains 51 `ModulePath` layouts. Unit contracts bind that matrix; six corpus checkpoints represent its six physical BSL layouts (CommonModule, ObjectModule, ManagerModule, RecordSetModule, Form, and ValueManagerModule), not all 51 type/path combinations. The target must be a registered adopted `2.20` object; forms additionally require an adopted wrapper and direct `BaseForm`. The writer atomically publishes the BSL interceptor and the descriptor `xr:PropertyState` with `State=Extended`; the form wrapper already contains the same state after `cfe.borrow`, so that XML update is idempotent. `meta.compile` and `cfe.borrow` share one total 8.3.27 registry profile covering all 45 metadata types: 22 non-empty `GeneratedType` profiles and 23 explicitly empty profiles. Unknown types fail closed, and ExchangePlan additionally receives exactly one `xr:ThisNode`. V1 generates only `Before`/`After` for a caller-verified existing procedure without parameters. It does not resolve the base method or prove its signature. Functions, parameters, `ModificationAndControl`, `Around`, and special form-handler semantics are outside the proven contract and are rejected or deferred rather than emitted as platform-compatible output. |
+| Non-XML-only mutations | `unica.code.patch` and `unica.support.edit` still pass the owner guard where applicable. Their corpus contract requires an unchanged XML map and records the exact pre/post logical paths and bytes of BSL or binary platform payloads. `support.edit` derives its decision from one read of `ParentConfigurations.bin`, changes only its global header capability, locks vendor/object slots, preserves every existing `.cf` byte-for-byte, and binds exact `.cf` preimages plus case-insensitive directory membership to the same transaction. A concurrent `ConcurrentVendor.CF` addition aborts the `.bin` mutation; post-validation parses the exact bytes just written. `unica.cfe.patch_method` is not in this class: five selected layouts change BSL and the owning descriptor atomically, while the already-extended form layout changes only BSL. |
+
+## Explicit native mutator/case inventory
+
+Every public native mutator in the fixed-profile boundary is listed explicitly
+below, including the two selected operations whose platform payload is
+non-XML-only. The selected-case count records the complete operation/case inventory
+and representative branch coverage only; it is not a claim that the pending
+exact-platform gate has passed or that all argument combinations are covered.
+
+| Public operation | Selected cases |
+| --- | ---: |
+| `unica.cf.edit` | 3 |
+| `unica.cf.init` | 1 |
+| `unica.cfe.borrow` | 2 |
+| `unica.cfe.init` | 1 |
+| `unica.cfe.patch_method` | 6 |
+| `unica.code.patch` | 1 |
+| `unica.epf.init` | 1 |
+| `unica.erf.init` | 1 |
+| `unica.meta.compile` | 23 |
+| `unica.meta.edit` | 1 |
+| `unica.meta.remove` | 1 |
+| `unica.help.add` | 1 |
+| `unica.form.add` | 1 |
+| `unica.form.compile` | 1 |
+| `unica.form.edit` | 1 |
+| `unica.form.remove` | 1 |
+| `unica.interface.edit` | 1 |
+| `unica.subsystem.compile` | 1 |
+| `unica.subsystem.edit` | 1 |
+| `unica.template.add` | 5 |
+| `unica.template.remove` | 1 |
+| `unica.dcs.compile` | 1 |
+| `unica.dcs.edit` | 4 |
+| `unica.mxl.compile` | 1 |
+| `unica.role.compile` | 1 |
+| `unica.support.edit` | 1 |
+| **Total exact-platform checkpoints selected** | **63** |
+
+## Public-operation evidence inventory
+
+The generated corpus is produced through public application calls. Its manifest
+schema is exactly `schemaVersion: 2`. It captures immutable XML and non-XML bytes
+and empty-directory topology before and after each call, verifies every declared
+hash and directory again, rejects undeclared files or directories, classifies
+the exact create/modify/remove delta, and keeps versionless XML tied to one
+same-source-set owner.
+
+| Inventory | Count / identity |
+| --- | --- |
+| Mandatory public cases | 63 |
+| Platform checkpoints | 63: 52 configuration, 9 extension, 1 EPF, 1 ERF |
+| Pre-call XML documents | 297 |
+| Post-call XML documents | 352 |
+| Static XML inputs, pre plus post | 649 |
+| Pre-call platform non-XML payloads | 75 |
+| Post-call platform non-XML payloads | 110 |
+| Stable auxiliary payloads outside platform checkpoint roots | 141 |
+| Total regular corpus files | 1039, including 63 case reports and one manifest |
+| Empty corpus directories | 90 |
+| Pinned normalized case-contract SHA-256 | `e1f9b8b73288699b5202df1c0814110b255fa80eec908f1b7ea921f55acb82f8` |
+
+Representative branch counts include 23 `meta.compile` kinds, five
+`template.add` kinds, three `cf.edit` branches, two `cfe.borrow` branches, and
+four order-sensitive `dcs.edit` branches. Six `cfe.patch_method` checkpoints
+cover CommonModule, ObjectModule, ManagerModule, RecordSetModule, Form, and
+ValueManagerModule layouts with registered adopted extension objects,
+platform-canonical UTF-8 BOM/CRLF BSL, and the descriptor `Extended` state
+required by 8.3.27. These six cases prove physical layout
+families, while the exact 51-path type/role matrix is a separate EDT-backed
+unit contract. They do not prove arbitrary base-method signatures. Every other
+registered native mutator in scope has at least one mandatory case.
+
+The current corpus was generated independently twice. Fresh UUID-dependent
+content and hashes make the raw manifests byte-different, so raw directory
+equality would be a false reproducibility requirement. Both runs nevertheless
+produced the same normalized case-contract digest above, with the same
+63-case/63-checkpoint inventory, 1039 files, and 90 empty directories. The
+digest binds the empty-directory inventory in addition to public calls and
+expected pre/post transitions. Each raw corpus remains independently
+hash-checked and topology-checked during its verifier run.
+
+Only the volatile internal runtime cache at `.build/unica` is removed before
+the pre-call capture and again after the public call. It is neither platform
+source nor immutable operation evidence. This exclusion does not cover the
+whole `.build` tree: every other regular workspace payload outside the selected
+platform checkpoint roots is declared as auxiliary evidence and must remain
+byte-identical.
+
+## Static XSD/XDTO result and limitations
+
+The runtime archive contains 56 schemas. Fifty-four compile. The two known
+source incompatibilities are an `xs:restriction` without `base` in the ECS
+schema and an external W3C `xml.xsd` dependency. These are properties of the
+exported evidence, not failures in generated Unica XML.
+
+The current 649-document static run has zero failures:
+
+| Static classification | Documents | Meaning |
+| --- | ---: | --- |
+| `pass` / strict | 11 | Ten DCS documents and one Rights document validate through the controlled document-root/type binding. |
+| `inconclusive` / known schema incompatibility | 122 | The relevant exported runtime schema has a known source incompatibility or cannot accept the platform document as a complete dump root. |
+| `inconclusive` / not covered | 516 | 515 documents have EDT declaration evidence but no compatibility-tested complete runtime dump-document schema; one `GraphicalSchema`/`Flowchart.xml` document has structural-profile evidence only. |
+| `fail` | 0 | No well-formedness, root, QName-prefix, owner-version, or applicable strict-schema violation was found. |
+
+`Inconclusive` is deliberately not promoted to `pass`. Raw XSD alone cannot
+prove complete configuration/source-tree validity; the exact-platform gate is
+therefore authoritative.
+
+## Exact-platform gate
+
+For every selected checkpoint, the verifier proves that the complete pinned
+8.3.27.2074 install tree is unchanged, uses its pinned `ibcmd`, and runs two
+isolated import/export cycles, with the second cycle consuming the first export.
+Configuration checkpoints import and apply the source into a new
+infobase, run platform `check`, and export it. Extension checkpoints additionally
+import and apply a base configuration, then create, import, check, apply, and
+export the extension. EPF/ERF checkpoints use the platform's external-artifact
+path: each round materializes the descriptor/content pair under a private source
+directory, passes that directory to `ibcmd config import` rather than passing
+the descriptor file, and exports the resulting artifact back to XML. This
+checkpoint path invokes no artifact apply/check stages. Source/base checkpoint
+identity and both roundtrip comparisons include the exact empty-directory set.
+The input corpus is rehashed and topology-checked after the run and must remain
+unchanged.
+
+The result is scoped to the checkpoint IDs and immutable bytes named by that
+corpus manifest. It does not establish platform behavior for unselected public
+arguments, and it cannot prove the fidelity of JSON fields that a writer omitted
+before producing the imported XML.
+
+Final result: `PASS`. The complete gate processed all 63 selected checkpoints:
+63 passed, 0 rejected, 0 source errors, and 0 unstable roundtrips. It executed
+432 platform commands over two cycles per checkpoint. The corpus stayed
+unchanged (1039 files and 90 empty directories), as did the pinned platform
+installation (4337 files, 96 directories, and the recorded installation hash).
+
+The gate accepts only `pass` for all 63 checkpoints. Any rejected import,
+platform-normalized semantic delta, unstable second roundtrip, source error, or
+corpus mutation fails the gate.
+
+## Semantic versus byte canonicality
+
+The platform orders configuration-specific `Type` values using the surrounding
+configuration's `GeneratedType/xr:TypeId` index. A standalone form, DCS, or
+metadata serializer does not possess that global index, so it cannot promise
+the platform's byte order for those values.
+
+The verifier therefore treats only contiguous repetitions inside each XSD
+group (`Type`, `TypeSet`, or `TypeId`) as a semantic multiset. It remains strict
+about group order, multiplicity, interleaving, every qualifier, all other XML
+structure, and second-roundtrip stability. The proven contract is platform
+acceptance plus semantic stability, not universal byte-for-byte canonical
+output.
+
+## Next design phase
+
+After the selected-corpus platform gate passes, issue #126 can use the bounded
+8.3.27 / 2.20 emitted-XML baseline to design an optional capability-driven
+schema/XDTO service. The known DCS semantic mapping gaps remain separate work
+and must not be reclassified as platform-proven merely because omitted XML is
+accepted. The design must make profile selection explicit, report the
+quality/coverage of its schema source, keep the native `unica.*` boundary, and
+preserve the no-implicit-migration rule. Multi-format support must add profiles
+rather than weaken this baseline.

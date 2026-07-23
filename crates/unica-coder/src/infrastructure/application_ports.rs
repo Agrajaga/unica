@@ -12,6 +12,9 @@ use crate::infrastructure::internal_adapters::{
     StandardsAdapter,
 };
 use crate::infrastructure::native_operations::NativeOperationAdapter;
+use crate::infrastructure::platform::full_dump_publication::{
+    FullDumpInvocation, VerifiedFullDumpAdapter,
+};
 use crate::infrastructure::workspace_services::WorkspaceServiceManager;
 use crate::infrastructure::workspace_state::WorkspaceStateRepository;
 use serde_json::{Map, Value};
@@ -67,6 +70,11 @@ impl ApplicationPorts for InfrastructureApplicationPorts {
                 "{} stopped before adapter execution",
                 spec.name
             ))));
+        }
+        if let Some(invocation) = verified_full_dump_invocation(spec, args, dry_run) {
+            return VerifiedFullDumpAdapter::new()
+                .invoke(spec.name, invocation, args, context, cancellation)
+                .map(HandlerOutcome::plain);
         }
         match spec.handler {
             ToolHandler::NativeOperation { operation, .. } => {
@@ -207,5 +215,93 @@ impl ApplicationPorts for InfrastructureApplicationPorts {
 
     fn notify_invalidation(&self, context: &WorkspaceContext, events: &[DomainEvent]) {
         WorkspaceServiceManager::new().notify_invalidation(context, events);
+    }
+}
+
+fn is_applied_full_dump(args: &Map<String, Value>, dry_run: bool) -> bool {
+    !dry_run && args.get("mode").and_then(Value::as_str) == Some("full")
+}
+
+fn verified_full_dump_invocation(
+    spec: ToolSpec,
+    args: &Map<String, Value>,
+    dry_run: bool,
+) -> Option<FullDumpInvocation> {
+    if !is_applied_full_dump(args, dry_run) {
+        return None;
+    }
+    match spec.handler {
+        ToolHandler::BuildRuntime { command, .. } if command == ["dump"] => {
+            Some(FullDumpInvocation::BuildDump)
+        }
+        ToolHandler::RuntimeAdapter
+            if args.get("operation").and_then(Value::as_str) == Some("dump") =>
+        {
+            Some(FullDumpInvocation::RuntimeExecute)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verified_full_dump_invocation;
+    use crate::application::{RuntimeJobAction, ToolHandler, ToolSpec};
+    use crate::domain::cache::CacheAccess;
+    use crate::infrastructure::platform::full_dump_publication::FullDumpInvocation;
+    use serde_json::{json, Map};
+
+    fn spec(name: &'static str, handler: ToolHandler) -> ToolSpec {
+        ToolSpec {
+            name,
+            description: "test",
+            mutating: true,
+            cache_access: CacheAccess::default(),
+            handler,
+        }
+    }
+
+    #[test]
+    fn applied_full_dump_routes_only_synchronous_public_entry_points_to_verified_adapter() {
+        let build = spec(
+            "unica.build.dump",
+            ToolHandler::BuildRuntime {
+                command: &["dump"],
+                event: None,
+            },
+        );
+        let runtime = spec("unica.runtime.execute", ToolHandler::RuntimeAdapter);
+        let job = spec(
+            "unica.runtime.job.start",
+            ToolHandler::RuntimeJob {
+                action: RuntimeJobAction::Start,
+            },
+        );
+        let mut build_args = Map::new();
+        build_args.insert("mode".to_string(), json!("full"));
+        let mut runtime_args = build_args.clone();
+        runtime_args.insert("operation".to_string(), json!("dump"));
+
+        assert_eq!(
+            verified_full_dump_invocation(build, &build_args, false),
+            Some(FullDumpInvocation::BuildDump)
+        );
+        assert_eq!(
+            verified_full_dump_invocation(runtime, &runtime_args, false),
+            Some(FullDumpInvocation::RuntimeExecute)
+        );
+        assert_eq!(
+            verified_full_dump_invocation(job, &runtime_args, false),
+            None
+        );
+        assert_eq!(
+            verified_full_dump_invocation(runtime, &runtime_args, true),
+            None
+        );
+        runtime_args.insert("mode".to_string(), json!("partial"));
+        assert_eq!(
+            verified_full_dump_invocation(runtime, &runtime_args, false),
+            None
+        );
     }
 }

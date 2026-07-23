@@ -30,7 +30,7 @@ def detect_format_version(d):
         if parent == d:
             break
         d = parent
-    return "2.17"
+    return "2.20"
 
 
 CI_NS = "http://v8.1c.ru/8.3/xcf/extrnprops"

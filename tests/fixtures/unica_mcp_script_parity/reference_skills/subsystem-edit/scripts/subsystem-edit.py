@@ -327,7 +327,7 @@ def main():
     xml_parser = etree.XMLParser(remove_blank_text=False)
     tree = etree.parse(resolved_path, xml_parser)
     xml_root = tree.getroot()
-    format_version = xml_root.get("version") or "2.17"
+    format_version = xml_root.get("version") or "2.20"
 
     add_count = 0
     remove_count = 0
@@ -420,6 +420,8 @@ def main():
             if not found:
                 warn(f"Content item not found: {item}")
 
+    pending_child_stubs = []
+
     def do_add_child(child_name):
         nonlocal add_count
         if child_objs_el is None:
@@ -449,13 +451,9 @@ def main():
         parent_dir = os.path.dirname(resolved_path)
         parent_base_name = os.path.splitext(os.path.basename(resolved_path))[0]
         child_subs_dir = os.path.join(parent_dir, parent_base_name, 'Subsystems')
-        if not os.path.exists(child_subs_dir):
-            os.makedirs(child_subs_dir, exist_ok=True)
-            info(f"Created directory: {child_subs_dir}")
         child_xml = os.path.join(child_subs_dir, f'{child_name}.xml')
         if not os.path.exists(child_xml):
-            write_child_subsystem_stub(child_xml, child_name, format_version)
-            info(f"Created stub: {child_xml}")
+            pending_child_stubs.append((child_subs_dir, child_xml, child_name))
 
     def do_remove_child(child_name):
         nonlocal remove_count
@@ -602,6 +600,13 @@ def main():
     # --- Save ---
     save_xml_bom(tree, resolved_path)
     info(f"Saved: {resolved_path}")
+    for child_subs_dir, child_xml, child_name in pending_child_stubs:
+        if not os.path.exists(child_subs_dir):
+            os.makedirs(child_subs_dir, exist_ok=True)
+            info(f"Created directory: {child_subs_dir}")
+        if not os.path.exists(child_xml):
+            write_child_subsystem_stub(child_xml, child_name, format_version)
+            info(f"Created stub: {child_xml}")
 
     # --- Auto-validate ---
     if not args.NoValidate:

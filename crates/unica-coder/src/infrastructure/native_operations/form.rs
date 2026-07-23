@@ -4,6 +4,8 @@ use crate::application::operation_descriptors::{FORM_PATH, OBJECT_PATH};
 use crate::application::AdapterOutcome;
 use crate::domain::format_profile::{classify_root_version, FormatCompatibility};
 use crate::domain::workspace::WorkspaceContext;
+use crate::infrastructure::platform_xml_owner::{root_version_literal, MANAGED_FORM_ROOT};
+use crate::infrastructure::source_roots::normalize_path_identity;
 use roxmltree::Document;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -14,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::common::*;
+use super::compile_transaction::CompileTransaction;
 use super::form_event_registry::{
     context_from_root, validate_event, FormDefinitionKind, FormElementKind, FormEventBinding,
     FormEventContext, FormEventDiagnostic, FormEventDiagnosticCode, FormEventTarget,
@@ -22,6 +25,45 @@ use super::form_event_registry::{
 use super::{
     cf::*, cfe::*, dcs::*, interface::*, meta::*, mxl::*, role::*, subsystem::*, template::*,
 };
+
+#[cfg(test)]
+type FormCompileAfterParentOwnerProbeHook = Box<dyn FnOnce(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    static FORM_COMPILE_AFTER_PARENT_OWNER_PROBE_HOOK:
+        std::cell::RefCell<Option<FormCompileAfterParentOwnerProbeHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn with_form_compile_after_parent_owner_probe_hook<T>(
+    hook: impl FnOnce(&Path) + 'static,
+    action: impl FnOnce() -> T,
+) -> T {
+    struct Reset(Option<FormCompileAfterParentOwnerProbeHook>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FORM_COMPILE_AFTER_PARENT_OWNER_PROBE_HOOK.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous =
+        FORM_COMPILE_AFTER_PARENT_OWNER_PROBE_HOOK.with(|slot| slot.replace(Some(Box::new(hook))));
+    let _reset = Reset(previous);
+    action()
+}
+
+#[cfg(test)]
+fn run_form_compile_after_parent_owner_probe_hook(path: &Path) {
+    if let Some(hook) =
+        FORM_COMPILE_AFTER_PARENT_OWNER_PROBE_HOOK.with(|slot| slot.borrow_mut().take())
+    {
+        hook(path);
+    }
+}
 
 const FORM_LOGFORM_NS: &str = "http://v8.1c.ru/8.3/xcf/logform";
 const FORM_V8_NS: &str = "http://v8.1c.ru/8.1/data/core";
@@ -138,7 +180,8 @@ pub(crate) fn validate_form(
         let form_name = form_validation_name(&form_path);
 
         let text = read_utf8_sig(&form_path)?;
-        let doc = match Document::parse(text.trim_start_matches('\u{feff}')) {
+        let source = text.trim_start_matches('\u{feff}');
+        let doc = match Document::parse(source) {
             Ok(doc) => doc,
             Err(err) => {
                 let stdout =
@@ -161,7 +204,8 @@ pub(crate) fn validate_form(
         }
 
         let has_base_form = form_validation_child(root, "BaseForm").is_some();
-        match classify_root_version(root.attribute("version")) {
+        let version_literal = root_version_literal(source, root);
+        match classify_root_version(version_literal.as_deref()) {
             Ok(FormatCompatibility::Supported { .. }) => report.ok("Export format: 2.20"),
             Ok(compatibility) => report.warn(format_compatibility_warning(&compatibility)),
             Err(error) => report.error(error.to_string()),
@@ -534,16 +578,6 @@ pub(crate) fn form_validate_data_paths(
         "ViewStatusAddition",
         "SearchControlAddition",
     ];
-    let binding_tags = [
-        "DataPath",
-        "TitleDataPath",
-        "FooterDataPath",
-        "HeaderDataPath",
-        "MultipleValueDataPath",
-        "MultipleValuePresentDataPath",
-        "RowPictureDataPath",
-        "MultipleValuePictureDataPath",
-    ];
     let mut path_errors = 0usize;
     let mut path_checked = 0usize;
     let mut path_base_skipped = 0usize;
@@ -562,7 +596,7 @@ pub(crate) fn form_validate_data_paths(
             path_base_skipped += 1;
             continue;
         }
-        for binding_tag in binding_tags {
+        for (_, binding_tag) in FORM_BINDING_PATH_PROPERTIES {
             let Some(data_path) = form_validation_child_text(element.node, binding_tag) else {
                 continue;
             };
@@ -572,24 +606,28 @@ pub(crate) fn form_validate_data_paths(
             }
             path_checked += 1;
 
-            let mut clean_path = strip_form_binding_prefixes(data_path);
-            let mut segments = clean_path.split('.');
-            let mut root_attr = segments.next().unwrap_or("").to_string();
-
-            if root_attr == "Items" {
-                let table_name = segments.next().unwrap_or("");
-                let current_data = segments.next().unwrap_or("");
-                if table_name.is_empty() || current_data != "CurrentData" {
+            let resolution = resolve_form_binding_path(data_path, |table_name| {
+                let Some(table_element) = elements
+                    .iter()
+                    .find(|candidate| candidate.tag == "Table" && candidate.name == table_name)
+                else {
+                    return FormBindingTablePath::Missing;
+                };
+                match form_validation_child_text(table_element.node, "DataPath") {
+                    Some(path) => FormBindingTablePath::Bound(path),
+                    None => FormBindingTablePath::Unbound,
+                }
+            });
+            let root_attr = match resolution {
+                FormBindingPathResolution::Skip => continue,
+                FormBindingPathResolution::UnknownItemsShape => {
                     report.warn(format!(
                         "[{}] '{}': {}='{}' — unknown Items.* shape, expected Items.<Table>.CurrentData.*",
                         element.tag, element.name, binding_tag, data_path
                     ));
                     continue;
                 }
-                let Some(table_element) = elements
-                    .iter()
-                    .find(|candidate| candidate.tag == "Table" && candidate.name == table_name)
-                else {
+                FormBindingPathResolution::MissingTable(table_name) => {
                     report.error(format!(
                         "[{}] '{}': {}='{}' — table element '{}' not found",
                         element.tag, element.name, binding_tag, data_path, table_name
@@ -599,18 +637,9 @@ pub(crate) fn form_validate_data_paths(
                         return;
                     }
                     continue;
-                };
-                let Some(table_path) = form_validation_child_text(table_element.node, "DataPath")
-                else {
-                    continue;
-                };
-                let table_path = table_path.trim();
-                if table_path.is_empty() {
-                    continue;
                 }
-                clean_path = strip_form_binding_prefixes(table_path);
-                root_attr = clean_path.split('.').next().unwrap_or("").to_string();
-            }
+                FormBindingPathResolution::Attribute(root_attr) => root_attr,
+            };
 
             if !attr_map.contains_key(root_attr.as_str()) {
                 report.error(format!(
@@ -638,6 +667,77 @@ pub(crate) fn form_validate_data_paths(
     }
     if path_errors == 0 && !path_msg.is_empty() {
         report.ok(format!("Binding path references: {path_msg}"));
+    }
+}
+
+const FORM_BINDING_PATH_PROPERTIES: [(&str, &str); 8] = [
+    ("path", "DataPath"),
+    ("titleDataPath", "TitleDataPath"),
+    ("footerDataPath", "FooterDataPath"),
+    ("headerDataPath", "HeaderDataPath"),
+    ("multipleValueDataPath", "MultipleValueDataPath"),
+    (
+        "multipleValuePresentDataPath",
+        "MultipleValuePresentDataPath",
+    ),
+    ("rowPictureDataPath", "RowPictureDataPath"),
+    (
+        "multipleValuePictureDataPath",
+        "MultipleValuePictureDataPath",
+    ),
+];
+
+enum FormBindingTablePath {
+    Missing,
+    Unbound,
+    Bound(String),
+}
+
+enum FormBindingPathResolution {
+    Skip,
+    Attribute(String),
+    UnknownItemsShape,
+    MissingTable(String),
+}
+
+fn resolve_form_binding_path(
+    data_path: &str,
+    table_path: impl FnOnce(&str) -> FormBindingTablePath,
+) -> FormBindingPathResolution {
+    let data_path = data_path.trim();
+    if data_path.is_empty() || is_opaque_form_binding(data_path) {
+        return FormBindingPathResolution::Skip;
+    }
+
+    let clean_path = strip_form_binding_prefixes(data_path);
+    let mut segments = clean_path.split('.');
+    let root_attr = segments.next().unwrap_or("");
+    if root_attr != "Items" {
+        return FormBindingPathResolution::Attribute(root_attr.to_string());
+    }
+
+    let table_name = segments.next().unwrap_or("");
+    let current_data = segments.next().unwrap_or("");
+    if table_name.is_empty() || current_data != "CurrentData" {
+        return FormBindingPathResolution::UnknownItemsShape;
+    }
+
+    match table_path(table_name) {
+        FormBindingTablePath::Missing => {
+            FormBindingPathResolution::MissingTable(table_name.to_string())
+        }
+        FormBindingTablePath::Unbound => FormBindingPathResolution::Skip,
+        FormBindingTablePath::Bound(table_path) => {
+            let table_path = table_path.trim();
+            if table_path.is_empty() || is_opaque_form_binding(table_path) {
+                FormBindingPathResolution::Skip
+            } else {
+                let clean_table_path = strip_form_binding_prefixes(table_path);
+                FormBindingPathResolution::Attribute(
+                    clean_table_path.split('.').next().unwrap_or("").to_string(),
+                )
+            }
+        }
     }
 }
 
@@ -2006,12 +2106,6 @@ pub(crate) fn form_command_lines(commands: roxmltree::Node<'_, '_>) -> Vec<Strin
 }
 
 pub(crate) fn form_format_type(type_node: roxmltree::Node<'_, '_>) -> String {
-    if let Some(type_set) = form_child_text(type_node, "TypeSet") {
-        return type_set
-            .strip_prefix("cfg:")
-            .unwrap_or(&type_set)
-            .to_string();
-    }
     let mut parts = Vec::new();
     for type_item in form_children(type_node, "Type") {
         let raw = type_item.text().unwrap_or("");
@@ -2020,8 +2114,16 @@ pub(crate) fn form_format_type(type_node: roxmltree::Node<'_, '_>) -> String {
                 let length = form_child(type_node, "StringQualifiers")
                     .and_then(|node| form_child_text(node, "Length"))
                     .unwrap_or_else(|| "0".to_string());
+                let fixed = form_child(type_node, "StringQualifiers")
+                    .and_then(|node| form_child_text(node, "AllowedLength"))
+                    .as_deref()
+                    == Some("Fixed");
                 if length != "0" {
-                    format!("string({length})")
+                    if fixed {
+                        format!("string({length},fixed)")
+                    } else {
+                        format!("string({length})")
+                    }
                 } else {
                     "string".to_string()
                 }
@@ -2032,7 +2134,14 @@ pub(crate) fn form_format_type(type_node: roxmltree::Node<'_, '_>) -> String {
                         form_child_text(qualifiers, "Digits").unwrap_or_else(|| "0".to_string());
                     let fraction = form_child_text(qualifiers, "FractionDigits")
                         .unwrap_or_else(|| "0".to_string());
-                    format!("decimal({digits},{fraction})")
+                    let sign = if form_child_text(qualifiers, "AllowedSign").as_deref()
+                        == Some("Nonnegative")
+                    {
+                        ",nonneg"
+                    } else {
+                        ""
+                    };
+                    format!("decimal({digits},{fraction}{sign})")
                 } else {
                     "decimal".to_string()
                 }
@@ -2059,44 +2168,56 @@ pub(crate) fn form_format_type(type_node: roxmltree::Node<'_, '_>) -> String {
             "v8ui:Color" => "Color".to_string(),
             "v8ui:Font" => "Font".to_string(),
             other if other.starts_with("cfg:") => other[4..].to_string(),
-            other if other.starts_with("dcsset:") => other.replacen("dcsset:", "DCS.", 1),
-            other if other.starts_with("dcssch:") => other.replacen("dcssch:", "DCS.", 1),
-            other if other.starts_with("dcscor:") => other.replacen("dcscor:", "DCS.", 1),
-            other => {
-                if let Some((prefix, suffix)) = other.split_once(':') {
-                    if prefix.starts_with('d')
-                        && prefix[1..]
-                            .chars()
-                            .all(|ch| ch.is_ascii_digit() || ch == 'p')
-                    {
-                        suffix.to_string()
-                    } else {
-                        other.to_string()
-                    }
-                } else {
-                    other.to_string()
-                }
-            }
+            other => other.to_string(),
         };
         parts.push(part);
+    }
+    for type_set in form_children(type_node, "TypeSet") {
+        let raw = type_set.text().unwrap_or("").trim();
+        if !raw.is_empty() {
+            parts.push(raw.strip_prefix("cfg:").unwrap_or(raw).to_string());
+        }
+    }
+    for type_id in form_children(type_node, "TypeId") {
+        let raw = type_id.text().unwrap_or("").trim();
+        if !raw.is_empty() {
+            parts.push(format!("typeid:{raw}"));
+        }
     }
     parts.join(" | ")
 }
 
+fn validate_form_metadata_path_name(argument: &str, value: &str) -> Result<(), String> {
+    let mut components = Path::new(value).components();
+    let is_single_path_component = matches!(
+        components.next(),
+        Some(std::path::Component::Normal(component))
+            if component == std::ffi::OsStr::new(value)
+    ) && components.next().is_none();
+
+    if form_is_xml_ncname(value) && is_single_path_component {
+        Ok(())
+    } else {
+        Err(format!(
+            "{argument} must be a valid Unicode XML NCName and a single path component: {value:?}"
+        ))
+    }
+}
+
 pub(crate) fn add_form(args: &Map<String, Value>, context: &WorkspaceContext) -> AdapterOutcome {
-    let result = (|| -> Result<(String, Vec<PathBuf>), String> {
+    let result = (|| -> Result<(String, Vec<PathBuf>, Vec<String>), String> {
         let object_path_raw = required_path(args, OBJECT_PATH, "ObjectPath")?;
         let form_name = required_string(args, &["formName", "FormName"], "FormName")?;
+        validate_form_metadata_path_name("FormName", form_name)?;
         let synonym = string_arg(args, &["synonym", "Synonym"]).unwrap_or(form_name);
         let purpose_raw = string_arg(args, &["purpose", "Purpose"]).unwrap_or("Object");
         let set_default = optional_bool_arg(args, &["setDefault", "SetDefault"]);
 
         let object_xml_full =
             resolve_form_add_object_path(absolutize(object_path_raw, &context.cwd))?;
-        let object_source_text = fs::read_to_string(&object_xml_full)
-            .map_err(|err| format!("failed to read {}: {err}", object_xml_full.display()))?
-            .trim_start_matches('\u{feff}')
-            .to_string();
+        require_metadata_8_3_27_validation(&object_xml_full, context, "form.add")?;
+        let object_source = read_utf8_sig_snapshot(&object_xml_full)?;
+        let object_source_text = object_source.text;
         let mut object_text = object_source_text.clone();
         let (object_type, object_name) = detect_form_add_object(&object_text)?;
         let format_version = detect_format_version(&object_xml_full, context)?.to_string();
@@ -2107,56 +2228,27 @@ pub(crate) fn add_form(args: &Map<String, Value>, context: &WorkspaceContext) ->
         let object_dir = object_xml_full.with_extension("");
         let forms_dir = object_dir.join("Forms");
         let form_meta_path = forms_dir.join(format!("{form_name}.xml"));
-        if form_meta_path.exists() {
-            return Err(format!(
-                "Форма уже существует: {}",
-                form_meta_path.display()
-            ));
-        }
 
         let form_dir = forms_dir.join(form_name);
         let form_ext_dir = form_dir.join("Ext");
         let form_module_dir = form_ext_dir.join("Form");
-        fs::create_dir_all(&form_module_dir)
-            .map_err(|err| format!("failed to create {}: {err}", form_module_dir.display()))?;
-
-        write_utf8_bom(
-            &form_meta_path,
-            &form_add_metadata_xml(
-                form_name,
-                synonym,
-                &object_type,
-                &format_version,
-                &fresh_uuid(),
-            ),
-        )?;
+        let form_metadata = form_add_metadata_xml(
+            form_name,
+            synonym,
+            &object_type,
+            &format_version,
+            &fresh_uuid(),
+        );
 
         let form_xml_path = form_ext_dir.join("Form.xml");
+        let form_content =
+            form_add_content_xml(&object_type, &object_name, &purpose, &format_version)?;
         let mut stdout = String::new();
         stdout.push('\n');
         stdout.push_str("=== form-add ===\n\n");
         stdout.push_str(&format!("Object: {object_type}.{object_name}\n"));
-        if form_xml_path.exists() {
-            stdout.push_str(&format!(
-                "[SKIP] Form.xml already exists: {} — not overwriting\n",
-                form_xml_path.display()
-            ));
-        } else {
-            write_utf8_bom(
-                &form_xml_path,
-                &form_add_content_xml(&object_type, &object_name, &purpose, &format_version)?,
-            )?;
-        }
 
         let module_path = form_module_dir.join("Module.bsl");
-        if module_path.exists() {
-            stdout.push_str(&format!(
-                "[SKIP] Module.bsl already exists: {} — not overwriting\n",
-                module_path.display()
-            ));
-        } else {
-            write_utf8_bom(&module_path, form_add_module_bsl())?;
-        }
 
         object_text = register_form_in_object_text(&object_text, form_name);
         let default_prop_name = form_default_property(&object_type, &purpose);
@@ -2184,13 +2276,23 @@ pub(crate) fn add_form(args: &Map<String, Value>, context: &WorkspaceContext) ->
                 updated
             }
         };
-        write_utf8_bom(
-            &object_xml_full,
+        let object_replacement = utf8_bom_bytes(
             &lxml_tree_serialized_text_like_source_preserving_final_newline(
                 &object_text,
                 &object_source_text,
             ),
-        )?;
+        );
+
+        let mut transaction = CompileTransaction::new();
+        transaction.create_utf8_bom_text(&form_meta_path, &form_metadata)?;
+        transaction.create_utf8_bom_text(&form_xml_path, &form_content)?;
+        transaction.create_utf8_bom_text(&module_path, form_add_module_bsl())?;
+        transaction.replace_bytes(&object_xml_full, &object_source.raw, object_replacement)?;
+        guard_active_format_owner(&mut transaction, &object_xml_full, context)?;
+        let validation_path = object_xml_full.clone();
+        let report = transaction.commit_with_post_validation(|| {
+            require_metadata_8_3_27_validation(&validation_path, context, "form.add")
+        })?;
 
         let obj_dir_name = object_xml_full
             .parent()
@@ -2223,18 +2325,19 @@ pub(crate) fn add_form(args: &Map<String, Value>, context: &WorkspaceContext) ->
         Ok((
             stdout,
             vec![object_xml_full, form_meta_path, form_xml_path, module_path],
+            report.cleanup_warnings,
         ))
     })();
 
     match result {
-        Ok((stdout, artifacts)) => AdapterOutcome {
+        Ok((stdout, artifacts, warnings)) => AdapterOutcome {
             ok: true,
             summary: "unica.form.add completed with native form scaffold writer".to_string(),
             changes: artifacts
                 .iter()
                 .map(|path| format!("updated {}", path.display()))
                 .collect(),
-            warnings: Vec::new(),
+            warnings,
             errors: Vec::new(),
             artifacts: artifacts
                 .iter()
@@ -2259,13 +2362,15 @@ pub(crate) fn add_form(args: &Map<String, Value>, context: &WorkspaceContext) ->
 }
 
 pub(crate) fn remove_form(args: &Map<String, Value>, context: &WorkspaceContext) -> AdapterOutcome {
-    let result = (|| -> Result<(String, Vec<String>), String> {
+    let result = (|| -> Result<(String, Vec<String>, Vec<String>), String> {
         let object_name = required_string(
             args,
             &["objectName", "ObjectName", "processorName", "ProcessorName"],
             "ObjectName",
         )?;
         let form_name = required_string(args, &["formName", "FormName"], "FormName")?;
+        validate_form_metadata_path_name("ObjectName", object_name)?;
+        validate_form_metadata_path_name("FormName", form_name)?;
         let src_dir_raw = string_arg(args, &["srcDir", "SrcDir"]).unwrap_or("src");
         let src_dir_display = PathBuf::from(src_dir_raw);
         let src_dir_abs = absolutize(src_dir_display.clone(), &context.cwd);
@@ -2278,6 +2383,7 @@ pub(crate) fn remove_form(args: &Map<String, Value>, context: &WorkspaceContext)
                 root_xml_display.display()
             ));
         }
+        require_metadata_8_3_27_validation(&root_xml_path, context, "form.remove")?;
 
         let processor_dir_display = src_dir_display.join(object_name);
         let processor_dir_abs = src_dir_abs.join(object_name);
@@ -2295,28 +2401,25 @@ pub(crate) fn remove_form(args: &Map<String, Value>, context: &WorkspaceContext)
             ));
         }
 
-        let mut stdout = String::new();
-        let mut changes = Vec::new();
-        if form_dir_path.is_dir() {
-            fs::remove_dir_all(&form_dir_path)
-                .map_err(|err| format!("failed to remove {}: {err}", form_dir_path.display()))?;
-            stdout.push_str(&format!(
-                "[OK] Удалён каталог: {}\n",
-                form_dir_display.display()
-            ));
-            changes.push(format!("removed directory {}", form_dir_path.display()));
-        }
+        let form_dir_exists = match fs::symlink_metadata(&form_dir_path) {
+            Ok(metadata) if metadata.is_dir() => true,
+            Ok(_) => {
+                return Err(format!(
+                    "Каталог формы не является каталогом: {}",
+                    form_dir_display.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect {}: {error}",
+                    form_dir_path.display()
+                ));
+            }
+        };
 
-        fs::remove_file(&form_meta_path)
-            .map_err(|err| format!("failed to remove {}: {err}", form_meta_path.display()))?;
-        stdout.push_str(&format!(
-            "[OK] Удалён файл: {}\n",
-            form_meta_display.display()
-        ));
-        changes.push(format!("removed file {}", form_meta_path.display()));
-
-        let source_xml_text = fs::read_to_string(&root_xml_path)
-            .map_err(|err| format!("failed to read {}: {err}", root_xml_path.display()))?;
+        let source = read_utf8_sig_snapshot(&root_xml_path)?;
+        let source_xml_text = source.text;
         let form_ref_suffix = format!("Form.{form_name}");
         let (xml_text, removed_form_refs) =
             remove_form_reference_elements(&source_xml_text, &form_ref_suffix);
@@ -2330,28 +2433,111 @@ pub(crate) fn remove_form(args: &Map<String, Value>, context: &WorkspaceContext)
             xml_text = collapse_empty_xml_elements(&xml_text, &tags);
         }
         xml_text = preserve_source_final_newline(xml_text, &source_xml_text);
+
+        let collection_targets = if form_dir_exists {
+            vec![form_meta_path.as_path(), form_dir_path.as_path()]
+        } else {
+            vec![form_meta_path.as_path()]
+        };
+
+        let mut transaction = CompileTransaction::new();
+        transaction.replace_bytes(&root_xml_path, &source.raw, utf8_bom_bytes(&xml_text))?;
+        let remove_forms_collection = transaction.remove_directory_if_only_direct_entries(
+            &forms_dir_abs,
+            collection_targets
+                .iter()
+                .map(|path| {
+                    path.file_name()
+                        .expect("form collection target must have a file name")
+                        .to_os_string()
+                })
+                .collect(),
+        )?;
+        if !remove_forms_collection {
+            if form_dir_exists {
+                transaction.remove_path(&form_dir_path)?;
+            } else {
+                transaction.guard_path_absent(&form_dir_path)?;
+            }
+            transaction.remove_path(&form_meta_path)?;
+        }
+        let trees = if form_dir_exists {
+            vec![form_meta_path.as_path(), form_dir_path.as_path()]
+        } else {
+            vec![form_meta_path.as_path()]
+        };
+        guard_active_format_dependencies_and_xml_trees(
+            &mut transaction,
+            &[root_xml_path.as_path()],
+            &trees,
+            context,
+        )?;
+        let validation_path = root_xml_path.clone();
+        let validation_form_meta = form_meta_path.clone();
+        let validation_form_dir = form_dir_path.clone();
+        let report = transaction.commit_with_post_validation(move || {
+            require_metadata_8_3_27_validation(&validation_path, context, "form.remove")?;
+            for path in [&validation_form_meta, &validation_form_dir] {
+                match fs::symlink_metadata(path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Ok(_) => {
+                        return Err(format!(
+                            "form.remove post-write validation found removed pair member still present: {}",
+                            path.display()
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "form.remove post-write validation failed to inspect {}: {error}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        })?;
+
+        let mut stdout = String::new();
+        let mut changes = Vec::new();
+        if form_dir_exists {
+            stdout.push_str(&format!(
+                "[OK] Удалён каталог: {}\n",
+                form_dir_display.display()
+            ));
+            changes.push(format!("removed directory {}", form_dir_path.display()));
+        }
+        if remove_forms_collection {
+            changes.push(format!(
+                "removed empty collection directory {}",
+                forms_dir_abs.display()
+            ));
+        }
+        stdout.push_str(&format!(
+            "[OK] Удалён файл: {}\n",
+            form_meta_display.display()
+        ));
+        changes.push(format!("removed file {}", form_meta_path.display()));
         if removed_form_refs > 0 {
             changes.push(format!("removed {removed_form_refs} Form reference(s)"));
         }
         for tag in cleared_form_slots {
             changes.push(format!("cleared {tag}"));
         }
-        write_utf8_bom(&root_xml_path, &xml_text)?;
         changes.push(format!("updated {}", root_xml_path.display()));
 
         stdout.push_str(&format!(
             "[OK] Форма {form_name} удалена из {}\n",
             root_xml_display.display()
         ));
-        Ok((stdout, changes))
+        Ok((stdout, changes, report.cleanup_warnings))
     })();
 
     match result {
-        Ok((stdout, changes)) => AdapterOutcome {
+        Ok((stdout, changes, warnings)) => AdapterOutcome {
             ok: true,
             summary: "unica.form.remove completed with native form remover".to_string(),
             changes,
-            warnings: Vec::new(),
+            warnings,
             errors: Vec::new(),
             artifacts: Vec::new(),
             stdout: Some(stdout),
@@ -2731,7 +2917,7 @@ pub(crate) fn form_compile_definition_from_object(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
     output_path: &Path,
-) -> Result<(Value, String), String> {
+) -> Result<(Value, String, PathBuf, Utf8TextSnapshot), String> {
     let (inferred_object_path, inferred_purpose) =
         form_compile_infer_from_object_target(output_path, context);
     let (object_path, mut stdout) = if let Some(object_path_raw) =
@@ -2755,8 +2941,8 @@ pub(crate) fn form_compile_definition_from_object(
     if !object_path.exists() {
         return Err(format!("Object file not found: {}", object_path.display()));
     }
-    let object_text = read_utf8_sig(&object_path)?;
-    let meta = form_compile_parse_object_meta(&object_text)?;
+    let object_snapshot = read_utf8_sig_snapshot(&object_path)?;
+    let meta = form_compile_parse_object_meta(&object_snapshot.text)?;
     let purpose = string_arg(args, &["purpose", "Purpose"])
         .or(inferred_purpose)
         .unwrap_or("Item");
@@ -2792,7 +2978,7 @@ pub(crate) fn form_compile_definition_from_object(
         meta.attributes.len(),
         meta.tabular_sections.len()
     ));
-    Ok((defn, stdout))
+    Ok((defn, stdout, object_path, object_snapshot))
 }
 
 pub(crate) fn form_compile_parse_object_meta(
@@ -2905,15 +3091,11 @@ pub(crate) fn form_compile_meta_collection_values(node: roxmltree::Node<'_, '_>)
 }
 
 pub(crate) fn form_compile_type_xml_text(type_node: roxmltree::Node<'_, '_>) -> String {
-    let types = meta_info_children(type_node, "Type")
-        .into_iter()
-        .filter_map(|node| node.text().map(str::to_string))
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-    if types.is_empty() {
+    let type_name = form_format_type(type_node);
+    if type_name.is_empty() {
         "string".to_string()
     } else {
-        types.join(" | ")
+        type_name
     }
 }
 
@@ -3404,10 +3586,7 @@ pub(crate) fn form_add_content_xml(
             concat!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
                 "<Form {ns} version=\"{format_version}\">\n",
-                "\t<AutoCommandBar name=\"ФормаКоманднаяПанель\" id=\"-1\">\n",
-                "\t\t<Autofill>true</Autofill>\n",
-                "\t</AutoCommandBar>\n",
-                "\t<ChildItems/>\n",
+                "\t<AutoCommandBar name=\"ФормаКоманднаяПанель\" id=\"-1\"/>\n",
                 "\t<Attributes>\n",
                 "\t\t<Attribute name=\"Список\" id=\"1\">\n",
                 "\t\t\t<Type>\n",
@@ -3432,10 +3611,7 @@ pub(crate) fn form_add_content_xml(
             concat!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
                 "<Form {ns} version=\"{format_version}\">\n",
-                "\t<AutoCommandBar name=\"ФормаКоманднаяПанель\" id=\"-1\">\n",
-                "\t\t<Autofill>true</Autofill>\n",
-                "\t</AutoCommandBar>\n",
-                "\t<ChildItems/>\n",
+                "\t<AutoCommandBar name=\"ФормаКоманднаяПанель\" id=\"-1\"/>\n",
                 "\t<Attributes>\n",
                 "\t\t<Attribute name=\"Запись\" id=\"1\">\n",
                 "\t\t\t<Type>\n",
@@ -3475,14 +3651,22 @@ pub(crate) fn form_add_content_xml(
     } else {
         "\t\t\t<SavedData>true</SavedData>\n"
     };
+    let root_defaults = match object_type {
+        "Catalog" => "\t<UseForFoldersAndItems>Items</UseForFoldersAndItems>\n",
+        "Report" | "ExternalReport" => concat!(
+            "\t<ReportFormType>Main</ReportFormType>\n",
+            "\t<AutoShowState>Auto</AutoShowState>\n",
+            "\t<ReportResultViewMode>Auto</ReportResultViewMode>\n",
+            "\t<ViewModeApplicationOnSetReportResult>Auto</ViewModeApplicationOnSetReportResult>\n"
+        ),
+        _ => "",
+    };
     Ok(format!(
         concat!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
             "<Form {ns} version=\"{format_version}\">\n",
-            "\t<AutoCommandBar name=\"ФормаКоманднаяПанель\" id=\"-1\">\n",
-            "\t\t<Autofill>true</Autofill>\n",
-            "\t</AutoCommandBar>\n",
-            "\t<ChildItems/>\n",
+            "{root_defaults}",
+            "\t<AutoCommandBar name=\"ФормаКоманднаяПанель\" id=\"-1\"/>\n",
             "\t<Attributes>\n",
             "\t\t<Attribute name=\"Объект\" id=\"1\">\n",
             "\t\t\t<Type>\n",
@@ -3496,6 +3680,7 @@ pub(crate) fn form_add_content_xml(
         ),
         ns = ns,
         format_version = escape_xml(format_version),
+        root_defaults = root_defaults,
         main_attr_type = escape_xml(&main_attr_type),
         saved_data_line = saved_data_line,
     ))
@@ -3503,17 +3688,23 @@ pub(crate) fn form_add_content_xml(
 
 pub(crate) fn form_add_module_bsl() -> &'static str {
     concat!(
-        "#Область ОбработчикиСобытийФормы\n\n",
-        "#КонецОбласти\n\n",
-        "#Область ОбработчикиСобытийЭлементовФормы\n\n",
-        "#КонецОбласти\n\n",
-        "#Область ОбработчикиКомандФормы\n\n",
-        "#КонецОбласти\n\n",
-        "#Область ОбработчикиОповещений\n\n",
-        "#КонецОбласти\n\n",
-        "#Область СлужебныеПроцедурыИФункции\n\n",
+        "#Область ОбработчикиСобытийФормы\r\n\r\n",
+        "#КонецОбласти\r\n\r\n",
+        "#Область ОбработчикиСобытийЭлементовФормы\r\n\r\n",
+        "#КонецОбласти\r\n\r\n",
+        "#Область ОбработчикиКомандФормы\r\n\r\n",
+        "#КонецОбласти\r\n\r\n",
+        "#Область ОбработчикиОповещений\r\n\r\n",
+        "#КонецОбласти\r\n\r\n",
+        "#Область СлужебныеПроцедурыИФункции\r\n\r\n",
         "#КонецОбласти"
     )
+}
+
+#[cfg(test)]
+fn assert_platform_text_uses_crlf_without_bare_lf(text: &str) {
+    assert!(text.contains("\r\n"));
+    assert!(!text.replace("\r\n", "").contains('\n'));
 }
 
 pub(crate) fn form_default_property<'a>(object_type: &str, purpose: &'a str) -> &'a str {
@@ -3579,6 +3770,33 @@ struct FormCompilePlan {
     stdout: String,
     xml: String,
     stats: FormCompileStats,
+    derivation_inputs: Vec<FormCompileDerivationInput>,
+}
+
+struct FormCompileDerivationInput {
+    path: PathBuf,
+    snapshot: Utf8TextSnapshot,
+    platform_xml: bool,
+}
+
+fn form_compile_derivation_snapshot_for_path(
+    inputs: &[FormCompileDerivationInput],
+    target: &Path,
+) -> Result<Option<Utf8TextSnapshot>, String> {
+    let target = normalize_path_identity(target)?;
+    for input in inputs {
+        if normalize_path_identity(&input.path)? == target {
+            return Ok(Some(input.snapshot.clone()));
+        }
+    }
+    Ok(None)
+}
+
+struct FormParentRegistrationPlan {
+    path: PathBuf,
+    original: Vec<u8>,
+    replacement: Vec<u8>,
+    stdout: String,
 }
 
 pub(crate) fn compile_form(
@@ -3587,28 +3805,133 @@ pub(crate) fn compile_form(
 ) -> AdapterOutcome {
     let write_result = plan_form_compile(args, context).and_then(|mut plan| {
         let output_path = plan.output_path.clone();
-        if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+        let owner_candidate = form_parent_metadata_owner_candidate(&output_path)?;
+        let owner_validation_snapshot = match owner_candidate.as_deref() {
+            Some(owner_path) => {
+                match form_compile_derivation_snapshot_for_path(
+                    &plan.derivation_inputs,
+                    owner_path,
+                )? {
+                    Some(snapshot) => Some(snapshot),
+                    None => match fs::symlink_metadata(owner_path) {
+                        Ok(metadata)
+                            if metadata.is_file() && !metadata.file_type().is_symlink() =>
+                        {
+                            Some(read_utf8_sig_snapshot(owner_path)?)
+                        }
+                        Ok(_) => {
+                            return Err(format!(
+                                "form parent metadata owner is not a regular file: {}",
+                                owner_path.display()
+                            ));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => {
+                            return Err(format!(
+                                "failed to inspect form parent metadata owner {}: {error}",
+                                owner_path.display()
+                            ));
+                        }
+                    },
+                }
+            }
+            None => None,
+        };
+        let mut transaction = CompileTransaction::new();
+        if let (Some(owner_path), None) = (
+            owner_candidate.as_deref(),
+            owner_validation_snapshot.as_ref(),
+        ) {
+            transaction.guard_path_absent(owner_path)?;
         }
-        write_utf8_bom(&output_path, &plan.xml)?;
+        #[cfg(test)]
+        run_form_compile_after_parent_owner_probe_hook(&output_path);
+        if let (Some(owner_path), Some(_)) = (
+            owner_candidate.as_deref(),
+            owner_validation_snapshot.as_ref(),
+        ) {
+            require_metadata_8_3_27_validation(owner_path, context, "form.compile")?;
+        }
+        let registration = match (
+            owner_candidate.as_deref(),
+            owner_validation_snapshot.as_ref(),
+        ) {
+            (Some(owner_path), Some(owner_snapshot)) => {
+                plan_form_registration_in_parent_object(&output_path, owner_path, owner_snapshot)?
+            }
+            _ => None,
+        };
+        transaction.create_or_replace_bytes(&output_path, utf8_bom_bytes(&plan.xml))?;
+        let mut registration_stdout = None;
+        if let Some(FormParentRegistrationPlan {
+            path,
+            original,
+            replacement,
+            stdout,
+        }) = registration
+        {
+            transaction.replace_bytes(path, &original, replacement)?;
+            registration_stdout = Some(stdout);
+        }
+        if let (Some(owner_path), Some(owner_snapshot)) = (
+            owner_candidate.as_deref(),
+            owner_validation_snapshot.as_ref(),
+        ) {
+            if !transaction.protects_path(owner_path)? {
+                transaction.guard_exact_preimage(owner_path, &owner_snapshot.raw)?;
+            }
+        }
+        for input in &plan.derivation_inputs {
+            guard_exact_preimage_if_unprotected(
+                &mut transaction,
+                &input.path,
+                &input.snapshot.raw,
+            )?;
+        }
+        guard_active_format_owner_with_exact_root(
+            &mut transaction,
+            &output_path,
+            context,
+            MANAGED_FORM_ROOT,
+        )?;
+        let mut format_dependencies = Vec::new();
+        if let Some(owner_path) = owner_candidate.as_deref() {
+            format_dependencies.push(owner_path);
+        }
+        format_dependencies.extend(
+            plan.derivation_inputs
+                .iter()
+                .filter(|input| input.platform_xml)
+                .map(|input| input.path.as_path()),
+        );
+        guard_active_format_dependencies(&mut transaction, &format_dependencies, context)?;
+        let report = transaction.commit_with_post_validation(|| {
+            if let (Some(owner_path), Some(_)) = (
+                owner_candidate.as_deref(),
+                owner_validation_snapshot.as_ref(),
+            ) {
+                require_metadata_8_3_27_validation(owner_path, context, "form.compile")
+            } else {
+                Ok(())
+            }
+        })?;
 
-        if let Some(registered) = register_form_in_parent_object(&output_path)? {
-            plan.stdout.push_str(&registered);
+        if let Some(registration_stdout) = registration_stdout {
+            plan.stdout.push_str(&registration_stdout);
         }
         plan.stdout
             .push_str(&format!("[OK] Compiled: {}\n", plan.output_label));
         append_form_compile_stats(&mut plan.stdout, &plan.stats);
 
-        Ok((plan.stdout, output_path))
+        Ok((plan.stdout, output_path, report.cleanup_warnings))
     });
 
     match write_result {
-        Ok((stdout, output_path)) => AdapterOutcome {
+        Ok((stdout, output_path, warnings)) => AdapterOutcome {
             ok: true,
             summary: "unica.form.compile completed with native managed form compiler".to_string(),
             changes: vec![format!("updated {}", output_path.display())],
-            warnings: Vec::new(),
+            warnings,
             errors: Vec::new(),
             artifacts: vec![output_path.display().to_string()],
             stdout: Some(stdout),
@@ -3690,10 +4013,17 @@ fn plan_form_compile(
         }
     }
     let output_path = absolutize(PathBuf::from(&output_label), &context.cwd);
+    validate_form_compile_output_path(&output_path)?;
+    let mut derivation_inputs = Vec::new();
     let defn = if from_object {
-        let (defn, from_object_stdout) =
+        let (defn, from_object_stdout, object_path, object_snapshot) =
             form_compile_definition_from_object(args, context, &output_path)?;
         stdout.push_str(&from_object_stdout);
+        derivation_inputs.push(FormCompileDerivationInput {
+            path: object_path,
+            snapshot: object_snapshot,
+            platform_xml: true,
+        });
         defn
     } else {
         let json_path_raw = json_path_raw
@@ -3702,10 +4032,15 @@ fn plan_form_compile(
         if !json_path.exists() {
             return Err(format!("File not found: {}", json_path_raw.display()));
         }
-        let json_text = fs::read_to_string(&json_path)
-            .map_err(|err| format!("failed to read {}: {err}", json_path.display()))?;
-        serde_json::from_str(json_text.trim_start_matches('\u{feff}'))
-            .map_err(|err| format!("failed to parse Form JSON: {err}"))?
+        let json_snapshot = read_utf8_sig_snapshot(&json_path)?;
+        let definition = serde_json::from_str(json_snapshot.text.as_str())
+            .map_err(|err| format!("failed to parse Form JSON: {err}"))?;
+        derivation_inputs.push(FormCompileDerivationInput {
+            path: json_path,
+            snapshot: json_snapshot,
+            platform_xml: false,
+        });
+        definition
     };
 
     let format_version =
@@ -3717,7 +4052,58 @@ fn plan_form_compile(
         stdout,
         xml,
         stats,
+        derivation_inputs,
     })
+}
+
+fn validate_form_compile_output_path(output_path: &Path) -> Result<(), String> {
+    let components = output_path.components().collect::<Vec<_>>();
+    if !matches!(
+        components.last(),
+        Some(std::path::Component::Normal(value))
+            if *value == std::ffi::OsStr::new("Form.xml")
+    ) || !matches!(
+        components.get(components.len().saturating_sub(2)),
+        Some(std::path::Component::Normal(value)) if *value == std::ffi::OsStr::new("Ext")
+    ) {
+        return Ok(());
+    }
+    let Some(forms_index) = components.iter().rposition(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(value) if *value == std::ffi::OsStr::new("Forms")
+        )
+    }) else {
+        return Ok(());
+    };
+    let suffix = &components[forms_index + 1..];
+    if suffix.is_empty() {
+        return Ok(());
+    }
+    if suffix.iter().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    }) {
+        return Err(format!(
+            "OutputPath form name must be a valid Unicode XML NCName and a single path component: {:?}",
+            output_path
+        ));
+    }
+    let std::path::Component::Normal(form_name) = suffix[0] else {
+        return Err(format!(
+            "OutputPath form name must be a valid Unicode XML NCName and a single path component: {:?}",
+            output_path
+        ));
+    };
+    let form_name = form_name.to_str().ok_or_else(|| {
+        format!(
+            "OutputPath form name must be valid UTF-8, a Unicode XML NCName, and a single path component: {:?}",
+            output_path
+        )
+    })?;
+    validate_form_metadata_path_name("OutputPath form name", form_name)
 }
 
 fn append_form_compile_stats(stdout: &mut String, stats: &FormCompileStats) {
@@ -3774,14 +4160,15 @@ pub(crate) fn edit_form_with_mode(
     context: &WorkspaceContext,
     mode: FormEditMode,
 ) -> AdapterOutcome {
-    let edit_result = (|| -> Result<(String, PathBuf, bool), String> {
+    let edit_result = (|| -> Result<(String, PathBuf, bool, Vec<String>), String> {
         let form_path_raw = required_path(args, FORM_PATH, "FormPath")?;
         let form_path = absolutize(form_path_raw.clone(), &context.cwd);
         if !form_path.exists() {
             return Err(format!("File not found: {}", form_path_raw.display()));
         }
 
-        let defn = form_edit_resolve_definition(args, context)?;
+        let mut transaction = CompileTransaction::new();
+        let defn = form_edit_resolve_definition_guarded(args, context, &mut transaction)?;
         let original_bytes = fs::read(&form_path)
             .map_err(|err| format!("failed to read {}: {err}", form_path.display()))?;
         let bom = if original_bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
@@ -3843,6 +4230,7 @@ pub(crate) fn edit_form_with_mode(
         let mut companion_count = 0usize;
         if let Some(elements) = defn.get("elements").and_then(Value::as_array) {
             if !elements.is_empty() {
+                form_compile_validate_element_enum_tree(elements)?;
                 form_edit_validate_element_names(&xml_text, elements)?;
                 let insert_target = form_edit_target_child_items_range(
                     &xml_text,
@@ -3933,8 +4321,16 @@ pub(crate) fn edit_form_with_mode(
         require_form_root(edited_root).map_err(|error| format!("[ERROR] {error}"))?;
         form_edit_validate_emitted_type_qnames(edited_root, &emitted_type_qnames)?;
         let changed = xml_text != original_xml_text;
+        let mut warnings = Vec::new();
         if changed && !mode.is_preview() {
-            form_edit_write_preserving_bom(&form_path, &xml_text, bom)?;
+            warnings = form_edit_publish_preserving_bom(
+                transaction,
+                &form_path,
+                &original_bytes,
+                &xml_text,
+                bom,
+                context,
+            )?;
         }
 
         let mut stdout = format!("=== form-edit: {form_name} ===\n\n");
@@ -4015,11 +4411,11 @@ pub(crate) fn edit_form_with_mode(
         }
         stdout.push_str("Run /form-validate to verify.\n");
 
-        Ok((stdout, form_path, changed))
+        Ok((stdout, form_path, changed, warnings))
     })();
 
     match edit_result {
-        Ok((stdout, form_path, changed)) => AdapterOutcome {
+        Ok((stdout, form_path, changed, warnings)) => AdapterOutcome {
             ok: true,
             summary: if mode.is_preview() && !changed {
                 "dry run: unica.form.edit found an idempotent no-op".to_string()
@@ -4043,7 +4439,7 @@ pub(crate) fn edit_form_with_mode(
             } else {
                 Vec::new()
             },
-            warnings: Vec::new(),
+            warnings,
             errors: Vec::new(),
             artifacts: vec![form_path.display().to_string()],
             stdout: Some(stdout),
@@ -4226,6 +4622,43 @@ pub(crate) fn form_edit_resolve_definition(
                 .map_err(|err| format!("failed to read {}: {err}", json_path.display()))?;
             let definition: Value = serde_json::from_str(json_text.trim_start_matches('\u{feff}'))
                 .map_err(|err| format!("failed to parse form edit JSON: {err}"))?;
+            if !definition.is_object() {
+                return Err("form edit JSON root must be an object".to_string());
+            }
+            Ok(definition)
+        }
+        (None, None) => {
+            Err("unica.form.edit requires exactly one of JsonPath or definition".to_string())
+        }
+    }
+}
+
+fn form_edit_resolve_definition_guarded(
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+    transaction: &mut CompileTransaction,
+) -> Result<Value, String> {
+    let inline = args.get("definition");
+    let json_path_raw = path_arg(args, &["jsonPath", "JsonPath"]);
+    match (inline, json_path_raw) {
+        (Some(_), Some(_)) => {
+            Err("unica.form.edit accepts exactly one of JsonPath or inline definition".to_string())
+        }
+        (Some(definition), None) => {
+            if !definition.is_object() {
+                return Err("unica.form.edit argument `definition` must be object".to_string());
+            }
+            Ok(definition.clone())
+        }
+        (None, Some(json_path_raw)) => {
+            let json_path = absolutize(json_path_raw.clone(), &context.cwd);
+            if !json_path.exists() {
+                return Err(format!("File not found: {}", json_path_raw.display()));
+            }
+            let definition = FileBackedJson::read(&json_path, |err| {
+                format!("failed to parse form edit JSON: {err}")
+            })?
+            .bind_to(transaction)?;
             if !definition.is_object() {
                 return Err("form edit JSON root must be an object".to_string());
             }
@@ -5015,18 +5448,42 @@ pub(crate) enum Utf8Bom {
     Absent,
 }
 
-pub(crate) fn form_edit_write_preserving_bom(
+pub(crate) fn form_edit_publish_preserving_bom(
+    mut transaction: CompileTransaction,
     path: &Path,
+    expected_preimage: &[u8],
     xml_text: &str,
     bom: Utf8Bom,
-) -> Result<(), String> {
+    context: &WorkspaceContext,
+) -> Result<Vec<String>, String> {
     let bom_len = if bom == Utf8Bom::Present { 3 } else { 0 };
     let mut bytes = Vec::with_capacity(xml_text.len() + bom_len);
     if bom == Utf8Bom::Present {
         bytes.extend_from_slice(&[0xef, 0xbb, 0xbf]);
     }
     bytes.extend_from_slice(xml_text.as_bytes());
-    fs::write(path, bytes).map_err(|err| format!("failed to write {}: {err}", path.display()))
+    transaction.replace_bytes(path, expected_preimage, bytes)?;
+    guard_active_format_owner(&mut transaction, path, context)?;
+    let validation_path = path.to_path_buf();
+    let report = transaction.commit_with_post_validation(move || {
+        let validation_args = Map::from_iter([(
+            "FormPath".to_string(),
+            Value::String(validation_path.display().to_string()),
+        )]);
+        let outcome = validate_form(&validation_args, context);
+        if outcome.ok {
+            return Ok(());
+        }
+        let details = if outcome.errors.is_empty() {
+            outcome
+                .stdout
+                .unwrap_or_else(|| "validation returned no diagnostics".to_string())
+        } else {
+            outcome.errors.join("; ")
+        };
+        Err(format!("form validation failed: {details}"))
+    })?;
+    Ok(report.cleanup_warnings)
 }
 
 pub(crate) fn form_edit_form_name(path: &Path) -> String {
@@ -5165,7 +5622,8 @@ pub(crate) fn form_edit_validate_attribute_columns(attrs: &[Value]) -> Result<()
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if !matches!(attr_type, "ValueTable" | "ValueTree") {
+        let normalized_attr_type = normalize_form_type(attr_type);
+        if !matches!(normalized_attr_type.as_str(), "ValueTable" | "ValueTree") {
             return Err(format!(
                 "[ERROR] Attribute '{attr_name}' of type '{attr_type}' cannot define columns; columns are supported only for ValueTable or ValueTree"
             ));
@@ -5808,7 +6266,7 @@ pub(crate) fn emit_form_edit_attribute_item(
         emit_form_mltext(lines, &inner, "Title", title);
     }
     if let Some(type_name) = attr.get("type").and_then(Value::as_str) {
-        emit_form_type(lines, type_name, &inner);
+        emit_form_type(lines, type_name, &inner)?;
     } else {
         lines.push(format!("{inner}<Type/>"));
     }
@@ -5850,6 +6308,7 @@ pub(crate) fn emit_form_edit_command_item(
     lines.push(format!("{indent}</Command>"));
 }
 
+#[derive(Debug)]
 pub(crate) struct FormCompileStats {
     pub(crate) element_ids: usize,
     pub(crate) attributes: usize,
@@ -5999,6 +6458,11 @@ pub(crate) fn form_compile_xml(
     defn: &Value,
     format_version: &str,
 ) -> Result<(String, FormCompileStats), String> {
+    if let Some(attributes) = defn.get("attributes").and_then(Value::as_array) {
+        form_edit_validate_attribute_columns(attributes)?;
+    }
+    form_compile_validate_data_paths(defn)?;
+    form_compile_validate_element_enums(defn)?;
     let context = form_project_event_context(
         FormEventContext {
             definition: FormDefinitionKind::Regular,
@@ -6032,8 +6496,40 @@ pub(crate) fn form_compile_xml(
 
     let props_src = defn.get("properties").and_then(Value::as_object);
     let mut props = Map::new();
-    if form_title.is_some() && !props_src.is_some_and(|values| values.contains_key("autoTitle")) {
+    let has_explicit_auto_title = props_src
+        .is_some_and(|values| values.contains_key("autoTitle") || values.contains_key("AutoTitle"));
+    if form_title.is_some() && !has_explicit_auto_title {
         props.insert("autoTitle".to_string(), Value::Bool(false));
+    }
+    let has_explicit_catalog_scope = props_src.is_some_and(|values| {
+        values.contains_key("useForFoldersAndItems") || values.contains_key("UseForFoldersAndItems")
+    });
+    if !has_explicit_catalog_scope
+        && context
+            .main_attribute_type
+            .as_deref()
+            .is_some_and(|value| value.starts_with("CatalogObject."))
+    {
+        props.insert(
+            "useForFoldersAndItems".to_string(),
+            Value::String("Items".to_string()),
+        );
+    }
+    let is_report_form = context.main_attribute_type.as_deref().is_some_and(|value| {
+        value.starts_with("ReportObject.") || value.starts_with("ExternalReportObject.")
+    });
+    if is_report_form {
+        for (json_key, xml_key, default_value) in FORM_REPORT_ROOT_DEFAULTS {
+            let has_explicit_value = props_src.is_some_and(|values| {
+                values.contains_key(json_key) || values.contains_key(xml_key)
+            });
+            if !has_explicit_value {
+                props.insert(
+                    json_key.to_string(),
+                    Value::String(default_value.to_string()),
+                );
+            }
+        }
     }
     if let Some(values) = props_src {
         for (key, value) in values {
@@ -6041,7 +6537,7 @@ pub(crate) fn form_compile_xml(
         }
     }
     if !props.is_empty() {
-        emit_form_properties(&mut lines, &props, "\t");
+        emit_form_properties(&mut lines, &props, "\t")?;
     }
 
     emit_form_auto_command_bar(&mut lines, defn, "\t");
@@ -6085,6 +6581,347 @@ pub(crate) fn form_compile_xml(
             parameters,
         },
     ))
+}
+
+const FORM_REPORT_ROOT_DEFAULTS: [(&str, &str, &str); 4] = [
+    ("reportFormType", "ReportFormType", "Main"),
+    ("autoShowState", "AutoShowState", "Auto"),
+    ("reportResultViewMode", "ReportResultViewMode", "Auto"),
+    (
+        "viewModeApplicationOnSetReportResult",
+        "ViewModeApplicationOnSetReportResult",
+        "Auto",
+    ),
+];
+
+fn form_compile_validate_data_paths(defn: &Value) -> Result<(), String> {
+    let attributes = defn
+        .get("attributes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter_map(|attribute| {
+            attribute
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(|name| (name, attribute))
+        })
+        .collect::<HashMap<_, _>>();
+
+    if let Some(elements) = defn.get("elements").and_then(Value::as_array) {
+        let mut table_paths = HashMap::<String, Option<String>>::new();
+        form_compile_collect_table_paths(elements, &mut table_paths)?;
+        form_compile_validate_element_data_paths(elements, &attributes, &table_paths)?;
+    }
+    Ok(())
+}
+
+fn form_compile_collect_table_paths(
+    elements: &[Value],
+    table_paths: &mut HashMap<String, Option<String>>,
+) -> Result<(), String> {
+    for element in elements {
+        let Some(object) = element.as_object() else {
+            continue;
+        };
+        let kind = FormEditElementDefinitionKind::from_object(object)?;
+        if kind == FormEditElementDefinitionKind::Table {
+            let name = kind.name(object)?.to_string();
+            let path = object
+                .get("path")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            table_paths.entry(name).or_insert(path);
+        }
+        for key in ["children", "columns"] {
+            if let Some(nested) = object.get(key).and_then(Value::as_array) {
+                form_compile_collect_table_paths(nested, table_paths)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn form_compile_validate_element_data_paths(
+    elements: &[Value],
+    attributes: &HashMap<&str, &Map<String, Value>>,
+    table_paths: &HashMap<String, Option<String>>,
+) -> Result<(), String> {
+    for element in elements {
+        let Some(object) = element.as_object() else {
+            continue;
+        };
+        let kind = FormEditElementDefinitionKind::from_object(object)?;
+        let element_name = kind.name(object)?;
+        for (json_key, xml_tag) in FORM_BINDING_PATH_PROPERTIES {
+            let Some(path) = object.get(json_key).and_then(Value::as_str) else {
+                continue;
+            };
+            if !form_compile_binding_property_supported(kind, json_key) {
+                if kind == FormEditElementDefinitionKind::Group && json_key == "headerDataPath" {
+                    return Err(format!(
+                        "UsualGroup '{element_name}' does not support HeaderDataPath in 8.3.27; HeaderDataPath belongs to ColumnGroup, which the compiler does not support"
+                    ));
+                }
+                return Err(format!(
+                    "Form element '{element_name}' does not support {xml_tag}/{json_key}"
+                ));
+            }
+            let resolution =
+                resolve_form_binding_path(path, |table_name| match table_paths.get(table_name) {
+                    None => FormBindingTablePath::Missing,
+                    Some(None) => FormBindingTablePath::Unbound,
+                    Some(Some(path)) => FormBindingTablePath::Bound(path.clone()),
+                });
+            match resolution {
+                FormBindingPathResolution::Skip | FormBindingPathResolution::UnknownItemsShape => {}
+                FormBindingPathResolution::MissingTable(table_name) => {
+                    return Err(format!(
+                        "Form element '{element_name}' {xml_tag}='{path}': table element '{table_name}' not found"
+                    ));
+                }
+                FormBindingPathResolution::Attribute(root)
+                    if !attributes.contains_key(root.as_str()) =>
+                {
+                    return Err(format!(
+                        "Form element '{element_name}' {xml_tag}='{path}' references missing top-level form attribute '{root}'"
+                    ));
+                }
+                FormBindingPathResolution::Attribute(_) => {}
+            }
+        }
+        form_compile_validate_related_data_paths(
+            object,
+            kind,
+            element_name,
+            attributes,
+            table_paths,
+        )?;
+        for key in ["children", "columns"] {
+            if let Some(nested) = object.get(key).and_then(Value::as_array) {
+                form_compile_validate_element_data_paths(nested, attributes, table_paths)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn form_compile_validate_related_data_paths(
+    object: &Map<String, Value>,
+    kind: FormEditElementDefinitionKind,
+    element_name: &str,
+    attributes: &HashMap<&str, &Map<String, Value>>,
+    table_paths: &HashMap<String, Option<String>>,
+) -> Result<(), String> {
+    if kind == FormEditElementDefinitionKind::InputField {
+        let multiple_paths = [
+            ("multipleValueDataPath", "MultipleValueDataPath"),
+            (
+                "multipleValuePictureDataPath",
+                "MultipleValuePictureDataPath",
+            ),
+            (
+                "multipleValuePresentDataPath",
+                "MultipleValuePresentDataPath",
+            ),
+        ];
+        if multiple_paths
+            .iter()
+            .any(|(json_key, _)| object.get(*json_key).and_then(Value::as_str).is_some())
+        {
+            let used_multiple_tags = multiple_paths
+                .iter()
+                .filter(|(json_key, _)| object.get(*json_key).and_then(Value::as_str).is_some())
+                .map(|(_, xml_tag)| *xml_tag)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let data_path = object
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|path| !path.trim().is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "InputField '{element_name}' uses multiple-value data paths without DataPath/path"
+                    )
+                })?;
+            let Some(data_segments) = form_compile_semantic_path_segments(data_path, table_paths)
+            else {
+                return Ok(());
+            };
+            let collection = form_compile_attribute_contract_at_path(&data_segments, attributes)
+                .ok_or_else(|| {
+                    format!(
+                        "InputField '{element_name}' DataPath='{data_path}' does not identify a declared collection form attribute"
+                    )
+                })?;
+            let collection_type = collection
+                .get("type")
+                .and_then(Value::as_str)
+                .map(normalize_form_type)
+                .unwrap_or_default();
+            if !matches!(
+                collection_type.as_str(),
+                "ValueList" | "ValueTable" | "ValueTree"
+            ) {
+                return Err(format!(
+                    "InputField '{element_name}' {used_multiple_tags} require a collection DataPath in 8.3.27, but '{data_path}' has type '{}'",
+                    collection
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<missing>")
+                ));
+            }
+
+            for (json_key, xml_tag) in multiple_paths {
+                let Some(path) = object.get(json_key).and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(path_segments) = form_compile_semantic_path_segments(path, table_paths)
+                else {
+                    continue;
+                };
+                if !form_compile_is_strict_subpath(&data_segments, &path_segments) {
+                    return Err(format!(
+                        "InputField '{element_name}' {xml_tag}='{path}' must be a subpath of collection DataPath='{data_path}' in 8.3.27"
+                    ));
+                }
+                if matches!(collection_type.as_str(), "ValueTable" | "ValueTree") {
+                    let column_name = &path_segments[data_segments.len()];
+                    let has_column = collection
+                        .get("columns")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_object)
+                        .any(|column| {
+                            column.get("name").and_then(Value::as_str) == Some(column_name.as_str())
+                        });
+                    if !has_column {
+                        return Err(format!(
+                            "InputField '{element_name}' {xml_tag}='{path}' references undeclared collection column '{column_name}'"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if kind == FormEditElementDefinitionKind::Table {
+        if let Some(row_picture_path) = object.get("rowPictureDataPath").and_then(Value::as_str) {
+            let data_path = object
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|path| !path.trim().is_empty())
+                .ok_or_else(|| {
+                    format!("Table '{element_name}' uses RowPictureDataPath without DataPath/path")
+                })?;
+            if let (Some(data_segments), Some(picture_segments)) = (
+                form_compile_semantic_path_segments(data_path, table_paths),
+                form_compile_semantic_path_segments(row_picture_path, table_paths),
+            ) {
+                if !form_compile_is_strict_subpath(&data_segments, &picture_segments) {
+                    return Err(format!(
+                        "Table '{element_name}' RowPictureDataPath='{row_picture_path}' must be a subpath of DataPath='{data_path}' in 8.3.27"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn form_compile_semantic_path_segments(
+    path: &str,
+    table_paths: &HashMap<String, Option<String>>,
+) -> Option<Vec<String>> {
+    let path = path.trim();
+    if path.is_empty() || is_opaque_form_binding(path) {
+        return None;
+    }
+    let clean_path = strip_form_binding_prefixes(path);
+    let segments = clean_path
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if segments.first().is_some_and(|segment| segment == "Items")
+        && segments
+            .get(2)
+            .is_some_and(|segment| segment == "CurrentData")
+    {
+        let table_name = segments.get(1)?;
+        let table_path = table_paths.get(table_name)?.as_deref()?;
+        if table_path.trim().is_empty() || is_opaque_form_binding(table_path) {
+            return None;
+        }
+        let mut resolved = strip_form_binding_prefixes(table_path)
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        resolved.extend(segments.into_iter().skip(3));
+        Some(resolved)
+    } else {
+        Some(segments)
+    }
+}
+
+fn form_compile_attribute_contract_at_path<'a>(
+    segments: &[String],
+    attributes: &HashMap<&str, &'a Map<String, Value>>,
+) -> Option<&'a Map<String, Value>> {
+    let mut contract = *attributes.get(segments.first()?.as_str())?;
+    for segment in &segments[1..] {
+        contract = contract
+            .get("columns")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|column| column.get("name").and_then(Value::as_str) == Some(segment.as_str()))?;
+    }
+    Some(contract)
+}
+
+fn form_compile_is_strict_subpath(parent: &[String], candidate: &[String]) -> bool {
+    candidate.len() > parent.len()
+        && candidate
+            .iter()
+            .zip(parent)
+            .all(|(candidate, parent)| candidate == parent)
+}
+
+fn form_compile_binding_property_supported(
+    kind: FormEditElementDefinitionKind,
+    json_key: &str,
+) -> bool {
+    match json_key {
+        "path" => matches!(
+            kind,
+            FormEditElementDefinitionKind::Table
+                | FormEditElementDefinitionKind::LabelField
+                | FormEditElementDefinitionKind::CheckBox
+                | FormEditElementDefinitionKind::InputField
+        ),
+        "titleDataPath" => matches!(
+            kind,
+            FormEditElementDefinitionKind::Group | FormEditElementDefinitionKind::Page
+        ),
+        "footerDataPath" => matches!(
+            kind,
+            FormEditElementDefinitionKind::LabelField
+                | FormEditElementDefinitionKind::CheckBox
+                | FormEditElementDefinitionKind::InputField
+        ),
+        "headerDataPath" => false,
+        "multipleValueDataPath"
+        | "multipleValuePresentDataPath"
+        | "multipleValuePictureDataPath" => kind == FormEditElementDefinitionKind::InputField,
+        "rowPictureDataPath" => kind == FormEditElementDefinitionKind::Table,
+        _ => false,
+    }
 }
 
 fn form_compile_plan_events(
@@ -6197,7 +7034,8 @@ pub(crate) fn emit_form_auto_command_bar(lines: &mut Vec<String>, defn: &Value, 
         ));
         if let Some(halign) = halign {
             lines.push(format!(
-                "{indent}\t<HorizontalAlign>{halign}</HorizontalAlign>"
+                "{indent}\t<HorizontalAlign>{}</HorizontalAlign>",
+                escape_xml(&halign)
             ));
         }
         if !autofill {
@@ -6347,56 +7185,441 @@ pub(crate) fn emit_form_font(lines: &mut Vec<String>, font: &Value, indent: &str
     lines.push(format!("{indent}<Font {}/>", serialized.join(" ")));
 }
 
+const FORM_ROOT_SCALAR_PROPERTY_ORDER: &[&str] = &[
+    "Width",
+    "Height",
+    "WindowOpeningMode",
+    "EnterKeyBehavior",
+    "AutoSaveDataInSettings",
+    "SaveDataInSettings",
+    "SaveWindowSettings",
+    "SettingsStorage",
+    "AutoTitle",
+    "AutoURL",
+    "Group",
+    "ChildrenAlign",
+    "HorizontalSpacing",
+    "VerticalSpacing",
+    "HorizontalAlign",
+    "VerticalAlign",
+    "ChildItemsWidth",
+    "AutoFillCheck",
+    "Customizable",
+    "Enabled",
+    "ReadOnly",
+    "CommandBarLocation",
+    "VerticalScroll",
+    "ScalingMode",
+    "Scale",
+    "ConversationsRepresentation",
+    "ShowTitle",
+    "ShowCloseButton",
+    "CollapseItemsByImportanceVariant",
+    "UseForFoldersAndItems",
+    "GroupList",
+    "AutoTime",
+    "UsePostingMode",
+    "RepostOnWrite",
+    "ReportResult",
+    "DetailsData",
+    "ReportFormType",
+    "VariantAppearance",
+    "AutoShowState",
+    "CustomSettingsFolder",
+    "ReportResultViewMode",
+    "ViewModeApplicationOnSetReportResult",
+];
+
+fn form_root_xml_property(name: &str) -> Option<(usize, &'static str)> {
+    let mut characters = name.chars();
+    let candidate = match characters.next() {
+        Some(first) => format!("{}{}", first.to_uppercase(), characters.as_str()),
+        None => return None,
+    };
+    FORM_ROOT_SCALAR_PROPERTY_ORDER
+        .iter()
+        .position(|property| *property == candidate)
+        .map(|index| (index, FORM_ROOT_SCALAR_PROPERTY_ORDER[index]))
+}
+
+fn form_8_3_27_enum_values(xml_name: &str) -> Option<&'static [&'static str]> {
+    match xml_name {
+        "WindowOpeningMode" => Some(&["Independent", "LockOwnerWindow", "LockWholeInterface"]),
+        "EnterKeyBehavior" => Some(&["ControlNavigation", "DefaultButton"]),
+        "AutoSaveDataInSettings" => Some(&["DontUse", "Use"]),
+        "SaveDataInSettings" => Some(&["DontUse", "UseList"]),
+        "Group" => Some(&[
+            "Horizontal",
+            "Vertical",
+            "HorizontalIfPossible",
+            "AlwaysHorizontal",
+        ]),
+        "ChildrenAlign" => Some(&[
+            "Auto",
+            "None",
+            "ItemsLeftTitlesLeft",
+            "ItemsRightTitlesLeft",
+            "ItemsLeftTitlesRight",
+            "ItemsRightTitlesRight",
+            "TitlesLeftDataLeft",
+            "TitlesLeftDataRight",
+            "TitlesRightDataLeft",
+            "TitlesRightDataRight",
+            "TitlesLeftDataAuto",
+        ]),
+        "HorizontalSpacing" | "VerticalSpacing" => {
+            Some(&["Auto", "None", "Half", "Single", "OneAndHalf", "Double"])
+        }
+        "HorizontalAlign" => Some(&["Left", "Center", "Right", "Auto"]),
+        "VerticalAlign" => Some(&["Top", "Center", "Bottom", "Auto"]),
+        "ChildItemsWidth" => Some(&[
+            "Auto",
+            "Equal",
+            "LeftWide",
+            "LeftWidest",
+            "LeftNarrow",
+            "LeftNarrowest",
+        ]),
+        "CommandBarLocation" => Some(&["None", "Auto", "Top", "Bottom"]),
+        "FormChildrenGroup" => Some(&[
+            "Horizontal",
+            "Vertical",
+            "HorizontalIfPossible",
+            "AlwaysHorizontal",
+        ]),
+        "UsualGroupBehavior" => Some(&["Usual", "Collapsible", "PopUp", "Auto"]),
+        "UsualGroupRepresentation" => Some(&[
+            "None",
+            "StrongSeparation",
+            "WeakSeparation",
+            "NormalSeparation",
+            "GroupBox",
+            "Line",
+            "Margin",
+        ]),
+        "PagesRepresentation" => Some(&[
+            "None",
+            "TabsOnTop",
+            "TabsOnBottom",
+            "TabsOnLeftHorizontal",
+            "TabsOnRightHorizontal",
+            "Swipe",
+            "Auto",
+        ]),
+        "CurrentRowUse" => Some(&["Use", "DontUse", "Auto"]),
+        "InitialTreeView" => Some(&["NoExpand", "ExpandTopLevel", "ExpandAllLevels"]),
+        "ChoiceFoldersAndItems" => Some(&["Items", "Folders", "FoldersAndItems"]),
+        "UpdateOnDataChange" => Some(&["Auto", "DontUpdate"]),
+        "CheckBoxType" => Some(&["Auto", "CheckBox", "Tumbler", "Switcher"]),
+        "FormElementTitleLocation" => Some(&["None", "Auto", "Left", "Top", "Right", "Bottom"]),
+        "ManagedFormButtonType" => Some(&[
+            "CommandBarButton",
+            "UsualButton",
+            "Hyperlink",
+            "CommandBarHyperlink",
+        ]),
+        "ButtonRepresentation" => Some(&["Text", "Picture", "PictureAndText", "Auto"]),
+        "ButtonLocationInCommandBar" => Some(&[
+            "Auto",
+            "InAdditionalSubmenu",
+            "InCommandBar",
+            "InCommandBarAndInAdditionalSubmenu",
+        ]),
+        "VerticalScroll" => Some(&["auto", "use", "useIfNecessary", "useWithoutStretch"]),
+        "ScalingMode" => Some(&["Auto", "Normal", "Compact"]),
+        "ConversationsRepresentation" => Some(&["Auto", "Show", "DontShow"]),
+        "CollapseItemsByImportanceVariant" => Some(&["Auto", "Use", "DontUse"]),
+        "UseForFoldersAndItems" => Some(&["Items", "Folders", "FoldersAndItems"]),
+        "AutoTime" => Some(&[
+            "DontUse",
+            "Last",
+            "First",
+            "CurrentOrLast",
+            "CurrentOrFirst",
+        ]),
+        "UsePostingMode" => Some(&["Regular", "RealTime", "Ask", "Auto"]),
+        "ReportFormType" => Some(&["Main", "Settings", "Variant"]),
+        "AutoShowState" => Some(&["Auto", "DontShow", "Show", "ShowOnComposition"]),
+        "ReportResultViewMode" => Some(&["Auto", "Default", "Compact"]),
+        "ViewModeApplicationOnSetReportResult" => Some(&["Auto", "Apply", "DontApply"]),
+        _ => None,
+    }
+}
+
+fn form_compile_validate_element_enums(defn: &Value) -> Result<(), String> {
+    let Some(elements) = defn.get("elements").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    form_compile_validate_element_enum_tree(elements)
+}
+
+fn form_compile_validate_element_enum_tree(elements: &[Value]) -> Result<(), String> {
+    for element in elements {
+        let Some(object) = element.as_object() else {
+            continue;
+        };
+        let kind = FormEditElementDefinitionKind::from_object(object)?;
+        match kind {
+            FormEditElementDefinitionKind::AutoCommandBar => {
+                form_compile_validate_element_enum(object, "horizontalAlign", "HorizontalAlign")?;
+            }
+            FormEditElementDefinitionKind::Pages => {
+                form_compile_validate_element_enum(
+                    object,
+                    "pagesRepresentation",
+                    "PagesRepresentation",
+                )?;
+                form_compile_validate_element_enum(object, "currentRowUse", "CurrentRowUse")?;
+            }
+            FormEditElementDefinitionKind::Table => {
+                form_compile_validate_element_enum(
+                    object,
+                    "commandBarLocation",
+                    "CommandBarLocation",
+                )?;
+                form_compile_validate_element_enum(object, "initialTreeView", "InitialTreeView")?;
+                if object.get("_dynList").and_then(Value::as_bool) == Some(true) {
+                    form_compile_validate_element_enum(
+                        object,
+                        "choiceFoldersAndItems",
+                        "ChoiceFoldersAndItems",
+                    )?;
+                    form_compile_validate_element_enum(
+                        object,
+                        "updateOnDataChange",
+                        "UpdateOnDataChange",
+                    )?;
+                }
+            }
+            FormEditElementDefinitionKind::Group => {
+                if object.contains_key("name") {
+                    form_compile_validate_normalized_element_enum(
+                        object,
+                        "group",
+                        "FormChildrenGroup",
+                        form_compile_group_orientation,
+                    )?;
+                }
+                form_compile_validate_normalized_element_enum(
+                    object,
+                    "behavior",
+                    "UsualGroupBehavior",
+                    form_compile_group_behavior,
+                )?;
+                form_compile_validate_normalized_element_enum(
+                    object,
+                    "representation",
+                    "UsualGroupRepresentation",
+                    form_compile_group_representation,
+                )?;
+                if object
+                    .get("behavior")
+                    .and_then(Value::as_str)
+                    .and_then(form_compile_group_behavior)
+                    == Some("PopUp")
+                    && object
+                        .get("representation")
+                        .and_then(Value::as_str)
+                        .and_then(form_compile_group_representation)
+                        == Some("Line")
+                {
+                    return Err(
+                        "UsualGroup behavior PopUp is incompatible with representation Line in 8.3.27"
+                            .to_string(),
+                    );
+                }
+                form_compile_validate_element_enum(object, "currentRowUse", "CurrentRowUse")?;
+            }
+            FormEditElementDefinitionKind::CheckBox => {
+                form_compile_validate_normalized_element_enum(
+                    object,
+                    "checkBoxType",
+                    "CheckBoxType",
+                    form_compile_check_box_type,
+                )?;
+                form_compile_validate_normalized_element_enum(
+                    object,
+                    "titleLocation",
+                    "FormElementTitleLocation",
+                    form_compile_title_location,
+                )?;
+            }
+            FormEditElementDefinitionKind::InputField => {
+                form_compile_validate_normalized_element_enum(
+                    object,
+                    "titleLocation",
+                    "FormElementTitleLocation",
+                    form_compile_title_location,
+                )?;
+            }
+            FormEditElementDefinitionKind::Button => {
+                form_compile_validate_normalized_element_enum(
+                    object,
+                    "type",
+                    "ManagedFormButtonType",
+                    form_compile_button_type,
+                )?;
+                form_compile_validate_normalized_element_enum(
+                    object,
+                    "representation",
+                    "ButtonRepresentation",
+                    form_compile_button_representation,
+                )?;
+                form_compile_validate_normalized_element_enum(
+                    object,
+                    "locationInCommandBar",
+                    "ButtonLocationInCommandBar",
+                    form_compile_button_location,
+                )?;
+            }
+            _ => {}
+        }
+        for child_key in ["children", "columns"] {
+            if let Some(children) = object.get(child_key).and_then(Value::as_array) {
+                form_compile_validate_element_enum_tree(children)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn form_compile_validate_element_enum(
+    object: &Map<String, Value>,
+    json_name: &str,
+    xml_name: &str,
+) -> Result<(), String> {
+    let Some(value) = object.get(json_name) else {
+        return Ok(());
+    };
+    let text = value
+        .as_str()
+        .ok_or_else(|| format!("form element property {json_name} must be a string"))?;
+    let allowed = form_8_3_27_enum_values(xml_name)
+        .ok_or_else(|| format!("missing 8.3.27 enum contract for {json_name}"))?;
+    if !allowed.contains(&text) {
+        return Err(format!(
+            "form element property {json_name} is not valid for 8.3.27: {text}; expected one of {}",
+            allowed.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn form_compile_validate_normalized_element_enum(
+    object: &Map<String, Value>,
+    json_name: &str,
+    contract_name: &str,
+    normalize: fn(&str) -> Option<&'static str>,
+) -> Result<(), String> {
+    let Some(value) = object.get(json_name) else {
+        return Ok(());
+    };
+    let text = value
+        .as_str()
+        .ok_or_else(|| format!("form element property {json_name} must be a string"))?;
+    let allowed = form_8_3_27_enum_values(contract_name)
+        .ok_or_else(|| format!("missing 8.3.27 enum contract for {json_name}"))?;
+    let normalized = normalize(text);
+    if normalized.is_none_or(|value| !allowed.contains(&value)) {
+        return Err(format!(
+            "form element property {json_name} is not valid for 8.3.27: {text}; expected one of {}",
+            allowed.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn form_root_property_text(name: &str, xml_name: &str, value: &Value) -> Result<String, String> {
+    if [
+        "SaveWindowSettings",
+        "AutoTitle",
+        "AutoURL",
+        "AutoFillCheck",
+        "Customizable",
+        "Enabled",
+        "ReadOnly",
+        "ShowTitle",
+        "ShowCloseButton",
+        "RepostOnWrite",
+    ]
+    .contains(&xml_name)
+    {
+        return value
+            .as_bool()
+            .map(|flag| if flag { "true" } else { "false" }.to_string())
+            .ok_or_else(|| format!("form root property {name} must be a boolean"));
+    }
+    if ["Width", "Height", "Scale"].contains(&xml_name) {
+        return value
+            .as_u64()
+            .filter(|number| *number <= u32::MAX as u64)
+            .map(|number| number.to_string())
+            .ok_or_else(|| {
+                format!("form root property {name} must be an integer in 0..=4294967295 for 8.3.27")
+            });
+    }
+    if let Some(allowed) = form_8_3_27_enum_values(xml_name) {
+        let text = value
+            .as_str()
+            .ok_or_else(|| format!("form root property {name} must be a string"))?;
+        if !allowed.contains(&text) {
+            return Err(format!(
+                "form root property {name} is not valid for 8.3.27: {text}; expected one of {}",
+                allowed.join(", ")
+            ));
+        }
+        return Ok(text.to_string());
+    }
+    if [
+        "SettingsStorage",
+        "GroupList",
+        "ReportResult",
+        "DetailsData",
+        "VariantAppearance",
+        "CustomSettingsFolder",
+    ]
+    .contains(&xml_name)
+    {
+        return value
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| format!("form root property {name} must be a non-empty string"));
+    }
+    Err(format!("unsupported form root property for 8.3.27: {name}"))
+}
+
 pub(crate) fn emit_form_properties(
     lines: &mut Vec<String>,
     props: &Map<String, Value>,
     indent: &str,
-) {
+) -> Result<(), String> {
+    let mut canonical = BTreeMap::<usize, (&str, &Value)>::new();
     for (name, value) in props {
         if name == "title" {
             continue;
         }
-        let xml_name = match name.as_str() {
-            "autoTitle" => "AutoTitle".to_string(),
-            "windowOpeningMode" => "WindowOpeningMode".to_string(),
-            "commandBarLocation" => "CommandBarLocation".to_string(),
-            "saveDataInSettings" => "SaveDataInSettings".to_string(),
-            "autoSaveDataInSettings" => "AutoSaveDataInSettings".to_string(),
-            "autoTime" => "AutoTime".to_string(),
-            "usePostingMode" => "UsePostingMode".to_string(),
-            "repostOnWrite" => "RepostOnWrite".to_string(),
-            "autoURL" => "AutoURL".to_string(),
-            "autoFillCheck" => "AutoFillCheck".to_string(),
-            "customizable" => "Customizable".to_string(),
-            "enterKeyBehavior" => "EnterKeyBehavior".to_string(),
-            "verticalScroll" => "VerticalScroll".to_string(),
-            "scalingMode" => "ScalingMode".to_string(),
-            "useForFoldersAndItems" => "UseForFoldersAndItems".to_string(),
-            "reportResult" => "ReportResult".to_string(),
-            "detailsData" => "DetailsData".to_string(),
-            "reportFormType" => "ReportFormType".to_string(),
-            "autoShowState" => "AutoShowState".to_string(),
-            "width" => "Width".to_string(),
-            "height" => "Height".to_string(),
-            "group" => "Group".to_string(),
-            other => {
-                let mut chars = other.chars();
-                match chars.next() {
-                    Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
-                    None => continue,
-                }
-            }
-        };
-        let text = if let Some(flag) = value.as_bool() {
-            if flag { "true" } else { "false" }.to_string()
-        } else {
-            json_value_to_python_string(value)
-        };
+        let (order, xml_name) = form_root_xml_property(name)
+            .ok_or_else(|| format!("unsupported form root property for 8.3.27: {name}"))?;
+        if let Some((previous, _)) = canonical.insert(order, (name, value)) {
+            return Err(format!(
+                "duplicate form root property {xml_name}: {previous} and {name}"
+            ));
+        }
+    }
+
+    for (order, (name, value)) in canonical {
+        let xml_name = FORM_ROOT_SCALAR_PROPERTY_ORDER[order];
+        if xml_name == "AutoTitle" && value.as_str() == Some("") {
+            continue;
+        }
+        let text = form_root_property_text(name, xml_name, value)?;
         lines.push(format!(
             "{indent}<{xml_name}>{}</{xml_name}>",
             escape_xml(&text)
         ));
     }
+    Ok(())
 }
 
 pub(crate) fn emit_form_element(
@@ -6456,10 +7679,26 @@ fn emit_form_element_with_context(
             Ok(())
         }
         FormEditElementDefinitionKind::InputField => {
-            emit_form_input(lines, object, kind.name(object)?, indent, ids);
-            Ok(())
+            emit_form_input(lines, object, kind.name(object)?, indent, ids)
         }
         FormEditElementDefinitionKind::AutoCommandBar => Ok(()),
+    }
+}
+
+fn emit_form_binding_path_property(
+    lines: &mut Vec<String>,
+    element: &Map<String, Value>,
+    json_key: &str,
+    xml_tag: &str,
+    indent: &str,
+) {
+    if let Some(value) = element.get(json_key).and_then(Value::as_str) {
+        if !value.is_empty() {
+            lines.push(format!(
+                "{indent}<{xml_tag}>{}</{xml_tag}>",
+                escape_xml(value)
+            ));
+        }
     }
 }
 
@@ -6496,12 +7735,17 @@ pub(crate) fn emit_form_group(
     if element.get("collapsed").and_then(Value::as_bool) == Some(true) {
         lines.push(format!("{inner}<Collapsed>true</Collapsed>"));
     }
-    if let Some(value) = element.get("representation").and_then(Value::as_str) {
+    if let Some(value) = element
+        .get("representation")
+        .and_then(Value::as_str)
+        .and_then(form_compile_group_representation)
+    {
         lines.push(format!(
             "{inner}<Representation>{}</Representation>",
-            form_compile_group_representation(value)
+            escape_xml(value)
         ));
     }
+    emit_form_binding_path_property(lines, element, "titleDataPath", "TitleDataPath", &inner);
     if let Some(value) = element.get("currentRowUse").and_then(Value::as_str) {
         lines.push(format!(
             "{inner}<CurrentRowUse>{}</CurrentRowUse>",
@@ -6605,6 +7849,7 @@ pub(crate) fn emit_form_page(
             if value { "true" } else { "false" }
         ));
     }
+    emit_form_binding_path_property(lines, element, "titleDataPath", "TitleDataPath", &inner);
     emit_form_companion(
         lines,
         "ExtendedTooltip",
@@ -6642,7 +7887,6 @@ pub(crate) fn form_compile_group_orientation(value: &str) -> Option<&'static str
         "horizontal" => Some("Horizontal"),
         "vertical" | "collapsible" => Some("Vertical"),
         "alwayshorizontal" => Some("AlwaysHorizontal"),
-        "alwaysvertical" => Some("AlwaysVertical"),
         "horizontalifpossible" => Some("HorizontalIfPossible"),
         _ => None,
     }
@@ -6653,17 +7897,73 @@ pub(crate) fn form_compile_group_behavior(value: &str) -> Option<&'static str> {
         "usual" => Some("Usual"),
         "collapsible" => Some("Collapsible"),
         "popup" => Some("PopUp"),
+        "auto" => Some("Auto"),
         _ => None,
     }
 }
 
-pub(crate) fn form_compile_group_representation(value: &str) -> String {
-    match value {
-        "none" => "None".to_string(),
-        "normal" => "NormalSeparation".to_string(),
-        "weak" => "WeakSeparation".to_string(),
-        "strong" => "StrongSeparation".to_string(),
-        other => escape_xml(other),
+pub(crate) fn form_compile_group_representation(value: &str) -> Option<&'static str> {
+    match value.to_lowercase().as_str() {
+        "none" => Some("None"),
+        "normal" | "normalseparation" => Some("NormalSeparation"),
+        "weak" | "weakseparation" => Some("WeakSeparation"),
+        "strong" | "strongseparation" => Some("StrongSeparation"),
+        "groupbox" => Some("GroupBox"),
+        "line" => Some("Line"),
+        "margin" => Some("Margin"),
+        _ => None,
+    }
+}
+
+fn form_compile_check_box_type(value: &str) -> Option<&'static str> {
+    match value.to_lowercase().as_str() {
+        "auto" => Some("Auto"),
+        "checkbox" => Some("CheckBox"),
+        "switcher" => Some("Switcher"),
+        "tumbler" => Some("Tumbler"),
+        _ => None,
+    }
+}
+
+fn form_compile_title_location(value: &str) -> Option<&'static str> {
+    match value.to_lowercase().as_str() {
+        "none" => Some("None"),
+        "auto" => Some("Auto"),
+        "left" => Some("Left"),
+        "top" => Some("Top"),
+        "right" => Some("Right"),
+        "bottom" => Some("Bottom"),
+        _ => None,
+    }
+}
+
+fn form_compile_button_type(value: &str) -> Option<&'static str> {
+    match value.to_lowercase().as_str() {
+        "commandbar" | "commandbarbutton" => Some("CommandBarButton"),
+        "usual" | "usualbutton" => Some("UsualButton"),
+        "hyperlink" => Some("Hyperlink"),
+        "commandbarhyperlink" => Some("CommandBarHyperlink"),
+        _ => None,
+    }
+}
+
+fn form_compile_button_representation(value: &str) -> Option<&'static str> {
+    match value.to_lowercase().as_str() {
+        "text" => Some("Text"),
+        "picture" => Some("Picture"),
+        "pictureandtext" => Some("PictureAndText"),
+        "auto" => Some("Auto"),
+        _ => None,
+    }
+}
+
+fn form_compile_button_location(value: &str) -> Option<&'static str> {
+    match value.to_lowercase().as_str() {
+        "auto" => Some("Auto"),
+        "inadditionalsubmenu" => Some("InAdditionalSubmenu"),
+        "incommandbar" => Some("InCommandBar"),
+        "incommandbarandinadditionalsubmenu" => Some("InCommandBarAndInAdditionalSubmenu"),
+        _ => None,
     }
 }
 
@@ -6688,36 +7988,27 @@ pub(crate) fn emit_form_check(
     }
     emit_form_element_tooltip(lines, element, &inner);
     emit_form_common_flags(lines, element, &inner);
+    let title_location = element
+        .get("titleLocation")
+        .and_then(Value::as_str)
+        .map(|value| form_compile_title_location(value).unwrap_or(value))
+        .unwrap_or("Right");
+    lines.push(format!(
+        "{inner}<TitleLocation>{}</TitleLocation>",
+        escape_xml(title_location)
+    ));
     if let Some(value) = element.get("checkBoxType").and_then(Value::as_str) {
         if !value.is_empty() {
-            let mapped = match value.to_lowercase().as_str() {
-                "auto" => "Auto",
-                "checkbox" => "CheckBox",
-                "switcher" => "Switcher",
-                "tumbler" => "Tumbler",
-                _ => value,
-            };
-            lines.push(format!("{inner}<CheckBoxType>{mapped}</CheckBoxType>"));
+            let mapped = form_compile_check_box_type(value).unwrap_or(value);
+            lines.push(format!(
+                "{inner}<CheckBoxType>{}</CheckBoxType>",
+                escape_xml(mapped)
+            ));
         }
     } else {
         lines.push(format!("{inner}<CheckBoxType>Auto</CheckBoxType>"));
     }
-    let title_location = element
-        .get("titleLocation")
-        .and_then(Value::as_str)
-        .map(|value| match value {
-            "none" => "None",
-            "left" => "Left",
-            "right" => "Right",
-            "top" => "Top",
-            "bottom" => "Bottom",
-            "auto" => "Auto",
-            other => other,
-        })
-        .unwrap_or("Right");
-    lines.push(format!(
-        "{inner}<TitleLocation>{title_location}</TitleLocation>"
-    ));
+    emit_form_binding_path_property(lines, element, "footerDataPath", "FooterDataPath", &inner);
     emit_form_companion(
         lines,
         "ContextMenu",
@@ -6742,7 +8033,7 @@ pub(crate) fn emit_form_input(
     name: &str,
     indent: &str,
     ids: &mut FormIdAllocator,
-) {
+) -> Result<(), String> {
     let id = ids.next();
     lines.push(format!(
         "{indent}<InputField name=\"{}\" id=\"{id}\">",
@@ -6758,15 +8049,11 @@ pub(crate) fn emit_form_input(
     emit_form_element_tooltip(lines, element, &inner);
     emit_form_common_flags(lines, element, &inner);
     if let Some(value) = element.get("titleLocation").and_then(Value::as_str) {
-        let location = match value {
-            "none" => "None",
-            "left" => "Left",
-            "right" => "Right",
-            "top" => "Top",
-            "bottom" => "Bottom",
-            other => other,
-        };
-        lines.push(format!("{inner}<TitleLocation>{location}</TitleLocation>"));
+        let location = form_compile_title_location(value).unwrap_or(value);
+        lines.push(format!(
+            "{inner}<TitleLocation>{}</TitleLocation>",
+            escape_xml(location)
+        ));
     }
     for (key, tag) in [("multiLine", "MultiLine"), ("passwordMode", "PasswordMode")] {
         if element.get(key).and_then(Value::as_bool) == Some(true) {
@@ -6806,11 +8093,32 @@ pub(crate) fn emit_form_input(
             lines.push(format!("{inner}<{tag}>false</{tag}>"));
         }
     }
-    if let Some(width) = element.get("width").and_then(json_i64_value) {
-        lines.push(format!("{inner}<Width>{width}</Width>"));
+    emit_form_binding_path_property(lines, element, "footerDataPath", "FooterDataPath", &inner);
+    for (json_key, xml_tag) in [("width", "Width"), ("height", "Height")] {
+        if let Some(value) = element.get(json_key) {
+            let number = value
+                .as_u64()
+                .filter(|number| *number <= u32::MAX as u64)
+                .ok_or_else(|| {
+                    format!(
+                        "form input property {json_key} must be an integer in 0..=4294967295 for 8.3.27"
+                    )
+                })?;
+            lines.push(format!("{inner}<{xml_tag}>{number}</{xml_tag}>"));
+        }
     }
-    if let Some(height) = element.get("height").and_then(json_i64_value) {
-        lines.push(format!("{inner}<Height>{height}</Height>"));
+    for (json_key, xml_tag) in [
+        ("multipleValueDataPath", "MultipleValueDataPath"),
+        (
+            "multipleValuePictureDataPath",
+            "MultipleValuePictureDataPath",
+        ),
+        (
+            "multipleValuePresentDataPath",
+            "MultipleValuePresentDataPath",
+        ),
+    ] {
+        emit_form_binding_path_property(lines, element, json_key, xml_tag, &inner);
     }
     for (key, tag) in [
         ("horizontalStretch", "HorizontalStretch"),
@@ -6845,6 +8153,7 @@ pub(crate) fn emit_form_input(
     );
     emit_form_element_events(lines, element, name, &inner);
     lines.push(format!("{indent}</InputField>"));
+    Ok(())
 }
 
 pub(crate) fn emit_form_button(
@@ -6873,17 +8182,20 @@ pub(crate) fn emit_form_button(
                     other => other,
                 }
             } else {
-                match button_type {
-                    "usual" => "UsualButton",
-                    "hyperlink" => "Hyperlink",
-                    "commandBar" => "CommandBarButton",
-                    other => other,
-                }
+                form_compile_button_type(button_type).unwrap_or(button_type)
             }
         })
         .or(in_command_bar.then_some("CommandBarButton"))
     {
         lines.push(format!("{inner}<Type>{}</Type>", escape_xml(mapped)));
+    }
+    if let Some(representation) = element.get("representation").and_then(Value::as_str) {
+        let representation =
+            form_compile_button_representation(representation).unwrap_or(representation);
+        lines.push(format!(
+            "{inner}<Representation>{}</Representation>",
+            escape_xml(representation)
+        ));
     }
     let command_name = element
         .get("command")
@@ -6932,13 +8244,8 @@ pub(crate) fn emit_form_button(
         ));
         lines.push(format!("{inner}</Picture>"));
     }
-    if let Some(representation) = element.get("representation").and_then(Value::as_str) {
-        lines.push(format!(
-            "{inner}<Representation>{}</Representation>",
-            escape_xml(representation)
-        ));
-    }
     if let Some(location) = element.get("locationInCommandBar").and_then(Value::as_str) {
+        let location = form_compile_button_location(location).unwrap_or(location);
         lines.push(format!(
             "{inner}<LocationInCommandBar>{}</LocationInCommandBar>",
             escape_xml(location)
@@ -7026,6 +8333,7 @@ pub(crate) fn emit_form_label_field(
     }
     emit_form_element_tooltip(lines, element, &inner);
     emit_form_common_flags(lines, element, &inner);
+    emit_form_binding_path_property(lines, element, "footerDataPath", "FooterDataPath", &inner);
     emit_form_companion(
         lines,
         "ContextMenu",
@@ -7087,6 +8395,7 @@ pub(crate) fn emit_form_table(
             escape_xml(value)
         ));
     }
+    lines.push(format!("{inner}<RowFilter xsi:nil=\"true\"/>"));
     if element.get("_dynList").and_then(Value::as_bool) == Some(true) {
         emit_form_dynamic_list_table_block(lines, element, &inner);
     }
@@ -7232,7 +8541,8 @@ pub(crate) fn emit_form_dynamic_list_table_block(
     ));
     lines.push(format!("{indent}</Period>"));
     lines.push(format!(
-        "{indent}<ChoiceFoldersAndItems>{choice}</ChoiceFoldersAndItems>"
+        "{indent}<ChoiceFoldersAndItems>{}</ChoiceFoldersAndItems>",
+        escape_xml(choice)
     ));
     lines.push(format!(
         "{indent}<RestoreCurrentRow>{restore}</RestoreCurrentRow>"
@@ -7243,7 +8553,8 @@ pub(crate) fn emit_form_dynamic_list_table_block(
         "{indent}<AllowRootChoice>{allow_root_choice}</AllowRootChoice>"
     ));
     lines.push(format!(
-        "{indent}<UpdateOnDataChange>{update_on_data_change}</UpdateOnDataChange>"
+        "{indent}<UpdateOnDataChange>{}</UpdateOnDataChange>",
+        escape_xml(update_on_data_change)
     ));
     lines.push(format!(
         "{indent}<AllowGettingCurrentRowURL>{allow_url}</AllowGettingCurrentRowURL>"
@@ -7472,7 +8783,7 @@ pub(crate) fn emit_form_attributes(
         }
         let type_name = object.get("type").and_then(Value::as_str);
         if let Some(type_name) = type_name {
-            emit_form_type(lines, type_name, &inner);
+            emit_form_type(lines, type_name, &inner)?;
         } else {
             lines.push(format!("{inner}<Type/>"));
         }
@@ -7499,6 +8810,7 @@ pub(crate) fn emit_form_attributes(
                 escape_xml(fill_checking)
             ));
         }
+        emit_form_compile_attribute_columns(lines, object.get("columns"), &inner, ids)?;
         lines.push(format!("{indent}\t</Attribute>"));
     }
     lines.push(format!("{indent}</Attributes>"));
@@ -7509,6 +8821,24 @@ pub(crate) fn emit_form_attribute_columns(
     lines: &mut Vec<String>,
     columns: Option<&Value>,
     indent: &str,
+) -> Result<(), String> {
+    emit_form_attribute_columns_with_ids(lines, columns, indent, |index| index + 1)
+}
+
+fn emit_form_compile_attribute_columns(
+    lines: &mut Vec<String>,
+    columns: Option<&Value>,
+    indent: &str,
+    ids: &mut FormIdAllocator,
+) -> Result<(), String> {
+    emit_form_attribute_columns_with_ids(lines, columns, indent, |_| ids.next())
+}
+
+fn emit_form_attribute_columns_with_ids(
+    lines: &mut Vec<String>,
+    columns: Option<&Value>,
+    indent: &str,
+    mut next_id: impl FnMut(usize) -> usize,
 ) -> Result<(), String> {
     let Some(columns) = columns else {
         return Ok(());
@@ -7530,10 +8860,10 @@ pub(crate) fn emit_form_attribute_columns(
             .and_then(Value::as_str)
             .ok_or_else(|| format!("Form attribute column #{} is missing name", idx + 1))?;
         let column_indent = format!("{indent}\t");
+        let id = next_id(idx);
         lines.push(format!(
-            "{column_indent}<Column name=\"{}\" id=\"{}\">",
+            "{column_indent}<Column name=\"{}\" id=\"{id}\">",
             escape_xml(name),
-            idx + 1
         ));
         let inner = format!("{column_indent}\t");
         if let Some(title) = object.get("title").and_then(Value::as_str) {
@@ -7543,7 +8873,7 @@ pub(crate) fn emit_form_attribute_columns(
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("Form attribute column '{name}' is missing type"))?;
-        emit_form_type(lines, type_name, &inner);
+        emit_form_type(lines, type_name, &inner)?;
         lines.push(format!("{column_indent}</Column>"));
     }
     lines.push(format!("{indent}</Columns>"));
@@ -7655,7 +8985,7 @@ pub(crate) fn emit_form_parameters(
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
             &inner,
-        );
+        )?;
         if object.get("key").and_then(Value::as_bool) == Some(true) {
             lines.push(format!("{inner}<KeyParameter>true</KeyParameter>"));
         }
@@ -7718,128 +9048,412 @@ pub(crate) fn emit_form_commands(
     Ok(())
 }
 
-pub(crate) fn emit_form_type(lines: &mut Vec<String>, type_name: &str, indent: &str) {
-    if type_name.is_empty() {
-        lines.push(format!("{indent}<Type/>"));
-        return;
-    }
-    lines.push(format!("{indent}<Type>"));
-    for part in type_name
-        .split(['|', '+'])
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        emit_form_single_type(lines, part, &format!("{indent}\t"));
-    }
-    lines.push(format!("{indent}</Type>"));
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum FormTypeNodeKind {
+    Type,
+    TypeSet,
+    TypeId,
 }
 
-pub(crate) fn emit_form_single_type(lines: &mut Vec<String>, type_name: &str, indent: &str) {
+impl FormTypeNodeKind {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Type => "Type",
+            Self::TypeSet => "TypeSet",
+            Self::TypeId => "TypeId",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FormTypeQualifier {
+    Number {
+        digits: u32,
+        fraction: u32,
+        nonnegative: bool,
+    },
+    String {
+        length: u32,
+        fixed: bool,
+    },
+    Date(&'static str),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FormTypeEntry {
+    kind: FormTypeNodeKind,
+    wire_name: String,
+    local_namespace: Option<(&'static str, &'static str)>,
+    qualifier: Option<FormTypeQualifier>,
+}
+
+pub(crate) fn emit_form_type(
+    lines: &mut Vec<String>,
+    type_name: &str,
+    indent: &str,
+) -> Result<(), String> {
+    if type_name.trim().is_empty() {
+        lines.push(format!("{indent}<Type/>"));
+        return Ok(());
+    }
+
+    let raw_parts = type_name.split(['|', '+']).collect::<Vec<_>>();
+    if raw_parts.iter().any(|part| part.trim().is_empty()) {
+        return Err(format!(
+            "form type '{type_name}' is not valid for 8.3.27: composite type contains an empty item"
+        ));
+    }
+    let entries = raw_parts
+        .iter()
+        .map(|part| parse_form_type_entry(part.trim()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("form type '{type_name}' is not valid for 8.3.27: {error}"))?;
+
+    let mut seen = BTreeMap::<(FormTypeNodeKind, String), &str>::new();
+    for (raw, entry) in raw_parts.iter().zip(&entries) {
+        let key = (entry.kind, entry.wire_name.clone());
+        if let Some(previous) = seen.insert(key, raw.trim()) {
+            return Err(format!(
+                "form type '{type_name}' is not valid for 8.3.27: duplicate platform type '{previous}' and '{}' both map to v8:{} {}",
+                raw.trim(),
+                entry.kind.tag(),
+                entry.wire_name
+            ));
+        }
+    }
+
+    // v8:TypeDescription is an XSD sequence. Validate the complete DSL value
+    // before emitting anything, then serialize its repeated groups in schema
+    // order instead of interleaving qualifiers with concrete types.
+    lines.push(format!("{indent}<Type>"));
+    let inner = format!("{indent}\t");
+    for kind in [
+        FormTypeNodeKind::Type,
+        FormTypeNodeKind::TypeSet,
+        FormTypeNodeKind::TypeId,
+    ] {
+        for entry in entries.iter().filter(|entry| entry.kind == kind) {
+            emit_form_type_entry(lines, entry, &inner);
+        }
+    }
+    for qualifier_rank in [0_u8, 1, 2] {
+        for qualifier in entries.iter().filter_map(|entry| entry.qualifier) {
+            if form_type_qualifier_rank(qualifier) == qualifier_rank {
+                emit_form_type_qualifier(lines, qualifier, &inner);
+            }
+        }
+    }
+    lines.push(format!("{indent}</Type>"));
+    Ok(())
+}
+
+pub(crate) fn parse_form_type_entry(type_name: &str) -> Result<FormTypeEntry, String> {
     let normalized = normalize_form_type(type_name);
     if normalized == "boolean" {
-        lines.push(format!("{indent}<v8:Type>xs:boolean</v8:Type>"));
-    } else if matches!(normalized.as_str(), "DynamicList" | "ConstantsSet") {
-        lines.push(format!("{indent}<v8:Type>cfg:{normalized}</v8:Type>"));
-    } else if matches!(
-        normalized.as_str(),
-        "ValueTable"
-            | "ValueTree"
-            | "ValueList"
-            | "TypeDescription"
-            | "Universal"
-            | "FixedArray"
-            | "FixedStructure"
-    ) {
-        let mapped = match normalized.as_str() {
-            "ValueTable" => "v8:ValueTable",
-            "ValueTree" => "v8:ValueTree",
-            "ValueList" => "v8:ValueListType",
-            "TypeDescription" => "v8:TypeDescription",
-            "Universal" => "v8:Universal",
-            "FixedArray" => "v8:FixedArray",
-            "FixedStructure" => "v8:FixedStructure",
-            _ => unreachable!(),
-        };
-        lines.push(format!("{indent}<v8:Type>{mapped}</v8:Type>"));
-    } else if normalized.starts_with("CatalogRef.")
-        || normalized.starts_with("CatalogObject.")
-        || normalized.starts_with("DocumentRef.")
-        || normalized.starts_with("DocumentObject.")
-        || normalized.starts_with("EnumRef.")
-        || normalized.starts_with("ChartOfAccountsRef.")
-        || normalized.starts_with("ChartOfAccountsObject.")
-        || normalized.starts_with("ChartOfCharacteristicTypesRef.")
-        || normalized.starts_with("ChartOfCharacteristicTypesObject.")
-        || normalized.starts_with("ChartOfCalculationTypesRef.")
-        || normalized.starts_with("ChartOfCalculationTypesObject.")
-        || normalized.starts_with("ExchangePlanRef.")
-        || normalized.starts_with("ExchangePlanObject.")
-        || normalized.starts_with("BusinessProcessRef.")
-        || normalized.starts_with("BusinessProcessObject.")
-        || normalized.starts_with("TaskRef.")
-        || normalized.starts_with("TaskObject.")
-        || normalized.starts_with("InformationRegisterRecordSet.")
-        || normalized.starts_with("InformationRegisterRecordManager.")
-        || normalized.starts_with("AccumulationRegisterRecordSet.")
-        || normalized.starts_with("AccountingRegisterRecordSet.")
-        || normalized.starts_with("CalculationRegisterRecordSet.")
-        || normalized.starts_with("ConstantsSet.")
-        || normalized.starts_with("DataProcessorObject.")
-        || normalized.starts_with("ReportObject.")
-    {
-        lines.push(format!("{indent}<v8:Type>cfg:{normalized}</v8:Type>"));
-    } else if let Some(length) = normalized
-        .strip_prefix("string(")
-        .and_then(|rest| rest.strip_suffix(')'))
-    {
-        lines.push(format!("{indent}<v8:Type>xs:string</v8:Type>"));
-        lines.push(format!("{indent}<v8:StringQualifiers>"));
-        lines.push(format!("{indent}\t<v8:Length>{length}</v8:Length>"));
-        lines.push(format!(
-            "{indent}\t<v8:AllowedLength>Variable</v8:AllowedLength>"
+        return Ok(form_type_entry("xs:boolean", None));
+    }
+    if normalized == "string" {
+        return Ok(form_type_qualified_entry(
+            "xs:string",
+            FormTypeQualifier::String {
+                length: 0,
+                fixed: false,
+            },
         ));
-        lines.push(format!("{indent}</v8:StringQualifiers>"));
-    } else if normalized == "string" {
-        lines.push(format!("{indent}<v8:Type>xs:string</v8:Type>"));
-        lines.push(format!("{indent}<v8:StringQualifiers>"));
-        lines.push(format!("{indent}\t<v8:Length>0</v8:Length>"));
-        lines.push(format!(
-            "{indent}\t<v8:AllowedLength>Variable</v8:AllowedLength>"
+    }
+    if normalized.starts_with("string(") {
+        let (length, fixed) = parse_form_string_contract(&normalized).ok_or_else(|| {
+            format!(
+                "type '{type_name}' must be string(integer length 0..=1024[,fixed|variable]); fixed requires length > 0"
+            )
+        })?;
+        return Ok(form_type_qualified_entry(
+            "xs:string",
+            FormTypeQualifier::String { length, fixed },
         ));
-        lines.push(format!("{indent}</v8:StringQualifiers>"));
-    } else if let Some((digits, fraction, nonnegative)) = parse_form_decimal_type(&normalized) {
-        lines.push(format!("{indent}<v8:Type>xs:decimal</v8:Type>"));
-        lines.push(format!("{indent}<v8:NumberQualifiers>"));
-        lines.push(format!("{indent}\t<v8:Digits>{digits}</v8:Digits>"));
-        lines.push(format!(
-            "{indent}\t<v8:FractionDigits>{fraction}</v8:FractionDigits>"
+    }
+    if normalized == "decimal" {
+        return Ok(form_type_qualified_entry(
+            "xs:decimal",
+            FormTypeQualifier::Number {
+                digits: 10,
+                fraction: 0,
+                nonnegative: false,
+            },
         ));
-        lines.push(format!(
-            "{indent}\t<v8:AllowedSign>{}</v8:AllowedSign>",
-            if nonnegative { "Nonnegative" } else { "Any" }
+    }
+    if normalized.starts_with("decimal(") {
+        let (digits, fraction, nonnegative) =
+            parse_form_decimal_contract(&normalized).ok_or_else(|| {
+                format!(
+                    "type '{type_name}' must be decimal(integer digits 0..=38, integer fraction 0..=digits[,nonneg])"
+                )
+            })?;
+        return Ok(form_type_qualified_entry(
+            "xs:decimal",
+            FormTypeQualifier::Number {
+                digits,
+                fraction,
+                nonnegative,
+            },
         ));
-        lines.push(format!("{indent}</v8:NumberQualifiers>"));
-    } else if matches!(normalized.as_str(), "date" | "dateTime" | "time") {
+    }
+    if matches!(normalized.as_str(), "date" | "dateTime" | "time") {
         let fractions = match normalized.as_str() {
             "date" => "Date",
             "dateTime" => "DateTime",
             "time" => "Time",
             _ => unreachable!(),
         };
-        lines.push(format!("{indent}<v8:Type>xs:dateTime</v8:Type>"));
-        lines.push(format!("{indent}<v8:DateQualifiers>"));
-        lines.push(format!(
-            "{indent}\t<v8:DateFractions>{fractions}</v8:DateFractions>"
-        ));
-        lines.push(format!("{indent}</v8:DateQualifiers>"));
-    } else if normalized.contains('.') {
-        lines.push(format!("{indent}<v8:Type>cfg:{normalized}</v8:Type>"));
-    } else {
-        lines.push(format!(
-            "{indent}<v8:Type>{}</v8:Type>",
-            escape_xml(&normalized)
+        return Ok(form_type_qualified_entry(
+            "xs:dateTime",
+            FormTypeQualifier::Date(fractions),
         ));
     }
+    if let Some(type_id) = normalized.strip_prefix("typeid:") {
+        if !is_valid_uuid(type_id) {
+            return Err(format!("type '{type_name}' has an invalid TypeId UUID"));
+        }
+        return Ok(FormTypeEntry {
+            kind: FormTypeNodeKind::TypeId,
+            wire_name: type_id.to_string(),
+            local_namespace: None,
+            qualifier: None,
+        });
+    }
+
+    let mapped = match normalized.as_str() {
+        "ValueTable" => Some("v8:ValueTable"),
+        "ValueTree" => Some("v8:ValueTree"),
+        "ValueList" => Some("v8:ValueListType"),
+        "TypeDescription" => Some("v8:TypeDescription"),
+        "Universal" => Some("v8:Universal"),
+        "FixedArray" => Some("v8:FixedArray"),
+        "FixedStructure" => Some("v8:FixedStructure"),
+        "FormattedString" => Some("v8ui:FormattedString"),
+        "Picture" => Some("v8ui:Picture"),
+        "Color" => Some("v8ui:Color"),
+        "Font" => Some("v8ui:Font"),
+        "DataCompositionSettings" | "DCS.DataCompositionSettings" => {
+            Some("dcsset:DataCompositionSettings")
+        }
+        "DataCompositionSchema" | "DCS.DataCompositionSchema" => {
+            Some("dcssch:DataCompositionSchema")
+        }
+        "DataCompositionComparisonType" | "DCS.DataCompositionComparisonType" => {
+            Some("dcscor:DataCompositionComparisonType")
+        }
+        _ => None,
+    };
+    if let Some(mapped) = mapped {
+        return Ok(form_type_entry(mapped, None));
+    }
+
+    if matches!(
+        normalized.as_str(),
+        "DynamicList" | "ConstantsSet" | "ReportObject"
+    ) {
+        return Ok(form_type_entry(&format!("cfg:{normalized}"), None));
+    }
+    if normalized.starts_with("DefinedType.") || normalized.starts_with("Characteristic.") {
+        validate_form_configuration_type_name(type_name, &normalized)?;
+        return Ok(FormTypeEntry {
+            kind: FormTypeNodeKind::TypeSet,
+            wire_name: format!("cfg:{normalized}"),
+            local_namespace: None,
+            qualifier: None,
+        });
+    }
+    if form_type_set_names().contains(&normalized.as_str()) {
+        return Ok(FormTypeEntry {
+            kind: FormTypeNodeKind::TypeSet,
+            wire_name: format!("cfg:{normalized}"),
+            local_namespace: None,
+            qualifier: None,
+        });
+    }
+    if let Some((prefix, _)) = normalized.split_once('.') {
+        if form_valid_cfg_prefixes().contains(&prefix) {
+            validate_form_configuration_type_name(type_name, &normalized)?;
+            return Ok(form_type_entry(&format!("cfg:{normalized}"), None));
+        }
+    }
+    if let Some((prefix, namespace)) = form_special_type_namespace(&normalized) {
+        return Ok(form_type_entry(&normalized, Some((prefix, namespace))));
+    }
+    if form_valid_closed_types().contains(&normalized.as_str()) {
+        return Ok(form_type_entry(&normalized, None));
+    }
+    if form_invalid_types().contains(&normalized.as_str()) {
+        return Err(format!(
+            "type '{type_name}' is a runtime/UI type, not a data type in the 8.3.27 XDTO contract"
+        ));
+    }
+    Err(format!(
+        "type '{type_name}' is not supported by the fixed 8.3.27 form type contract"
+    ))
+}
+
+fn form_type_entry(
+    wire_name: &str,
+    local_namespace: Option<(&'static str, &'static str)>,
+) -> FormTypeEntry {
+    FormTypeEntry {
+        kind: FormTypeNodeKind::Type,
+        wire_name: wire_name.to_string(),
+        local_namespace,
+        qualifier: None,
+    }
+}
+
+fn form_type_qualified_entry(wire_name: &str, qualifier: FormTypeQualifier) -> FormTypeEntry {
+    FormTypeEntry {
+        qualifier: Some(qualifier),
+        ..form_type_entry(wire_name, None)
+    }
+}
+
+fn emit_form_type_entry(lines: &mut Vec<String>, entry: &FormTypeEntry, indent: &str) {
+    let tag = entry.kind.tag();
+    if let Some((prefix, namespace)) = entry.local_namespace {
+        lines.push(format!(
+            "{indent}<v8:{tag} xmlns:{prefix}=\"{namespace}\">{}</v8:{tag}>",
+            escape_xml(&entry.wire_name)
+        ));
+    } else {
+        lines.push(format!(
+            "{indent}<v8:{tag}>{}</v8:{tag}>",
+            escape_xml(&entry.wire_name)
+        ));
+    }
+}
+
+fn form_type_qualifier_rank(qualifier: FormTypeQualifier) -> u8 {
+    match qualifier {
+        FormTypeQualifier::Number { .. } => 0,
+        FormTypeQualifier::String { .. } => 1,
+        FormTypeQualifier::Date(_) => 2,
+    }
+}
+
+fn emit_form_type_qualifier(lines: &mut Vec<String>, qualifier: FormTypeQualifier, indent: &str) {
+    match qualifier {
+        FormTypeQualifier::Number {
+            digits,
+            fraction,
+            nonnegative,
+        } => {
+            lines.push(format!("{indent}<v8:NumberQualifiers>"));
+            lines.push(format!("{indent}\t<v8:Digits>{digits}</v8:Digits>"));
+            lines.push(format!(
+                "{indent}\t<v8:FractionDigits>{fraction}</v8:FractionDigits>"
+            ));
+            lines.push(format!(
+                "{indent}\t<v8:AllowedSign>{}</v8:AllowedSign>",
+                if nonnegative { "Nonnegative" } else { "Any" }
+            ));
+            lines.push(format!("{indent}</v8:NumberQualifiers>"));
+        }
+        FormTypeQualifier::String { length, fixed } => {
+            lines.push(format!("{indent}<v8:StringQualifiers>"));
+            lines.push(format!("{indent}\t<v8:Length>{length}</v8:Length>"));
+            lines.push(format!(
+                "{indent}\t<v8:AllowedLength>{}</v8:AllowedLength>",
+                if fixed { "Fixed" } else { "Variable" }
+            ));
+            lines.push(format!("{indent}</v8:StringQualifiers>"));
+        }
+        FormTypeQualifier::Date(fractions) => {
+            lines.push(format!("{indent}<v8:DateQualifiers>"));
+            lines.push(format!(
+                "{indent}\t<v8:DateFractions>{fractions}</v8:DateFractions>"
+            ));
+            lines.push(format!("{indent}</v8:DateQualifiers>"));
+        }
+    }
+}
+
+fn validate_form_configuration_type_name(raw: &str, normalized: &str) -> Result<(), String> {
+    let invalid_name = normalized
+        .split_once('.')
+        .is_none_or(|(_, name)| name.trim().is_empty() || name.contains('.'));
+    if invalid_name || !form_is_xml_ncname(normalized) {
+        return Err(format!(
+            "type '{raw}' has an invalid or empty configuration type name"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn form_type_set_names() -> &'static [&'static str] {
+    &[
+        "AnyRef",
+        "AnyIBRef",
+        "CatalogRef",
+        "DocumentRef",
+        "EnumRef",
+        "ExchangePlanRef",
+        "TaskRef",
+        "BusinessProcessRef",
+        "ChartOfAccountsRef",
+        "ChartOfCharacteristicTypesRef",
+        "ChartOfCalculationTypesRef",
+    ]
+}
+
+pub(crate) fn form_special_type_namespace(value: &str) -> Option<(&'static str, &'static str)> {
+    match value {
+        "mxl:SpreadsheetDocument" => Some(("mxl", "http://v8.1c.ru/8.2/data/spreadsheet")),
+        "fd:FormattedDocument" => Some(("fd", "http://v8.1c.ru/8.2/data/formatted-document")),
+        "d5p1:TextDocument" => Some(("d5p1", "http://v8.1c.ru/8.1/data/txtedt")),
+        "d5p1:Chart" | "d5p1:GanttChart" | "d5p1:Dendrogram" => {
+            Some(("d5p1", "http://v8.1c.ru/8.2/data/chart"))
+        }
+        "d5p1:FlowchartContextType" => Some(("d5p1", "http://v8.1c.ru/8.2/data/graphscheme")),
+        "d5p1:DataAnalysisTimeIntervalUnitType" => {
+            Some(("d5p1", "http://v8.1c.ru/8.2/data/data-analysis"))
+        }
+        "d5p1:GeographicalSchema" => Some(("d5p1", "http://v8.1c.ru/8.2/data/geo")),
+        "pdfdoc:PDFDocument" => Some(("pdfdoc", "http://v8.1c.ru/8.3/data/pdf")),
+        "pl:Planner" => Some(("pl", "http://v8.1c.ru/8.3/data/planner")),
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_form_string_contract(value: &str) -> Option<(u32, bool)> {
+    let rest = value.strip_prefix("string(")?.strip_suffix(')')?;
+    let parts = rest.split(',').map(str::trim).collect::<Vec<_>>();
+    if !matches!(parts.len(), 1 | 2) || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    let length = parts[0]
+        .parse::<u32>()
+        .ok()
+        .filter(|length| *length <= 1024)?;
+    let fixed = match parts.get(1).map(|value| value.to_ascii_lowercase()) {
+        None => false,
+        Some(value) if value == "variable" => false,
+        Some(value) if value == "fixed" && length > 0 => true,
+        _ => return None,
+    };
+    Some((length, fixed))
+}
+
+pub(crate) fn parse_form_decimal_contract(value: &str) -> Option<(u32, u32, bool)> {
+    let rest = value.strip_prefix("decimal(")?.strip_suffix(')')?;
+    let parts = rest.split(',').map(str::trim).collect::<Vec<_>>();
+    if !matches!(parts.len(), 2 | 3)
+        || parts.iter().any(|part| part.is_empty())
+        || (parts.len() == 3 && parts[2] != "nonneg")
+    {
+        return None;
+    }
+    let digits = parts[0].parse::<u32>().ok()?;
+    let fraction = parts[1].parse::<u32>().ok()?;
+    if digits > 38 || fraction > digits {
+        return None;
+    }
+    Some((digits, fraction, parts.len() == 3))
 }
 
 pub(crate) fn normalize_form_type(type_name: &str) -> String {
@@ -7866,41 +9480,99 @@ pub(crate) fn normalize_form_type(type_name: &str) -> String {
 
 pub(crate) fn normalize_form_type_base(base: &str) -> Option<&'static str> {
     match base.to_lowercase().as_str() {
-        "строка" => Some("string"),
+        "строка" | "string" => Some("string"),
         "число" | "number" => Some("decimal"),
-        "булево" | "bool" => Some("boolean"),
-        "дата" => Some("date"),
-        "датавремя" => Some("dateTime"),
-        "справочникссылка" => Some("CatalogRef"),
-        "справочникобъект" => Some("CatalogObject"),
-        "документссылка" => Some("DocumentRef"),
-        "документобъект" => Some("DocumentObject"),
-        "перечислениессылка" => Some("EnumRef"),
-        "плансчетовссылка" => Some("ChartOfAccountsRef"),
-        "планвидовхарактеристикссылка" => {
+        "булево" | "boolean" | "bool" => Some("boolean"),
+        "дата" | "date" => Some("date"),
+        "датавремя" | "datetime" => Some("dateTime"),
+        "время" | "time" => Some("time"),
+        "binary" | "xs:binary" => Some("xs:binary"),
+        "справочникссылка" | "catalogref" => Some("CatalogRef"),
+        "справочникобъект" | "catalogobject" => Some("CatalogObject"),
+        "документссылка" | "documentref" => Some("DocumentRef"),
+        "документобъект" | "documentobject" => Some("DocumentObject"),
+        "перечислениессылка" | "enumref" => Some("EnumRef"),
+        "плансчетовссылка" | "chartofaccountsref" => Some("ChartOfAccountsRef"),
+        "планвидовхарактеристикссылка" | "chartofcharacteristictypesref" => {
             Some("ChartOfCharacteristicTypesRef")
         }
-        "планвидоврасчётассылка" | "планвидоврасчетассылка" => {
+        "планвидоврасчётассылка" | "планвидоврасчетассылка" | "chartofcalculationtypesref" => {
             Some("ChartOfCalculationTypesRef")
         }
-        "планобменассылка" => Some("ExchangePlanRef"),
-        "бизнеспроцессссылка" => Some("BusinessProcessRef"),
-        "задачассылка" => Some("TaskRef"),
-        "определяемыйтип" => Some("DefinedType"),
+        "планобменассылка" | "exchangeplanref" => Some("ExchangePlanRef"),
+        "бизнеспроцессссылка" | "businessprocessref" => {
+            Some("BusinessProcessRef")
+        }
+        "задачассылка" | "taskref" => Some("TaskRef"),
+        "определяемыйтип" | "definedtype" => Some("DefinedType"),
+        "характеристика" | "characteristic" => Some("Characteristic"),
+        "любаяссылка" | "anyref" => Some("AnyRef"),
+        "любаяссылкаиб" | "anyibref" => Some("AnyIBRef"),
+        "таблицазначений" | "valuetable" => Some("ValueTable"),
+        "деревозначений" | "valuetree" => Some("ValueTree"),
+        "списокзначений" | "valuelist" => Some("ValueList"),
+        "описаниетипов" | "typedescription" => Some("TypeDescription"),
+        "formattedstring" => Some("FormattedString"),
+        "picture" => Some("Picture"),
+        "color" => Some("Color"),
+        "font" => Some("Font"),
+        "standardperiod" | "стандартныйпериод" | "v8:standardperiod" => {
+            Some("v8:StandardPeriod")
+        }
+        "standardbeginningdate" | "стандартнаядатаначала" | "v8:standardbeginningdate" => {
+            Some("v8:StandardBeginningDate")
+        }
+        "uuid" | "уникальныйидентификатор" | "v8:uuid" => Some("v8:UUID"),
         _ => None,
     }
 }
 
-pub(crate) fn parse_form_decimal_type(value: &str) -> Option<(&str, &str, bool)> {
-    let rest = value.strip_prefix("decimal(")?.strip_suffix(')')?;
-    let parts = rest.split(',').map(str::trim).collect::<Vec<_>>();
-    if parts.len() < 2 {
-        return None;
+fn plan_form_registration_in_parent_object(
+    output_path: &Path,
+    object_xml_path: &Path,
+    source: &Utf8TextSnapshot,
+) -> Result<Option<FormParentRegistrationPlan>, String> {
+    let Some(form_xml_dir) = output_path.parent() else {
+        return Ok(None);
+    };
+    let Some(form_name_dir) = form_xml_dir.parent() else {
+        return Ok(None);
+    };
+    let Some(forms_dir) = form_name_dir.parent() else {
+        return Ok(None);
+    };
+    let Some(object_dir) = forms_dir.parent() else {
+        return Ok(None);
+    };
+    let Some(form_name) = form_name_dir.file_name().and_then(|value| value.to_str()) else {
+        return Ok(None);
+    };
+    let Some(object_name) = object_dir.file_name().and_then(|value| value.to_str()) else {
+        return Ok(None);
+    };
+    let escaped_form_name = escape_xml(form_name);
+    if source
+        .text
+        .contains(&format!("<Form>{escaped_form_name}</Form>"))
+    {
+        return Ok(None);
     }
-    Some((parts[0], parts[1], parts.get(2) == Some(&"nonneg")))
+    let replacement_text = register_form_in_object_text(&source.text, &escaped_form_name);
+    if replacement_text == source.text {
+        return Ok(None);
+    }
+    let replacement_text = preserve_source_final_newline(replacement_text, &source.text);
+    Ok(Some(FormParentRegistrationPlan {
+        path: object_xml_path.to_path_buf(),
+        original: source.raw.clone(),
+        replacement: utf8_bom_bytes(&replacement_text),
+        stdout: format!("     Registered: <Form>{escaped_form_name}</Form> in {object_name}.xml\n"),
+    }))
 }
 
-pub(crate) fn register_form_in_parent_object(output_path: &Path) -> Result<Option<String>, String> {
+pub(crate) fn form_parent_metadata_owner_candidate(
+    output_path: &Path,
+) -> Result<Option<PathBuf>, String> {
     let Some(form_xml_dir) = output_path.parent() else {
         return Ok(None);
     };
@@ -7922,37 +9594,12 @@ pub(crate) fn register_form_in_parent_object(output_path: &Path) -> Result<Optio
     let Some(form_name) = form_name_dir.file_name().and_then(|value| value.to_str()) else {
         return Ok(None);
     };
+    validate_form_metadata_path_name("OutputPath form name", form_name)?;
     let Some(object_name) = object_dir.file_name().and_then(|value| value.to_str()) else {
         return Ok(None);
     };
     let object_xml_path = type_plural_dir.join(format!("{object_name}.xml"));
-    if !object_xml_path.exists() {
-        return Ok(None);
-    }
-    let mut raw_text = fs::read_to_string(&object_xml_path)
-        .map_err(|err| format!("failed to read {}: {err}", object_xml_path.display()))?;
-    if raw_text.contains(&format!("<Form>{form_name}</Form>")) {
-        return Ok(None);
-    }
-    if raw_text.contains("</ChildObjects>") {
-        raw_text = raw_text.replacen(
-            "</ChildObjects>",
-            &format!("\t\t\t<Form>{form_name}</Form>\n\t\t</ChildObjects>"),
-            1,
-        );
-    } else if raw_text.contains("<ChildObjects/>") {
-        raw_text = raw_text.replacen(
-            "<ChildObjects/>",
-            &format!("<ChildObjects>\n\t\t\t<Form>{form_name}</Form>\n\t\t</ChildObjects>"),
-            1,
-        );
-    } else {
-        return Ok(None);
-    }
-    write_utf8_bom(&object_xml_path, &raw_text)?;
-    Ok(Some(format!(
-        "     Registered: <Form>{form_name}</Form> in {object_name}.xml\n"
-    )))
+    Ok(Some(object_xml_path))
 }
 
 pub(crate) fn invoke_read(
@@ -7986,12 +9633,24 @@ pub(crate) fn invoke_mutation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::UnicaApplication;
     use crate::domain::workspace::WorkspaceContext;
+    use crate::infrastructure::native_operations::compile_transaction::{
+        with_commit_failpoint, CommitFailpoint,
+    };
+    use crate::infrastructure::native_operations::single_file_publisher::{
+        with_before_commit_hook, with_publish_failpoints, PublishCheckpoint,
+    };
     use crate::infrastructure::native_operations::NativeOperationAdapter;
     use serde_json::{json, Map};
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn generated_form_module_uses_the_8_3_27_crlf_serialization() {
+        assert_platform_text_uses_crlf_without_bare_lf(form_add_module_bsl());
+    }
 
     fn temp_context(name: &str) -> WorkspaceContext {
         let nanos = SystemTime::now()
@@ -8179,12 +9838,12 @@ mod tests {
     #[test]
     fn form_edit_rejects_escaped_and_unbound_emitted_qnames_without_write() {
         let cases = [
-            ("ampersand", "foo:A&B", "", "invalid QName syntax"),
-            ("less-than", "foo:A<B", "", "invalid QName syntax"),
-            ("undeclared", "foo:Type", "", "undeclared prefix 'foo'"),
+            ("ampersand", "foo:A&B", "", "fixed 8.3.27"),
+            ("less-than", "foo:A<B", "", "fixed 8.3.27"),
+            ("undeclared", "foo:Type", "", "fixed 8.3.27"),
             (
                 "conflicting-known-prefix",
-                "v8ui:A<B",
+                "v8ui:Color",
                 " xmlns:v8ui=\"urn:wrong-v8ui\"",
                 "expected 'http://v8.1c.ru/8.1/data/ui'",
             ),
@@ -8236,6 +9895,30 @@ mod tests {
             error.contains("missing:CatalogRef.Goods")
                 && error.contains("undeclared prefix 'missing'")
         }));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_rejects_existing_undeclared_qname_without_byte_changes() {
+        let context = temp_context("edit-existing-undeclared-type-prefix");
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_with_declared_type("", "missing:CatalogRef.Goods").into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let mut args = form_path_args(&form_path);
+        args.insert(
+            "definition".to_string(),
+            json!({"attributes": [{"name": "Added", "type": "string"}]}),
+        );
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome.errors.iter().any(|error| {
+            error.contains("missing:CatalogRef.Goods")
+                && error.contains("undeclared prefix 'missing'")
+        }));
+        assert!(outcome.changes.is_empty(), "{outcome:?}");
+        assert_eq!(fs::read(&form_path).unwrap(), original);
         let _ = fs::remove_dir_all(&context.cwd);
     }
 
@@ -8296,8 +9979,30 @@ mod tests {
     fn empty_catalog_xml(line_ending: &str, trailing_newline: bool) -> String {
         let mut text = [
             r#"<?xml version="1.0" encoding="utf-8"?>"#,
-            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">"#,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.20">"#,
             r#"	<Catalog uuid="00000000-0000-0000-0000-000000000001">"#,
+            r#"		<InternalInfo>"#,
+            r#"			<xr:GeneratedType name="CatalogObject.Goods" category="Object">"#,
+            r#"				<xr:TypeId>00000000-0000-4000-8000-000000000101</xr:TypeId>"#,
+            r#"				<xr:ValueId>00000000-0000-4000-8000-000000000102</xr:ValueId>"#,
+            r#"			</xr:GeneratedType>"#,
+            r#"			<xr:GeneratedType name="CatalogRef.Goods" category="Ref">"#,
+            r#"				<xr:TypeId>00000000-0000-4000-8000-000000000103</xr:TypeId>"#,
+            r#"				<xr:ValueId>00000000-0000-4000-8000-000000000104</xr:ValueId>"#,
+            r#"			</xr:GeneratedType>"#,
+            r#"			<xr:GeneratedType name="CatalogSelection.Goods" category="Selection">"#,
+            r#"				<xr:TypeId>00000000-0000-4000-8000-000000000105</xr:TypeId>"#,
+            r#"				<xr:ValueId>00000000-0000-4000-8000-000000000106</xr:ValueId>"#,
+            r#"			</xr:GeneratedType>"#,
+            r#"			<xr:GeneratedType name="CatalogList.Goods" category="List">"#,
+            r#"				<xr:TypeId>00000000-0000-4000-8000-000000000107</xr:TypeId>"#,
+            r#"				<xr:ValueId>00000000-0000-4000-8000-000000000108</xr:ValueId>"#,
+            r#"			</xr:GeneratedType>"#,
+            r#"			<xr:GeneratedType name="CatalogManager.Goods" category="Manager">"#,
+            r#"				<xr:TypeId>00000000-0000-4000-8000-000000000109</xr:TypeId>"#,
+            r#"				<xr:ValueId>00000000-0000-4000-8000-000000000110</xr:ValueId>"#,
+            r#"			</xr:GeneratedType>"#,
+            r#"		</InternalInfo>"#,
             r#"		<Properties>"#,
             r#"			<Name>Goods</Name>"#,
             r#"			<Synonym>Goods</Synonym>"#,
@@ -8324,6 +10029,339 @@ mod tests {
         args.insert("Purpose".to_string(), json!("List"));
         args.insert("Synonym".to_string(), json!("List form"));
         args
+    }
+
+    fn add_object_form_args(object_path: &Path, form_name: &str) -> Map<String, Value> {
+        Map::from_iter([
+            (
+                "ObjectPath".to_string(),
+                json!(object_path.display().to_string()),
+            ),
+            ("FormName".to_string(), json!(form_name)),
+            ("Purpose".to_string(), json!("Object")),
+            ("Synonym".to_string(), json!("Added form")),
+        ])
+    }
+
+    fn create_external_owner(
+        context: &WorkspaceContext,
+        root_type: &str,
+        object_name: &str,
+    ) -> PathBuf {
+        let (operation, tool_name) = match root_type {
+            "ExternalDataProcessor" => ("epf-init", "unica.epf.init"),
+            "ExternalReport" => ("erf-init", "unica.erf.init"),
+            other => panic!("unsupported external fixture root: {other}"),
+        };
+        let args = Map::from_iter([
+            ("Name".to_string(), json!(object_name)),
+            ("OutputDir".to_string(), json!("external")),
+        ]);
+        let outcome = crate::infrastructure::native_operations::external::apply(
+            operation, tool_name, &args, context,
+        )
+        .expect("external init operation must be registered");
+        assert!(outcome.ok, "{outcome:?}");
+        context
+            .cwd
+            .join("external")
+            .join(format!("{object_name}.xml"))
+    }
+
+    fn external_attribute_xml(password_mode: &str, indexing: &str) -> String {
+        format!(
+            r#"
+			<Attribute uuid="00000000-0000-4000-8000-000000000201">
+				<Properties>
+					<Name>ExistingAttribute</Name>
+					<Type>
+						<v8:Type>xs:string</v8:Type>
+					</Type>
+					<PasswordMode>{password_mode}</PasswordMode>
+					<Indexing>{indexing}</Indexing>
+				</Properties>
+			</Attribute>
+		"#
+        )
+    }
+
+    #[test]
+    fn add_form_accepts_valid_external_processor_and_report_owners() {
+        for (case, root_type, existing_child) in [
+            (
+                "processor-template",
+                "ExternalDataProcessor",
+                "\n\t\t\t<Template>ExistingTemplate</Template>\n\t\t".to_string(),
+            ),
+            (
+                "report-attribute",
+                "ExternalReport",
+                external_attribute_xml("false", "DontIndex"),
+            ),
+        ] {
+            let context = temp_context(&format!("add-valid-external-{case}"));
+            let object_name = if root_type == "ExternalReport" {
+                "ExternalSalesReport"
+            } else {
+                "ExternalImportProcessor"
+            };
+            let owner = create_external_owner(&context, root_type, object_name);
+            let source = fs::read_to_string(&owner).unwrap();
+            let source = source.replace(
+                "\t\t<ChildObjects/>",
+                &format!("\t\t<ChildObjects>{existing_child}</ChildObjects>"),
+            );
+            fs::write(&owner, source).unwrap();
+            let args = add_object_form_args(&owner, "AddedForm");
+
+            let outcome = add_form(&args, &context);
+
+            assert!(outcome.ok, "{case}: {outcome:?}");
+            let updated = fs::read_to_string(&owner).unwrap();
+            assert!(updated.contains("<Form>AddedForm</Form>"), "{updated}");
+            assert!(
+                updated.contains(if root_type == "ExternalReport" {
+                    "<Attribute uuid=\"00000000-0000-4000-8000-000000000201\">"
+                } else {
+                    "<Template>ExistingTemplate</Template>"
+                }),
+                "{updated}"
+            );
+            let forms = context.cwd.join("external").join(object_name).join("Forms");
+            assert!(forms.join("AddedForm.xml").is_file());
+            assert!(forms.join("AddedForm/Ext/Form.xml").is_file());
+            assert!(forms.join("AddedForm/Ext/Form/Module.bsl").is_file());
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn add_form_rejects_invalid_external_owner_boolean_and_enum_without_writes() {
+        for (case, root_type, password_mode, indexing, expected_property) in [
+            (
+                "processor-boolean",
+                "ExternalDataProcessor",
+                "truthy",
+                "DontIndex",
+                "PasswordMode",
+            ),
+            (
+                "report-enum",
+                "ExternalReport",
+                "false",
+                "truthy",
+                "Indexing",
+            ),
+        ] {
+            let context = temp_context(&format!("add-invalid-external-{case}"));
+            let owner = create_external_owner(&context, root_type, "InvalidExternalOwner");
+            let source = fs::read_to_string(&owner).unwrap();
+            let source = source.replace(
+                "\t\t<ChildObjects/>",
+                &format!(
+                    "\t\t<ChildObjects>{}</ChildObjects>",
+                    external_attribute_xml(password_mode, indexing)
+                ),
+            );
+            fs::write(&owner, source).unwrap();
+            let owner_before = fs::read(&owner).unwrap();
+            let forms = context.cwd.join("external/InvalidExternalOwner/Forms");
+            let args = add_object_form_args(&owner, "RejectedForm");
+
+            let outcome = add_form(&args, &context);
+
+            assert!(!outcome.ok, "{case}: {outcome:?}");
+            assert!(
+                outcome
+                    .errors
+                    .iter()
+                    .any(|error| error.contains(expected_property)
+                        && error.contains("fixed 8.3.27 contract")),
+                "{case}: {outcome:?}"
+            );
+            assert_eq!(fs::read(&owner).unwrap(), owner_before, "{case}");
+            assert!(!forms.exists(), "{case}: {}", forms.display());
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn add_form_post_write_failure_restores_owner_and_removes_scaffold() {
+        let context = temp_context("add-post-write-failure");
+        let root_xml = context.cwd.join("src/Catalogs/Goods.xml");
+        write_file(&root_xml, &empty_catalog_xml("\r\n", false));
+        let descriptor = context.cwd.join("src/Catalogs/Goods/Forms/ListForm.xml");
+        let form_xml = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ListForm/Ext/Form.xml");
+        let module = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ListForm/Ext/Form/Module.bsl");
+        let before = [
+            (root_xml.clone(), fs::read(&root_xml).ok()),
+            (descriptor.clone(), fs::read(&descriptor).ok()),
+            (form_xml.clone(), fs::read(&form_xml).ok()),
+            (module.clone(), fs::read(&module).ok()),
+        ];
+        let args = add_list_form_args(&root_xml, "ListForm");
+
+        let outcome = with_commit_failpoint(CommitFailpoint::PostWriteValidation, || {
+            add_form(&args, &context)
+        });
+
+        assert!(!outcome.ok, "{outcome:?}");
+        for (path, expected) in before {
+            assert_eq!(fs::read(&path).ok(), expected, "{}", path.display());
+        }
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn add_form_rejects_platform_invalid_owner_boolean_before_creating_scaffold() {
+        let context = temp_context("add-invalid-owner-boolean");
+        let root_xml = context.cwd.join("src/Catalogs/Goods.xml");
+        let invalid_owner = empty_catalog_xml("\n", true).replace(
+            "\t\t\t<DefaultListForm/>",
+            "\t\t\t<DefaultListForm/>\n\t\t\t<IncludeHelpInContents>truthy</IncludeHelpInContents>",
+        );
+        write_file(&root_xml, &invalid_owner);
+        let owner_before = fs::read(&root_xml).unwrap();
+        let forms_dir = context.cwd.join("src/Catalogs/Goods/Forms");
+        let args = add_list_form_args(&root_xml, "ListForm");
+
+        let outcome = add_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("IncludeHelpInContents")
+                    && error.contains("true or false")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&root_xml).unwrap(), owner_before);
+        assert!(!forms_dir.exists());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn public_form_add_prioritizes_newer_existing_target_over_older_object_owner() {
+        let context = temp_context("public-add-existing-newer-target");
+        fs::write(
+            context.cwd.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        )
+        .unwrap();
+        let configuration_path = context.cwd.join("src/Configuration.xml");
+        write_file(
+            &configuration_path,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Configuration/></MetaDataObject>"#,
+        );
+        let object_path = context.cwd.join("src/Catalogs/Goods.xml");
+        let older_owner = empty_catalog_xml("\n", true)
+            .replacen(r#"version="2.20""#, r#"version="2.19""#, 1)
+            .into_bytes();
+        fs::create_dir_all(object_path.parent().unwrap()).unwrap();
+        fs::write(&object_path, &older_owner).unwrap();
+        let descriptor_path = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ExistingForm.xml");
+        let newer_descriptor = br#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.21"><Form/></MetaDataObject>"#.to_vec();
+        fs::create_dir_all(descriptor_path.parent().unwrap()).unwrap();
+        fs::write(&descriptor_path, &newer_descriptor).unwrap();
+        let configuration_before = fs::read(&configuration_path).unwrap();
+        let mut args = add_list_form_args(&object_path, "ExistingForm");
+        args.insert("cwd".to_string(), json!(context.cwd.display().to_string()));
+        args.insert("dryRun".to_string(), json!(false));
+
+        let outcome = UnicaApplication::new()
+            .call_tool("unica.form.add", &args)
+            .unwrap();
+
+        assert!(!outcome.ok, "{outcome:?}");
+        let diagnostic = &outcome.diagnostics.as_ref().unwrap()["formatCompatibility"];
+        assert_eq!(diagnostic["code"], "platformVersionUnsupported");
+        assert_eq!(diagnostic["actualFormat"], "2.21");
+        let warning = outcome.warnings.join("\n");
+        assert!(warning.contains("1С 8.5"), "{warning}");
+        assert!(!warning.contains("миграц"), "{warning}");
+        assert!(!warning.contains("повторно выгруз"), "{warning}");
+        assert!(!warning.contains("re-export"), "{warning}");
+        assert_eq!(fs::read(&configuration_path).unwrap(), configuration_before);
+        assert_eq!(fs::read(&object_path).unwrap(), older_owner);
+        assert_eq!(fs::read(&descriptor_path).unwrap(), newer_descriptor);
+        assert!(!context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ExistingForm/Ext/Form.xml")
+            .exists());
+        assert!(!context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ExistingForm/Ext/Form/Module.bsl")
+            .exists());
+        assert!(outcome.changes.is_empty(), "{outcome:?}");
+        assert!(outcome.artifacts.is_empty(), "{outcome:?}");
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn add_form_rejects_path_form_name_without_mutating_owner_or_escape_target() {
+        let context = temp_context("add-path-form-name");
+        let root_xml = context.cwd.join("src/Catalogs/Goods.xml");
+        write_file(&root_xml, &empty_catalog_xml("\n", true));
+        let root_before = fs::read(&root_xml).unwrap();
+        let escaped_descriptor = context.cwd.join("src/Catalogs/Goods/Forms/../Escaped.xml");
+        let args = add_list_form_args(&root_xml, "../Escaped");
+
+        let outcome = add_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome.errors.iter().any(|error| {
+            error.contains("FormName")
+                && error.contains("XML NCName")
+                && error.contains("single path component")
+        }));
+        assert_eq!(fs::read(&root_xml).unwrap(), root_before);
+        assert!(!escaped_descriptor.exists());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn add_form_rejects_partial_existing_scaffold_before_any_mutation() {
+        let context = temp_context("add-partial-scaffold");
+        let root_xml = context.cwd.join("src/Catalogs/Goods.xml");
+        let descriptor = context.cwd.join("src/Catalogs/Goods/Forms/ListForm.xml");
+        let form_xml = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ListForm/Ext/Form.xml");
+        let module = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ListForm/Ext/Form/Module.bsl");
+        write_file(&root_xml, &empty_catalog_xml("\r\n", false));
+        write_file(
+            &form_xml,
+            "<Form xmlns=\"http://v8.1c.ru/8.3/xcf/logform\" version=\"2.17\"><broken></Form>\n",
+        );
+        write_file(&module, "// pre-existing module\n");
+        let before = [
+            (root_xml.clone(), fs::read(&root_xml).ok()),
+            (descriptor.clone(), fs::read(&descriptor).ok()),
+            (form_xml.clone(), fs::read(&form_xml).ok()),
+            (module.clone(), fs::read(&module).ok()),
+        ];
+        let args = add_list_form_args(&root_xml, "ListForm");
+
+        let outcome = add_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome
+            .errors
+            .iter()
+            .any(|error| { error.contains("create-only") && error.contains("Form.xml") }));
+        for (path, expected) in before {
+            assert_eq!(fs::read(&path).ok(), expected, "{}", path.display());
+        }
+        let _ = fs::remove_dir_all(&context.cwd);
     }
 
     #[test]
@@ -8446,7 +10484,257 @@ mod tests {
             .trim_start_matches('\u{feff}')
             .to_string();
         assert_eq!(updated, original);
+        assert!(
+            !context.cwd.join("Catalogs/Goods/Forms").exists(),
+            "the platform removes an empty Forms collection directory"
+        );
 
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn remove_form_rejects_path_names_before_deleting_any_target() {
+        for (case, object_name, form_name) in [
+            ("object", "../Goods", "ListForm"),
+            ("form", "Goods", "../ListForm"),
+        ] {
+            let context = temp_context(&format!("remove-path-{case}"));
+            let src_dir = context.cwd.join("src/Catalogs");
+            let root_xml = if case == "object" {
+                context.cwd.join("src/Goods.xml")
+            } else {
+                src_dir.join("Goods.xml")
+            };
+            let object_dir = if case == "object" {
+                context.cwd.join("src/Goods")
+            } else {
+                src_dir.join("Goods")
+            };
+            let forms_dir = object_dir.join("Forms");
+            let form_meta = forms_dir.join(format!("{form_name}.xml"));
+            let form_dir = forms_dir.join(form_name);
+            write_file(&root_xml, &empty_catalog_xml("\n", true));
+            write_file(&form_meta, "<MetaDataObject/>\n");
+            write_file(&form_dir.join("Ext/Form.xml"), "<Form/>\n");
+            let before = [
+                (root_xml.clone(), fs::read(&root_xml).ok()),
+                (form_meta.clone(), fs::read(&form_meta).ok()),
+                (
+                    form_dir.join("Ext/Form.xml"),
+                    fs::read(form_dir.join("Ext/Form.xml")).ok(),
+                ),
+            ];
+            let args = Map::from_iter([
+                ("ObjectName".to_string(), json!(object_name)),
+                ("FormName".to_string(), json!(form_name)),
+                ("SrcDir".to_string(), json!("src/Catalogs")),
+            ]);
+
+            let outcome = remove_form(&args, &context);
+
+            assert!(!outcome.ok, "{case}: {outcome:?}");
+            assert!(outcome.errors.iter().any(|error| {
+                error.contains("XML NCName") && error.contains("single path component")
+            }));
+            for (path, expected) in before {
+                assert_eq!(fs::read(&path).ok(), expected, "{}", path.display());
+            }
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn remove_form_post_write_failure_restores_owner_and_scaffold() {
+        let context = temp_context("remove-post-write-failure");
+        let root_xml = context.cwd.join("src/Catalogs/Goods.xml");
+        let form_meta = context.cwd.join("src/Catalogs/Goods/Forms/ListForm.xml");
+        let form_xml = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ListForm/Ext/Form.xml");
+        let module = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ListForm/Ext/Form/Module.bsl");
+        let owner = empty_catalog_xml("\r\n", false).replace(
+            "<ChildObjects/>",
+            "<ChildObjects>\r\n\t\t\t<Form>ListForm</Form>\r\n\t\t</ChildObjects>",
+        );
+        write_file(&root_xml, &owner);
+        write_file(&form_meta, "<MetaDataObject version=\"2.20\"/>\n");
+        write_file(&form_xml, "<Form version=\"2.20\"/>\n");
+        write_file(&module, "// module\n");
+        let before = [
+            (root_xml.clone(), fs::read(&root_xml).ok()),
+            (form_meta.clone(), fs::read(&form_meta).ok()),
+            (form_xml.clone(), fs::read(&form_xml).ok()),
+            (module.clone(), fs::read(&module).ok()),
+        ];
+        let args = Map::from_iter([
+            ("ObjectName".to_string(), json!("Goods")),
+            ("FormName".to_string(), json!("ListForm")),
+            ("SrcDir".to_string(), json!("src/Catalogs")),
+        ]);
+
+        let outcome = with_commit_failpoint(CommitFailpoint::PostWriteValidation, || {
+            remove_form(&args, &context)
+        });
+
+        assert!(!outcome.ok, "{outcome:?}");
+        for (path, expected) in before {
+            assert_eq!(fs::read(&path).ok(), expected, "{}", path.display());
+        }
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn remove_form_rejects_payload_directory_that_appears_after_absent_probe() {
+        let context = temp_context("remove-late-payload-directory");
+        let root_xml = context.cwd.join("src/Catalogs/Goods.xml");
+        let forms_dir = context.cwd.join("src/Catalogs/Goods/Forms");
+        let form_meta = forms_dir.join("ListForm.xml");
+        let sibling_meta = forms_dir.join("OtherForm.xml");
+        let late_form_dir = forms_dir.join("ListForm");
+        let owner = empty_catalog_xml("\n", true).replace(
+            "\t\t<ChildObjects/>",
+            "\t\t<ChildObjects>\n\t\t\t<Form>ListForm</Form>\n\t\t</ChildObjects>",
+        );
+        write_file(&root_xml, &owner);
+        write_file(
+            &form_meta,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Form/></MetaDataObject>"#,
+        );
+        write_file(
+            &sibling_meta,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Form/></MetaDataObject>"#,
+        );
+        let owner_before = fs::read(&root_xml).unwrap();
+        let descriptor_before = fs::read(&form_meta).unwrap();
+        let late_form_for_hook = late_form_dir.join("Ext/Form.xml");
+        let args = Map::from_iter([
+            ("ObjectName".to_string(), json!("Goods")),
+            ("FormName".to_string(), json!("ListForm")),
+            ("SrcDir".to_string(), json!("src/Catalogs")),
+        ]);
+
+        let outcome = with_before_commit_hook(
+            move |_| {
+                write_file(
+                    &late_form_for_hook,
+                    r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20"/>"#,
+                );
+            },
+            || remove_form(&args, &context),
+        );
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome.errors.join("\n").contains("pair member"),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&root_xml).unwrap(), owner_before);
+        assert_eq!(fs::read(&form_meta).unwrap(), descriptor_before);
+        assert!(late_form_dir.join("Ext/Form.xml").is_file());
+        assert!(sibling_meta.is_file());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn remove_form_prefers_newer_child_over_older_descriptor_without_deleting_either() {
+        let context = temp_context("remove-mixed-format-tree");
+        let root_xml = context.cwd.join("src/Catalogs/Goods.xml");
+        let form_meta = context.cwd.join("src/Catalogs/Goods/Forms/ListForm.xml");
+        let form_xml = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ListForm/Ext/Form.xml");
+        let owner = empty_catalog_xml("\n", true).replace(
+            "\t\t<ChildObjects/>",
+            "\t\t<ChildObjects>\n\t\t\t<Form>ListForm</Form>\n\t\t</ChildObjects>",
+        );
+        write_file(&root_xml, &owner);
+        write_file(
+            &form_meta,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.19"><Form/></MetaDataObject>"#,
+        );
+        write_file(
+            &form_xml,
+            r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.21"/>"#,
+        );
+        let before = [
+            (root_xml.clone(), fs::read(&root_xml).unwrap()),
+            (form_meta.clone(), fs::read(&form_meta).unwrap()),
+            (form_xml.clone(), fs::read(&form_xml).unwrap()),
+        ];
+        let args = Map::from_iter([
+            ("ObjectName".to_string(), json!("Goods")),
+            ("FormName".to_string(), json!("ListForm")),
+            ("SrcDir".to_string(), json!("src/Catalogs")),
+        ]);
+
+        let outcome = remove_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        let diagnostics = outcome.errors.join("\n");
+        assert!(diagnostics.contains("2.21"), "{diagnostics}");
+        assert!(diagnostics.contains("1C 8.5"), "{diagnostics}");
+        assert!(
+            !diagnostics.contains("older than supported"),
+            "{diagnostics}"
+        );
+        for (path, expected) in before {
+            assert_eq!(fs::read(&path).unwrap(), expected, "{}", path.display());
+        }
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn remove_form_rejects_platform_invalid_owner_boolean_without_deleting_scaffold() {
+        let context = temp_context("remove-invalid-owner-boolean");
+        let root_xml = context.cwd.join("src/Catalogs/Goods.xml");
+        let form_meta = context.cwd.join("src/Catalogs/Goods/Forms/ListForm.xml");
+        let form_xml = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ListForm/Ext/Form.xml");
+        let module = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ListForm/Ext/Form/Module.bsl");
+        let invalid_owner = empty_catalog_xml("\n", true)
+            .replace(
+                "\t\t\t<DefaultListForm/>",
+                "\t\t\t<DefaultListForm>Catalog.Goods.Form.ListForm</DefaultListForm>\n\t\t\t<IncludeHelpInContents>truthy</IncludeHelpInContents>",
+            )
+            .replace(
+                "\t\t<ChildObjects/>",
+                "\t\t<ChildObjects>\n\t\t\t<Form>ListForm</Form>\n\t\t</ChildObjects>",
+            );
+        write_file(&root_xml, &invalid_owner);
+        write_file(&form_meta, "<MetaDataObject version=\"2.20\"/>\n");
+        write_file(&form_xml, "<Form version=\"2.20\"/>\n");
+        write_file(&module, "// module\n");
+        let before = [
+            (root_xml.clone(), fs::read(&root_xml).unwrap()),
+            (form_meta.clone(), fs::read(&form_meta).unwrap()),
+            (form_xml.clone(), fs::read(&form_xml).unwrap()),
+            (module.clone(), fs::read(&module).unwrap()),
+        ];
+        let args = Map::from_iter([
+            ("ObjectName".to_string(), json!("Goods")),
+            ("FormName".to_string(), json!("ListForm")),
+            ("SrcDir".to_string(), json!("src/Catalogs")),
+        ]);
+
+        let outcome = remove_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("IncludeHelpInContents")
+                    && error.contains("true or false")),
+            "{outcome:?}"
+        );
+        for (path, expected) in before {
+            assert_eq!(fs::read(&path).unwrap(), expected, "{}", path.display());
+        }
         let _ = fs::remove_dir_all(&context.cwd);
     }
 
@@ -8470,26 +10758,19 @@ mod tests {
             .join("ListForm")
             .join("Ext")
             .join("Form.xml");
-        write_file(
-            &root_xml,
-            r#"<?xml version="1.0" encoding="utf-8"?>
-<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
-	<Catalog uuid="00000000-0000-0000-0000-000000000001">
-		<Properties>
-			<Name>Goods</Name>
-		</Properties>
-		<ChildObjects>
-			<Attribute>
-				<ChildObjects></ChildObjects>
-			</Attribute>
-			<Form>ListForm</Form>
-		</ChildObjects>
-	</Catalog>
-</MetaDataObject>
-"#,
+        let owner = empty_catalog_xml("\n", true).replace(
+            "\t\t<ChildObjects/>",
+            "\t\t<ChildObjects>\n\t\t\t<TabularSection uuid=\"00000000-0000-4000-8000-000000000201\">\n\t\t\t\t<Properties>\n\t\t\t\t\t<Name>Rows</Name>\n\t\t\t\t\t<Synonym/>\n\t\t\t\t\t<Comment/>\n\t\t\t\t\t<ToolTip/>\n\t\t\t\t\t<FillChecking>DontCheck</FillChecking>\n\t\t\t\t</Properties>\n\t\t\t\t<ChildObjects></ChildObjects>\n\t\t\t</TabularSection>\n\t\t\t<Form>ListForm</Form>\n\t\t</ChildObjects>",
         );
-        write_file(&form_meta, "<MetaDataObject/>\n");
-        write_file(&form_content, "<Form/>\n");
+        write_file(&root_xml, &owner);
+        write_file(
+            &form_meta,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Form/></MetaDataObject>"#,
+        );
+        write_file(
+            &form_content,
+            r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20"/>"#,
+        );
 
         let mut args = Map::new();
         args.insert("ObjectName".to_string(), json!("Goods"));
@@ -8523,7 +10804,7 @@ mod tests {
         write_file(
             &form_path,
             r#"<?xml version="1.0" encoding="utf-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
 	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1">
 		<Autofill>true</Autofill>
 	</AutoCommandBar>
@@ -8624,26 +10905,24 @@ mod tests {
             .join("ListForm")
             .join("Ext")
             .join("Form.xml");
+        let owner = empty_catalog_xml("\n", true)
+            .replace(
+                "\t\t\t<DefaultListForm/>",
+                "\t\t\t<DefaultObjectForm>Catalog.Goods.Form.ListForm</DefaultObjectForm>\n\t\t\t<DefaultListForm>Catalog.Goods.Form.ListForm</DefaultListForm>\n\t\t\t<DefaultChoiceForm>Catalog.Goods.Form.ListForm</DefaultChoiceForm>\n\t\t\t<DefaultRecordForm>Catalog.Goods.Form.ListForm</DefaultRecordForm>\n\t\t\t<DefaultForm>Catalog.Goods.Form.OtherForm</DefaultForm>",
+            )
+            .replace(
+                "\t\t<ChildObjects/>",
+                "\t\t<ChildObjects>\n\t\t\t<Form>ListForm</Form>\n\t\t\t<Form>OtherForm</Form>\n\t\t</ChildObjects>",
+            );
+        write_file(&root_xml, &owner);
         write_file(
-            &root_xml,
-            r#"<?xml version="1.0" encoding="utf-8"?>
-<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
-	<Catalog name="Goods">
-		<Forms>
-			<Form>Catalog.Goods.Form.ListForm</Form>
-			<Form>Catalog.Goods.Form.OtherForm</Form>
-		</Forms>
-		<DefaultObjectForm>Catalog.Goods.Form.ListForm</DefaultObjectForm>
-		<DefaultListForm>Catalog.Goods.Form.ListForm</DefaultListForm>
-		<DefaultChoiceForm>Catalog.Goods.Form.ListForm</DefaultChoiceForm>
-		<DefaultRecordForm>Catalog.Goods.Form.ListForm</DefaultRecordForm>
-		<DefaultForm>Catalog.Goods.Form.OtherForm</DefaultForm>
-	</Catalog>
-</MetaDataObject>
-"#,
+            &form_meta,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Form/></MetaDataObject>"#,
         );
-        write_file(&form_meta, "<MetaDataObject/>\n");
-        write_file(&form_content, "<Form/>\n");
+        write_file(
+            &form_content,
+            r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20"/>"#,
+        );
 
         let mut args = Map::new();
         args.insert("ObjectName".to_string(), json!("Goods"));
@@ -8729,7 +11008,7 @@ mod tests {
     {"name": "NewAttribute", "type": "string"}
   ],
   "commands": [
-    {"name": "NewCommand", "title": "New command"}
+    {"name": "NewCommand", "title": "New command", "action": "NewCommand"}
   ],
   "elements": [
     {"input": "NewAttribute", "path": "NewAttribute"}
@@ -8787,7 +11066,7 @@ mod tests {
   "attributes": [
     {
       "name": "ТаблицаДанных",
-      "type": "ValueTable",
+      "type": "ТаблицаЗначений",
       "columns": [
         {"name": "НомерСтроки", "type": "decimal(5,0)"},
         {"name": "Значение", "type": "string(200)"}
@@ -8899,6 +11178,100 @@ mod tests {
     }
 
     #[test]
+    fn edit_form_post_write_failure_restores_the_exact_source_bytes() {
+        let context = temp_context("edit-post-write-rollback");
+        let form_path = context.cwd.join("Form.xml");
+        write_file(&form_path, editable_form_xml(false));
+        let original = fs::read(&form_path).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"attributes": [{"name": "Added", "type": "String"}]}),
+            ),
+        ]);
+
+        let outcome = with_commit_failpoint(CommitFailpoint::PostWriteValidation, || {
+            edit_form(&args, &context)
+        });
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("post-write validation")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_form_rejects_stale_preimage_without_overwriting_concurrent_change() {
+        let context = temp_context("edit-stale-preimage");
+        let form_path = context.cwd.join("Form.xml");
+        let original = editable_contract_form(FORM_LOGFORM_NS, "");
+        write_file(&form_path, &original);
+        let concurrent = original
+            .replace("</Form>", "\t<!-- concurrent change -->\n</Form>")
+            .into_bytes();
+        let hook_path = form_path.clone();
+        let hook_bytes = concurrent.clone();
+        let mut args = form_path_args(&form_path);
+        args.insert(
+            "definition".to_string(),
+            json!({"attributes": [{"name": "Added", "type": "string"}]}),
+        );
+
+        let outcome = with_before_commit_hook(
+            move |path| {
+                assert_eq!(path, hook_path);
+                fs::write(path, &hook_bytes).unwrap();
+            },
+            || edit_form(&args, &context),
+        );
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome.errors.join("\n").contains("changed")
+                || outcome.errors.join("\n").contains("preimage"),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), concurrent);
+        assert!(outcome.changes.is_empty(), "{outcome:?}");
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn edit_form_surfaces_cleanup_warning_after_committed_validation() {
+        let context = temp_context("edit-cleanup-warning");
+        let form_path = context.cwd.join("Form.xml");
+        write_file(&form_path, &editable_contract_form(FORM_LOGFORM_NS, ""));
+        let mut args = form_path_args(&form_path);
+        args.insert(
+            "definition".to_string(),
+            json!({"attributes": [{"name": "Added", "type": "string"}]}),
+        );
+
+        let outcome =
+            with_publish_failpoints(&[PublishCheckpoint::Cleanup], || edit_form(&args, &context));
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert!(outcome
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("injected publication cleanup failure")));
+        assert!(fs::read_to_string(&form_path)
+            .unwrap()
+            .contains("name=\"Added\""));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
     fn form_edit_rejects_malformed_or_unsupported_attribute_columns() {
         let cases = [
             (
@@ -8943,7 +11316,7 @@ mod tests {
             &json_path,
             r#"{
   "commands": [
-    {"name": "RunParityAction", "title": "Run parity action"}
+    {"name": "RunParityAction", "title": "Run parity action", "action": "RunParityAction"}
   ],
   "elements": [
     {
@@ -8998,7 +11371,7 @@ mod tests {
         write_file(
             &form_path,
             r#"<?xml version="1.0" encoding="utf-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.17">
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
 	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
 	<ChildItems>
 		<CommandBar name="ПанельДействий" id="1">
@@ -9074,7 +11447,7 @@ mod tests {
         write_file(
             &form_path,
             r#"<?xml version="1.0" encoding="utf-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.17">
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
 	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
 	<ChildItems>
 		<CommandBar name="ПанельДействий" id="1"/>
@@ -9136,7 +11509,7 @@ mod tests {
         write_file(
             &form_path,
             r#"<?xml version="1.0" encoding="utf-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.17">
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
 	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
 	<ChildItems>
 		<UsualGroup name="ГруппаЗамены" id="1">
@@ -9235,10 +11608,12 @@ mod tests {
         write_file(
             &form_path,
             r#"<?xml version="1.0" encoding="utf-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.17">
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
 	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
 	<ChildItems>
-		<Button name="ExistingButton" id="1"/>
+		<Button name="ExistingButton" id="1">
+			<ExtendedTooltip name="ExistingButtonTooltip" id="2"/>
+		</Button>
 	</ChildItems>
 	<Attributes/>
 	<Commands/>
@@ -9541,7 +11916,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_form_rejects_unparseable_mutation_without_writing_file() {
+    fn edit_form_rejects_invalid_nested_element_enum_without_writing_file() {
         let context = temp_context("edit-invalid-generated-xml");
         let form_path = context.cwd.join("Form.xml");
         let json_path = context.cwd.join("edit.json");
@@ -9562,8 +11937,14 @@ mod tests {
             r#"{
   "elements": [
     {
-      "check": "ФлагПроверки",
-      "checkBoxType": "Bad<Name"
+      "name": "Группа",
+      "group": "Vertical",
+      "children": [
+        {
+          "check": "ФлагПроверки",
+          "checkBoxType": "Bad<Name"
+        }
+      ]
     }
   ]
 }
@@ -9583,7 +11964,8 @@ mod tests {
         let outcome = edit_form(&args, &context);
         assert!(!outcome.ok, "{outcome:?}");
         let stderr = outcome.stderr.unwrap_or_default();
-        assert!(stderr.contains("XML parse error"), "{stderr}");
+        assert!(stderr.contains("checkBoxType"), "{stderr}");
+        assert!(stderr.contains("8.3.27"), "{stderr}");
         assert_eq!(fs::read_to_string(&form_path).unwrap(), original);
 
         let _ = fs::remove_dir_all(&context.cwd);
@@ -10530,6 +12912,98 @@ mod tests {
     }
 
     #[test]
+    fn form_add_emits_platform_8_3_27_root_defaults() {
+        fn root_children(xml: &str) -> Vec<(String, String)> {
+            let document = Document::parse(xml).unwrap();
+            document
+                .root_element()
+                .children()
+                .filter(|node| node.is_element())
+                .map(|node| {
+                    (
+                        node.tag_name().name().to_string(),
+                        node.text().unwrap_or("").trim().to_string(),
+                    )
+                })
+                .collect()
+        }
+
+        for (object_type, object_name, purpose) in [
+            ("Catalog", "Goods", "List"),
+            ("Catalog", "Goods", "Choice"),
+            ("InformationRegister", "Prices", "Record"),
+            ("ExternalDataProcessor", "Processor", "Object"),
+        ] {
+            let xml = form_add_content_xml(object_type, object_name, purpose, "2.20").unwrap();
+            let names = root_children(&xml)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["AutoCommandBar", "Attributes"], "{xml}");
+            assert!(!xml.contains("<Autofill>true</Autofill>"), "{xml}");
+            assert!(!xml.contains("<ChildItems"), "{xml}");
+        }
+
+        let catalog = form_add_content_xml("Catalog", "Goods", "Object", "2.20").unwrap();
+        assert_eq!(
+            root_children(&catalog),
+            [
+                ("UseForFoldersAndItems".to_string(), "Items".to_string()),
+                ("AutoCommandBar".to_string(), String::new()),
+                ("Attributes".to_string(), "".to_string()),
+            ],
+            "{catalog}"
+        );
+
+        let report_defaults = [
+            ("ReportFormType", "Main"),
+            ("AutoShowState", "Auto"),
+            ("ReportResultViewMode", "Auto"),
+            ("ViewModeApplicationOnSetReportResult", "Auto"),
+            ("AutoCommandBar", ""),
+            ("Attributes", ""),
+        ];
+        for object_type in ["Report", "ExternalReport"] {
+            let xml = form_add_content_xml(object_type, "Sales", "Object", "2.20").unwrap();
+            let actual = root_children(&xml);
+            let expected = report_defaults
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{object_type}: {xml}");
+        }
+    }
+
+    #[test]
+    fn form_compile_infers_catalog_object_scope_and_preserves_explicit_scope() {
+        let base = json!({
+            "attributes": [{
+                "name": "Object",
+                "type": "CatalogObject.CorpusCatalog",
+                "main": true
+            }],
+            "elements": [{"input": "Description", "path": "Object.Description"}]
+        });
+
+        let (xml, _) = form_compile_xml(&base, "2.20").unwrap();
+        assert!(
+            xml.contains(
+                "\t<UseForFoldersAndItems>Items</UseForFoldersAndItems>\n\t<AutoCommandBar"
+            ),
+            "{xml}"
+        );
+
+        let mut explicit = base;
+        explicit["properties"] = json!({"useForFoldersAndItems": "FoldersAndItems"});
+        let (xml, _) = form_compile_xml(&explicit, "2.20").unwrap();
+        assert_eq!(xml.matches("<UseForFoldersAndItems>").count(), 1, "{xml}");
+        assert!(
+            xml.contains("<UseForFoldersAndItems>FoldersAndItems</UseForFoldersAndItems>"),
+            "{xml}"
+        );
+    }
+
+    #[test]
     fn form_compile_omits_empty_tooltip_and_button_appearance_values() {
         let definition = json!({
             "elements": [{
@@ -10551,6 +13025,2092 @@ mod tests {
         assert!(!button.contains("<ToolTipRepresentation>"), "{button}");
         assert!(!button.contains("<BackColor>"), "{button}");
         assert!(!button.contains("<Font"), "{button}");
+    }
+
+    #[test]
+    fn form_compile_infers_report_defaults_in_platform_order() {
+        for main_type in [
+            "ReportObject.CorpusReport",
+            "ExternalReportObject.CorpusReport",
+        ] {
+            let definition = json!({
+                "attributes": [{
+                    "name": "Object",
+                    "type": main_type,
+                    "main": true
+                }]
+            });
+
+            let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+            let document = Document::parse(&xml).unwrap();
+            let actual = document
+                .root_element()
+                .children()
+                .filter(|node| node.is_element())
+                .map(|node| {
+                    (
+                        node.tag_name().name().to_string(),
+                        node.text().unwrap_or("").trim().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                actual,
+                [
+                    ("ReportFormType".to_string(), "Main".to_string()),
+                    ("AutoShowState".to_string(), "Auto".to_string()),
+                    ("ReportResultViewMode".to_string(), "Auto".to_string()),
+                    (
+                        "ViewModeApplicationOnSetReportResult".to_string(),
+                        "Auto".to_string(),
+                    ),
+                    ("AutoCommandBar".to_string(), String::new()),
+                    ("Attributes".to_string(), String::new()),
+                ],
+                "{main_type}: {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_compile_places_explicit_auto_title_before_report_defaults() {
+        let definition = json!({
+            "properties": {"autoTitle": false},
+            "attributes": [{
+                "name": "Object",
+                "type": "ReportObject.CorpusReport",
+                "main": true
+            }]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+        let actual = Document::parse(&xml)
+            .unwrap()
+            .root_element()
+            .children()
+            .filter(|node| node.is_element())
+            .take(5)
+            .map(|node| node.tag_name().name().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            [
+                "AutoTitle",
+                "ReportFormType",
+                "AutoShowState",
+                "ReportResultViewMode",
+                "ViewModeApplicationOnSetReportResult",
+            ],
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn form_compile_emits_english_primitive_types_for_8_3_27() {
+        let definition = json!({
+            "attributes": [
+                {"name": "Text", "type": "String"},
+                {"name": "Amount", "type": "Number"},
+                {"name": "Flag", "type": "Boolean"},
+                {"name": "Day", "type": "Date"},
+                {"name": "Moment", "type": "DateTime"}
+            ]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+
+        assert_eq!(
+            xml.matches("<v8:Type>xs:string</v8:Type>").count(),
+            1,
+            "{xml}"
+        );
+        assert_eq!(
+            xml.matches("<v8:Type>xs:decimal</v8:Type>").count(),
+            1,
+            "{xml}"
+        );
+        assert_eq!(
+            xml.matches("<v8:Type>xs:boolean</v8:Type>").count(),
+            1,
+            "{xml}"
+        );
+        assert_eq!(
+            xml.matches("<v8:Type>xs:dateTime</v8:Type>").count(),
+            2,
+            "{xml}"
+        );
+        assert!(xml.contains("<v8:Digits>10</v8:Digits>"), "{xml}");
+        assert!(
+            xml.contains("<v8:FractionDigits>0</v8:FractionDigits>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<v8:DateFractions>Date</v8:DateFractions>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<v8:DateFractions>DateTime</v8:DateFractions>"),
+            "{xml}"
+        );
+        assert!(!xml.contains("<v8:Type>String</v8:Type>"), "{xml}");
+        assert!(!xml.contains("<v8:Type>decimal</v8:Type>"), "{xml}");
+    }
+
+    #[test]
+    fn form_compile_emits_the_documented_8_3_27_type_mappings() {
+        let cases = [
+            ("ValueTable", "<v8:Type>v8:ValueTable</v8:Type>"),
+            ("ValueTree", "<v8:Type>v8:ValueTree</v8:Type>"),
+            ("ValueList", "<v8:Type>v8:ValueListType</v8:Type>"),
+            ("FormattedString", "<v8:Type>v8ui:FormattedString</v8:Type>"),
+            ("Picture", "<v8:Type>v8ui:Picture</v8:Type>"),
+            ("StandardPeriod", "<v8:Type>v8:StandardPeriod</v8:Type>"),
+            (
+                "StandardBeginningDate",
+                "<v8:Type>v8:StandardBeginningDate</v8:Type>",
+            ),
+            ("UUID", "<v8:Type>v8:UUID</v8:Type>"),
+            ("DynamicList", "<v8:Type>cfg:DynamicList</v8:Type>"),
+            ("ConstantsSet", "<v8:Type>cfg:ConstantsSet</v8:Type>"),
+            ("ReportObject", "<v8:Type>cfg:ReportObject</v8:Type>"),
+            (
+                "DataCompositionSettings",
+                "<v8:Type>dcsset:DataCompositionSettings</v8:Type>",
+            ),
+            (
+                "DataCompositionSchema",
+                "<v8:Type>dcssch:DataCompositionSchema</v8:Type>",
+            ),
+            (
+                "DataCompositionComparisonType",
+                "<v8:Type>dcscor:DataCompositionComparisonType</v8:Type>",
+            ),
+            (
+                "DefinedType.Money",
+                "<v8:TypeSet>cfg:DefinedType.Money</v8:TypeSet>",
+            ),
+            (
+                "Characteristic.Goods",
+                "<v8:TypeSet>cfg:Characteristic.Goods</v8:TypeSet>",
+            ),
+            ("AnyRef", "<v8:TypeSet>cfg:AnyRef</v8:TypeSet>"),
+            ("CatalogRef", "<v8:TypeSet>cfg:CatalogRef</v8:TypeSet>"),
+        ];
+
+        for (type_name, expected) in cases {
+            let definition = json!({"attributes": [{"name": "Value", "type": type_name}]});
+            let (xml, _) = form_compile_xml(&definition, "2.20")
+                .unwrap_or_else(|error| panic!("{type_name}: {error}"));
+            assert!(xml.contains(expected), "{type_name}: {xml}");
+        }
+    }
+
+    #[test]
+    fn form_compile_normalizes_documented_russian_type_aliases() {
+        let cases = [
+            ("СписокЗначений", "<v8:Type>v8:ValueListType</v8:Type>"),
+            ("СтандартныйПериод", "<v8:Type>v8:StandardPeriod</v8:Type>"),
+            (
+                "СтандартнаяДатаНачала",
+                "<v8:Type>v8:StandardBeginningDate</v8:Type>",
+            ),
+            ("УникальныйИдентификатор", "<v8:Type>v8:UUID</v8:Type>"),
+            (
+                "Характеристика.Товар",
+                "<v8:TypeSet>cfg:Characteristic.Товар</v8:TypeSet>",
+            ),
+            ("ЛюбаяСсылка", "<v8:TypeSet>cfg:AnyRef</v8:TypeSet>"),
+            ("ЛюбаяСсылкаИБ", "<v8:TypeSet>cfg:AnyIBRef</v8:TypeSet>"),
+        ];
+
+        for (type_name, expected) in cases {
+            let definition = json!({"attributes": [{"name": "Value", "type": type_name}]});
+            let (xml, _) = form_compile_xml(&definition, "2.20")
+                .unwrap_or_else(|error| panic!("{type_name}: {error}"));
+            assert!(xml.contains(expected), "{type_name}: {xml}");
+        }
+    }
+
+    #[test]
+    fn form_compile_supports_every_documented_bare_reference_type_set() {
+        for type_name in form_type_set_names() {
+            let definition = json!({"attributes": [{"name": "Value", "type": type_name}]});
+            let (xml, _) = form_compile_xml(&definition, "2.20")
+                .unwrap_or_else(|error| panic!("{type_name}: {error}"));
+            assert!(
+                xml.contains(&format!("<v8:TypeSet>cfg:{type_name}</v8:TypeSet>")),
+                "{type_name}: {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_compile_emits_local_namespaces_for_special_8_3_27_types() {
+        let cases = [
+            (
+                "mxl:SpreadsheetDocument",
+                "http://v8.1c.ru/8.2/data/spreadsheet",
+            ),
+            (
+                "fd:FormattedDocument",
+                "http://v8.1c.ru/8.2/data/formatted-document",
+            ),
+            ("d5p1:TextDocument", "http://v8.1c.ru/8.1/data/txtedt"),
+            ("d5p1:Chart", "http://v8.1c.ru/8.2/data/chart"),
+            ("d5p1:GanttChart", "http://v8.1c.ru/8.2/data/chart"),
+            ("d5p1:Dendrogram", "http://v8.1c.ru/8.2/data/chart"),
+            (
+                "d5p1:FlowchartContextType",
+                "http://v8.1c.ru/8.2/data/graphscheme",
+            ),
+            ("d5p1:GeographicalSchema", "http://v8.1c.ru/8.2/data/geo"),
+            (
+                "d5p1:DataAnalysisTimeIntervalUnitType",
+                "http://v8.1c.ru/8.2/data/data-analysis",
+            ),
+            ("pdfdoc:PDFDocument", "http://v8.1c.ru/8.3/data/pdf"),
+            ("pl:Planner", "http://v8.1c.ru/8.3/data/planner"),
+        ];
+
+        for (type_name, namespace) in cases {
+            let definition = json!({"attributes": [{"name": "Value", "type": type_name}]});
+            let (xml, _) = form_compile_xml(&definition, "2.20")
+                .unwrap_or_else(|error| panic!("{type_name}: {error}"));
+            let prefix = type_name.split_once(':').unwrap().0;
+            assert!(
+                xml.contains(&format!(
+                    "<v8:Type xmlns:{prefix}=\"{namespace}\">{type_name}</v8:Type>"
+                )),
+                "{type_name}: {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_compile_groups_composite_type_description_children_in_xsd_order() {
+        let type_id = "11111111-2222-4333-8444-555555555555";
+        let definition = json!({
+            "attributes": [{
+                "name": "Value",
+                "type": format!(
+                    "typeid:{type_id} | DefinedType.Money | string(12,fixed) | CatalogRef.Goods | decimal(15,2,nonneg) | time"
+                )
+            }]
+        });
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+        let document = Document::parse(&xml).unwrap();
+        let wrapper = document
+            .descendants()
+            .find(|node| node.has_tag_name("Attribute"))
+            .and_then(|node| form_child(node, "Type"))
+            .unwrap();
+        let names = wrapper
+            .children()
+            .filter(|node| node.is_element())
+            .map(|node| node.tag_name().name().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            [
+                "Type",
+                "Type",
+                "Type",
+                "Type",
+                "TypeSet",
+                "TypeId",
+                "NumberQualifiers",
+                "StringQualifiers",
+                "DateQualifiers",
+            ],
+            "{xml}"
+        );
+        assert!(xml.contains("<v8:AllowedLength>Fixed</v8:AllowedLength>"));
+        assert!(xml.contains("<v8:AllowedSign>Nonnegative</v8:AllowedSign>"));
+        assert!(xml.contains(&format!("<v8:TypeId>{type_id}</v8:TypeId>")));
+    }
+
+    #[test]
+    fn form_compile_rejects_types_outside_the_fixed_8_3_27_contract() {
+        for type_name in [
+            "string(foo)",
+            "string(1025)",
+            "string(0,fixed)",
+            "string(12,other)",
+            "decimal(39,0)",
+            "decimal(10,11)",
+            "decimal(10,2,positive)",
+            "decimal(10.5,2)",
+            "typeid:not-a-uuid",
+            "Unknown",
+            "Unknown.Name",
+            "v8:Unknown",
+            "CatalogRef.",
+            "CatalogRef.Foo.Bar",
+            "String | string(10)",
+            "Date | DateTime",
+            "String || Boolean",
+        ] {
+            let definition = json!({"attributes": [{"name": "Value", "type": type_name}]});
+            let error = form_compile_xml(&definition, "2.20").unwrap_err();
+            assert!(error.contains(type_name), "{type_name}: {error}");
+            assert!(error.contains("8.3.27"), "{type_name}: {error}");
+        }
+    }
+
+    #[test]
+    fn form_type_parameter_boundaries_match_8_3_27() {
+        for type_name in [
+            "string(0)",
+            "string(1024)",
+            "string(12,variable)",
+            "string(12,fixed)",
+            "decimal(0,0)",
+            "decimal(38,0)",
+            "decimal(38,38)",
+            "decimal(38,38,nonneg)",
+        ] {
+            let definition = json!({"attributes": [{"name": "Value", "type": type_name}]});
+            form_compile_xml(&definition, "2.20")
+                .unwrap_or_else(|error| panic!("{type_name}: {error}"));
+        }
+    }
+
+    #[test]
+    fn form_parameters_use_the_same_8_3_27_type_contract() {
+        let type_id = "11111111-2222-4333-8444-555555555555";
+        let definition = json!({
+            "parameters": [{
+                "name": "Choice",
+                "type": format!("typeid:{type_id} | AnyRef | Boolean | string(12,fixed)")
+            }]
+        });
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+        let document = Document::parse(&xml).unwrap();
+        let wrapper = document
+            .descendants()
+            .find(|node| node.has_tag_name("Parameter"))
+            .and_then(|node| form_child(node, "Type"))
+            .unwrap();
+        let names = wrapper
+            .children()
+            .filter(|node| node.is_element())
+            .map(|node| node.tag_name().name())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            ["Type", "Type", "TypeSet", "TypeId", "StringQualifiers"],
+            "{xml}"
+        );
+
+        let invalid = json!({"parameters": [{"name": "Broken", "type": "string(1025)"}]});
+        let error = form_compile_xml(&invalid, "2.20").unwrap_err();
+        assert!(error.contains("string(1025)"), "{error}");
+        assert!(error.contains("8.3.27"), "{error}");
+    }
+
+    #[test]
+    fn form_edit_rejects_invalid_type_without_writing() {
+        let context = temp_context("edit-invalid-8-3-27-type");
+        let form_path = context.cwd.join("Form.xml");
+        let original = event_form_xml(None, "", "", false).into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"attributes": [{"name": "Broken", "type": "UnknownType"}]}),
+            ),
+        ]);
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome.changes.is_empty(), "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("UnknownType") && error.contains("8.3.27")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_format_type_preserves_the_full_roundtrip_contract() {
+        let type_id = "11111111-2222-4333-8444-555555555555";
+        let xml = format!(
+            r#"<Type xmlns:v8="{FORM_V8_NS}" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:d5p1="http://v8.1c.ru/8.2/data/chart">
+                <v8:Type>xs:string</v8:Type>
+                <v8:Type>xs:decimal</v8:Type>
+                <v8:Type>xs:binary</v8:Type>
+                <v8:Type>d5p1:Chart</v8:Type>
+                <v8:TypeSet>cfg:DefinedType.Money</v8:TypeSet>
+                <v8:TypeSet>cfg:AnyRef</v8:TypeSet>
+                <v8:TypeId>{type_id}</v8:TypeId>
+                <v8:NumberQualifiers><v8:Digits>15</v8:Digits><v8:FractionDigits>2</v8:FractionDigits><v8:AllowedSign>Nonnegative</v8:AllowedSign></v8:NumberQualifiers>
+                <v8:StringQualifiers><v8:Length>12</v8:Length><v8:AllowedLength>Fixed</v8:AllowedLength></v8:StringQualifiers>
+            </Type>"#
+        );
+        let document = Document::parse(&xml).unwrap();
+
+        let formatted = form_format_type(document.root_element());
+        assert_eq!(
+            formatted,
+            format!(
+                "string(12,fixed) | decimal(15,2,nonneg) | binary | d5p1:Chart | DefinedType.Money | AnyRef | typeid:{type_id}"
+            )
+        );
+
+        let mut emitted = Vec::new();
+        emit_form_type(&mut emitted, &formatted, "").unwrap();
+        assert!(
+            emitted
+                .iter()
+                .any(|line| line == "\t<v8:Type>xs:binary</v8:Type>"),
+            "{emitted:?}"
+        );
+    }
+
+    #[test]
+    fn form_compile_omits_auto_title_for_the_documented_empty_marker() {
+        let definition = json!({
+            "title": "Corpus form",
+            "properties": {"autoTitle": ""}
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+
+        assert!(xml.contains("<Title>"), "{xml}");
+        assert!(!xml.contains("<AutoTitle"), "{xml}");
+    }
+
+    #[test]
+    fn form_compile_honors_pascal_case_auto_title_alias_during_title_injection() {
+        for (value, expected) in [(json!(false), Some("false")), (json!(""), None)] {
+            let definition = json!({
+                "title": "Corpus form",
+                "properties": {"AutoTitle": value}
+            });
+
+            let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+            let document = Document::parse(&xml).unwrap();
+            let actual = document
+                .root_element()
+                .children()
+                .find(|node| node.has_tag_name("AutoTitle"))
+                .and_then(|node| node.text());
+
+            assert_eq!(actual, expected, "{xml}");
+            assert_eq!(
+                xml.matches("<AutoTitle>").count(),
+                usize::from(expected.is_some())
+            );
+        }
+    }
+
+    #[test]
+    fn form_compile_rejects_unknown_and_duplicate_root_properties() {
+        for value in [json!(1), json!("")] {
+            let unknown = json!({"properties": {"bogus": value}});
+            let error = form_compile_xml(&unknown, "2.20").unwrap_err();
+            assert!(error.contains("unsupported form root property"), "{error}");
+        }
+
+        let duplicate = json!({
+            "properties": {"autoTitle": false, "AutoTitle": true}
+        });
+        let error = form_compile_xml(&duplicate, "2.20").unwrap_err();
+        assert!(error.contains("duplicate form root property"), "{error}");
+    }
+
+    #[test]
+    fn form_compile_rejects_duplicate_report_property_aliases() {
+        for (camel, pascal) in [
+            ("reportFormType", "ReportFormType"),
+            ("autoShowState", "AutoShowState"),
+            ("reportResultViewMode", "ReportResultViewMode"),
+            (
+                "viewModeApplicationOnSetReportResult",
+                "ViewModeApplicationOnSetReportResult",
+            ),
+        ] {
+            let mut properties = Map::new();
+            properties.insert(camel.to_string(), Value::String("Auto".to_string()));
+            properties.insert(pascal.to_string(), Value::String("Auto".to_string()));
+            if camel == "reportFormType" {
+                properties.insert(camel.to_string(), Value::String("Main".to_string()));
+                properties.insert(pascal.to_string(), Value::String("Main".to_string()));
+            }
+            let definition = json!({
+                "properties": properties,
+                "attributes": [{
+                    "name": "Object",
+                    "type": "ReportObject.CorpusReport",
+                    "main": true
+                }]
+            });
+
+            let error = form_compile_xml(&definition, "2.20").unwrap_err();
+            assert!(
+                error.contains("duplicate form root property"),
+                "{camel}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_compile_rejects_empty_string_and_reference_root_properties() {
+        for property in [
+            "settingsStorage",
+            "groupList",
+            "reportResult",
+            "detailsData",
+            "variantAppearance",
+            "customSettingsFolder",
+        ] {
+            let mut properties = Map::new();
+            properties.insert(property.to_string(), Value::String(String::new()));
+            let definition = json!({"properties": properties});
+
+            let error = form_compile_xml(&definition, "2.20").unwrap_err();
+            assert!(error.contains(property), "{property}: {error}");
+            assert!(error.contains("non-empty string"), "{property}: {error}");
+        }
+    }
+
+    #[test]
+    fn form_compile_rejects_root_property_values_outside_8_3_27_enums() {
+        for (property, value) in [
+            ("windowOpeningMode", "Modeless"),
+            ("enterKeyBehavior", "NewLine"),
+            ("saveDataInSettings", "Use"),
+            ("autoTime", "Current"),
+            ("usePostingMode", "Postings"),
+            ("verticalScroll", "Auto"),
+            ("group", "AlwaysVertical"),
+        ] {
+            let definition = json!({"properties": {(property): value}});
+            let error = form_compile_xml(&definition, "2.20").unwrap_err();
+            assert!(error.contains(property), "{property}: {error}");
+            assert!(error.contains("8.3.27"), "{property}: {error}");
+        }
+    }
+
+    #[test]
+    fn form_compile_rejects_element_enum_values_outside_8_3_27_without_writing() {
+        let cases = [
+            (
+                "horizontalAlign",
+                json!({"elements": [{"autoCmdBar": "Bar", "horizontalAlign": "Bogus"}]}),
+            ),
+            (
+                "pagesRepresentation",
+                json!({"elements": [{"pages": "Pages", "pagesRepresentation": "Bogus"}]}),
+            ),
+            (
+                "currentRowUse",
+                json!({"elements": [{"pages": "Pages", "currentRowUse": "Bogus"}]}),
+            ),
+            (
+                "commandBarLocation",
+                json!({"elements": [{"table": "Rows", "commandBarLocation": "Bogus"}]}),
+            ),
+            (
+                "initialTreeView",
+                json!({"elements": [{"table": "Rows", "initialTreeView": "Bogus"}]}),
+            ),
+            (
+                "choiceFoldersAndItems",
+                json!({"elements": [{
+                    "table": "Rows",
+                    "_dynList": true,
+                    "choiceFoldersAndItems": "Bogus"
+                }]}),
+            ),
+            (
+                "updateOnDataChange",
+                json!({"elements": [{
+                    "table": "Rows",
+                    "_dynList": true,
+                    "updateOnDataChange": "Bogus"
+                }]}),
+            ),
+            (
+                "group",
+                json!({"elements": [{"name": "Group", "group": "AlwaysVertical"}]}),
+            ),
+            (
+                "behavior",
+                json!({"elements": [{"group": "Group", "behavior": "Bogus"}]}),
+            ),
+            (
+                "representation",
+                json!({"elements": [{"group": "Group", "representation": "Bogus"}]}),
+            ),
+            (
+                "currentRowUse",
+                json!({"elements": [{"group": "Group", "currentRowUse": "Bogus"}]}),
+            ),
+            (
+                "checkBoxType",
+                json!({"elements": [{"check": "Check", "checkBoxType": "Bogus"}]}),
+            ),
+            (
+                "titleLocation",
+                json!({"elements": [{"check": "Check", "titleLocation": "Bogus"}]}),
+            ),
+            (
+                "titleLocation",
+                json!({"elements": [{"input": "Input", "titleLocation": "Bogus"}]}),
+            ),
+            (
+                "type",
+                json!({"elements": [{"button": "Button", "type": "Bogus"}]}),
+            ),
+            (
+                "representation",
+                json!({"elements": [{"button": "Button", "representation": "Bogus"}]}),
+            ),
+            (
+                "locationInCommandBar",
+                json!({"elements": [{"button": "Button", "locationInCommandBar": "Bogus"}]}),
+            ),
+        ];
+
+        for (index, (field, definition)) in cases.into_iter().enumerate() {
+            let context = temp_context(&format!("compile-invalid-element-enum-{index}"));
+            let definition_path = context.cwd.join("form.json");
+            let form_path = context.cwd.join("Form.xml");
+            let original = b"do-not-replace-invalid-form";
+            write_file(
+                &definition_path,
+                &serde_json::to_string(&definition).unwrap(),
+            );
+            fs::write(&form_path, original).unwrap();
+            let args = Map::from_iter([
+                (
+                    "JsonPath".to_string(),
+                    json!(definition_path.display().to_string()),
+                ),
+                (
+                    "OutputPath".to_string(),
+                    json!(form_path.display().to_string()),
+                ),
+            ]);
+
+            let outcome = compile_form(&args, &context);
+
+            assert!(!outcome.ok, "{field}: {outcome:?}");
+            assert!(
+                outcome.errors.iter().any(|error| {
+                    error.contains(field)
+                        && error.contains("8.3.27")
+                        && (error.contains("Bogus") || error.contains("AlwaysVertical"))
+                }),
+                "{field}: {outcome:?}"
+            );
+            assert!(outcome.changes.is_empty(), "{field}: {outcome:?}");
+            assert!(outcome.artifacts.is_empty(), "{field}: {outcome:?}");
+            assert_eq!(fs::read(&form_path).unwrap(), original, "{field}");
+
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn form_compile_rejects_markup_in_each_element_enum_family_without_writing() {
+        let cases = [
+            (
+                "representation",
+                json!({"elements": [{
+                    "group": "Group",
+                    "representation": "</Representation><Injected/>"
+                }]}),
+            ),
+            (
+                "checkBoxType",
+                json!({"elements": [{
+                    "check": "Check",
+                    "checkBoxType": "</CheckBoxType><Injected/>"
+                }]}),
+            ),
+            (
+                "titleLocation",
+                json!({"elements": [{
+                    "input": "Input",
+                    "titleLocation": "</TitleLocation><Injected/>"
+                }]}),
+            ),
+            (
+                "representation",
+                json!({"elements": [{
+                    "button": "Button",
+                    "representation": "</Representation><Injected/>"
+                }]}),
+            ),
+        ];
+
+        for (index, (field, definition)) in cases.into_iter().enumerate() {
+            let context = temp_context(&format!("compile-markup-element-enum-{index}"));
+            let definition_path = context.cwd.join("form.json");
+            let form_path = context.cwd.join("Form.xml");
+            let original = b"do-not-replace-markup-form";
+            write_file(
+                &definition_path,
+                &serde_json::to_string(&definition).unwrap(),
+            );
+            fs::write(&form_path, original).unwrap();
+            let args = Map::from_iter([
+                (
+                    "JsonPath".to_string(),
+                    json!(definition_path.display().to_string()),
+                ),
+                (
+                    "OutputPath".to_string(),
+                    json!(form_path.display().to_string()),
+                ),
+            ]);
+
+            let outcome = compile_form(&args, &context);
+
+            assert!(!outcome.ok, "{field}: {outcome:?}");
+            assert!(
+                outcome.errors.iter().any(|error| {
+                    error.contains(field) && error.contains("8.3.27") && error.contains("Injected")
+                }),
+                "{field}: {outcome:?}"
+            );
+            assert!(outcome.changes.is_empty(), "{field}: {outcome:?}");
+            assert!(outcome.artifacts.is_empty(), "{field}: {outcome:?}");
+            assert_eq!(fs::read(&form_path).unwrap(), original, "{field}");
+
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn form_compile_accepts_every_8_3_27_element_enum_value() {
+        type EnumDefinition = fn(&str) -> Value;
+        type EnumCase<'a> = (&'a str, &'a [&'a str], EnumDefinition);
+
+        let cases: &[EnumCase<'_>] = &[
+            (
+                "Group",
+                &[
+                    "Horizontal",
+                    "Vertical",
+                    "HorizontalIfPossible",
+                    "AlwaysHorizontal",
+                ],
+                |value| json!({"elements": [{"name": "Group", "group": value}]}),
+            ),
+            (
+                "Behavior",
+                &["Usual", "Collapsible", "PopUp", "Auto"],
+                |value| json!({"elements": [{"group": "Group", "behavior": value}]}),
+            ),
+            (
+                "Representation",
+                &[
+                    "None",
+                    "StrongSeparation",
+                    "WeakSeparation",
+                    "NormalSeparation",
+                    "GroupBox",
+                    "Line",
+                    "Margin",
+                ],
+                |value| json!({"elements": [{"group": "Group", "representation": value}]}),
+            ),
+            (
+                "CurrentRowUse",
+                &["Use", "DontUse", "Auto"],
+                |value| json!({"elements": [{"group": "Group", "currentRowUse": value}]}),
+            ),
+            (
+                "CheckBoxType",
+                &["Auto", "CheckBox", "Tumbler", "Switcher"],
+                |value| json!({"elements": [{"check": "Check", "checkBoxType": value}]}),
+            ),
+            (
+                "TitleLocation",
+                &["None", "Auto", "Left", "Top", "Right", "Bottom"],
+                |value| json!({"elements": [{"input": "Input", "titleLocation": value}]}),
+            ),
+            (
+                "Type",
+                &[
+                    "CommandBarButton",
+                    "UsualButton",
+                    "Hyperlink",
+                    "CommandBarHyperlink",
+                ],
+                |value| json!({"elements": [{"button": "Button", "type": value}]}),
+            ),
+            (
+                "Representation",
+                &["Text", "Picture", "PictureAndText", "Auto"],
+                |value| json!({"elements": [{"button": "Button", "representation": value}]}),
+            ),
+            (
+                "LocationInCommandBar",
+                &[
+                    "Auto",
+                    "InAdditionalSubmenu",
+                    "InCommandBar",
+                    "InCommandBarAndInAdditionalSubmenu",
+                ],
+                |value| json!({"elements": [{"button": "Button", "locationInCommandBar": value}]}),
+            ),
+        ];
+
+        for (xml_name, values, definition) in cases {
+            for value in *values {
+                let (xml, _) = form_compile_xml(&definition(value), "2.20")
+                    .unwrap_or_else(|error| panic!("{xml_name}={value}: {error}"));
+                assert!(
+                    xml.contains(&format!("<{xml_name}>{value}</{xml_name}>")),
+                    "{xml_name}={value}: {xml}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn form_element_emitters_escape_enum_text_when_preflight_is_bypassed() {
+        let mut lines = vec!["<Form>".to_string()];
+        let mut ids = FormIdAllocator::new();
+        let check = json!({
+            "checkBoxType": "</CheckBoxType><Injected/>",
+            "titleLocation": "</TitleLocation><Injected/>"
+        });
+        emit_form_check(
+            &mut lines,
+            check.as_object().unwrap(),
+            "Check",
+            "\t",
+            &mut ids,
+        );
+        let input = json!({"titleLocation": "</TitleLocation><Injected/>"});
+        emit_form_input(
+            &mut lines,
+            input.as_object().unwrap(),
+            "Input",
+            "\t",
+            &mut ids,
+        )
+        .unwrap();
+        lines.push("</Form>".to_string());
+        let xml = lines.join("\n");
+
+        Document::parse(&xml).unwrap_or_else(|error| panic!("{error}: {xml}"));
+        assert!(!xml.contains("<Injected/>"), "{xml}");
+        assert!(xml.contains("&lt;Injected/&gt;"), "{xml}");
+    }
+
+    #[test]
+    fn form_compile_rejects_noncanonical_8_3_27_root_uint32_values() {
+        for property in ["width", "height", "scale"] {
+            for value in [json!(-1), json!(1.5), json!(4_294_967_296_u64)] {
+                let definition = json!({"properties": {(property): value}});
+
+                let error = form_compile_xml(&definition, "2.20").unwrap_err();
+
+                assert!(error.contains(property), "{property}: {error}");
+                assert!(error.contains("0..=4294967295"), "{property}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn form_compile_accepts_8_3_27_root_uint32_boundaries() {
+        let definition = json!({
+            "properties": {
+                "width": 0,
+                "height": 4_294_967_295_u64,
+                "scale": 4_294_967_295_u64
+            }
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+
+        assert!(xml.contains("<Width>0</Width>"), "{xml}");
+        assert!(xml.contains("<Height>4294967295</Height>"), "{xml}");
+        assert!(xml.contains("<Scale>4294967295</Scale>"), "{xml}");
+    }
+
+    #[test]
+    fn form_compile_preserves_explicit_report_defaults_without_duplicates() {
+        let definition = json!({
+            "properties": {
+                "ReportFormType": "Settings",
+                "autoShowState": "DontShow",
+                "ReportResultViewMode": "Auto",
+                "viewModeApplicationOnSetReportResult": "Auto"
+            },
+            "attributes": [{
+                "name": "Object",
+                "type": "ReportObject.CorpusReport",
+                "main": true
+            }]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+        let document = Document::parse(&xml).unwrap();
+        let actual = document
+            .root_element()
+            .children()
+            .filter(|node| node.is_element())
+            .take(4)
+            .map(|node| {
+                (
+                    node.tag_name().name().to_string(),
+                    node.text().unwrap_or("").trim().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            [
+                ("ReportFormType".to_string(), "Settings".to_string()),
+                ("AutoShowState".to_string(), "DontShow".to_string()),
+                ("ReportResultViewMode".to_string(), "Auto".to_string()),
+                (
+                    "ViewModeApplicationOnSetReportResult".to_string(),
+                    "Auto".to_string(),
+                ),
+            ],
+            "{xml}"
+        );
+        for tag in [
+            "ReportFormType",
+            "AutoShowState",
+            "ReportResultViewMode",
+            "ViewModeApplicationOnSetReportResult",
+        ] {
+            assert_eq!(xml.matches(&format!("<{tag}>")).count(), 1, "{xml}");
+        }
+    }
+
+    #[test]
+    fn form_compile_emits_every_supported_8_3_27_binding_path_property() {
+        let definition = json!({
+            "attributes": [
+                {"name": "Value", "type": "String"},
+                {
+                    "name": "Rows",
+                    "type": "ValueTable",
+                    "columns": [
+                        {"name": "Value", "type": "String"},
+                        {"name": "Presentation", "type": "String"},
+                        {"name": "Picture", "type": "Number"}
+                    ]
+                }
+            ],
+            "elements": [
+                {
+                    "group": "Header",
+                    "titleDataPath": "Value"
+                },
+                {
+                    "input": "Editor",
+                    "path": "Rows",
+                    "footerDataPath": "Value",
+                    "multipleValueDataPath": "Rows.Value",
+                    "multipleValuePresentDataPath": "Rows.Presentation",
+                    "multipleValuePictureDataPath": "Rows.Picture"
+                },
+                {
+                    "table": "Rows",
+                    "path": "Rows",
+                    "rowPictureDataPath": "Rows.Picture"
+                }
+            ]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+
+        for (tag, value) in [
+            ("DataPath", "Rows"),
+            ("TitleDataPath", "Value"),
+            ("FooterDataPath", "Value"),
+            ("MultipleValueDataPath", "Rows.Value"),
+            ("MultipleValuePresentDataPath", "Rows.Presentation"),
+            ("RowPictureDataPath", "Rows.Picture"),
+            ("MultipleValuePictureDataPath", "Rows.Picture"),
+        ] {
+            assert!(
+                xml.contains(&format!("<{tag}>{value}</{tag}>")),
+                "{tag}: {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_compile_emits_input_dimensions_before_multiple_value_paths_in_8_3_27_order() {
+        let definition = json!({
+            "attributes": [{
+                "name": "Rows",
+                "type": "ValueTable",
+                "columns": [
+                    {"name": "Value", "type": "String"},
+                    {"name": "Presentation", "type": "String"},
+                    {"name": "Picture", "type": "Number"}
+                ]
+            }],
+            "elements": [{
+                "input": "Editor",
+                "path": "Rows",
+                "multipleValueDataPath": "Rows.Value",
+                "multipleValuePresentDataPath": "Rows.Presentation",
+                "multipleValuePictureDataPath": "Rows.Picture",
+                "width": 10,
+                "height": 20
+            }]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+        let document = Document::parse(&xml).unwrap();
+        let input = document
+            .descendants()
+            .find(|node| node.has_tag_name((FORM_LOGFORM_NS, "InputField")))
+            .unwrap();
+        let relevant = input
+            .children()
+            .filter(|node| node.is_element())
+            .map(|node| node.tag_name().name())
+            .filter(|name| {
+                [
+                    "DataPath",
+                    "Width",
+                    "Height",
+                    "MultipleValueDataPath",
+                    "MultipleValuePictureDataPath",
+                    "MultipleValuePresentDataPath",
+                ]
+                .contains(name)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            relevant,
+            [
+                "DataPath",
+                "Width",
+                "Height",
+                "MultipleValueDataPath",
+                "MultipleValuePictureDataPath",
+                "MultipleValuePresentDataPath",
+            ],
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn form_compile_emits_valuetable_columns_used_by_multiple_value_paths() {
+        let definition = json!({
+            "attributes": [{
+                "name": "Rows",
+                "type": "ValueTable",
+                "columns": [
+                    {"name": "Value", "type": "String"},
+                    {"name": "Presentation", "type": "String"},
+                    {"name": "Picture", "type": "Number"}
+                ]
+            }],
+            "elements": [{
+                "input": "Editor",
+                "path": "Rows",
+                "multipleValueDataPath": "Rows.Value",
+                "multipleValuePresentDataPath": "Rows.Presentation",
+                "multipleValuePictureDataPath": "Rows.Picture"
+            }]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+
+        let document = Document::parse(&xml).unwrap();
+        let attribute = document
+            .descendants()
+            .find(|node| {
+                node.has_tag_name((FORM_LOGFORM_NS, "Attribute"))
+                    && node.attribute("name") == Some("Rows")
+            })
+            .unwrap();
+        let columns = attribute
+            .descendants()
+            .filter(|node| node.has_tag_name((FORM_LOGFORM_NS, "Column")))
+            .filter_map(|node| node.attribute("name"))
+            .collect::<Vec<_>>();
+        assert_eq!(columns, ["Value", "Presentation", "Picture"], "{xml}");
+    }
+
+    #[test]
+    fn form_compile_rejects_xsd_invalid_attribute_columns_without_mutation() {
+        let cases = [
+            (
+                "scalar-columns",
+                json!({
+                    "attributes": [{
+                        "name": "Scalar",
+                        "type": "String",
+                        "columns": [{"name": "Value", "type": "String"}]
+                    }]
+                }),
+                "columns are supported only for ValueTable or ValueTree",
+            ),
+            (
+                "duplicate-columns",
+                json!({
+                    "attributes": [{
+                        "name": "Rows",
+                        "type": "ValueTable",
+                        "columns": [
+                            {"name": "Value", "type": "String"},
+                            {"name": "Value", "type": "Number"}
+                        ]
+                    }]
+                }),
+                "Duplicate column name 'Value'",
+            ),
+            (
+                "empty-column-name",
+                json!({
+                    "attributes": [{
+                        "name": "Rows",
+                        "type": "ValueTree",
+                        "columns": [{"name": " ", "type": "String"}]
+                    }]
+                }),
+                "requires non-empty name",
+            ),
+        ];
+
+        for (case, definition, expected_error) in cases {
+            let context = temp_context(&format!("compile-invalid-attribute-columns-{case}"));
+            let definition_path = context.cwd.join("form.json");
+            let form_path = context.cwd.join("Form.xml");
+            let original =
+                br#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20"/>"#.to_vec();
+            write_file(
+                &definition_path,
+                &serde_json::to_string(&definition).unwrap(),
+            );
+            fs::write(&form_path, &original).unwrap();
+            let args = Map::from_iter([
+                (
+                    "JsonPath".to_string(),
+                    json!(definition_path.display().to_string()),
+                ),
+                (
+                    "OutputPath".to_string(),
+                    json!(form_path.display().to_string()),
+                ),
+            ]);
+
+            let outcome = compile_form(&args, &context);
+
+            assert!(!outcome.ok, "{case}: {outcome:?}");
+            assert!(
+                outcome
+                    .errors
+                    .iter()
+                    .any(|error| error.contains(expected_error)),
+                "{case}: {outcome:?}"
+            );
+            assert_eq!(fs::read(&form_path).unwrap(), original, "{case}");
+            assert!(outcome.changes.is_empty(), "{case}: {outcome:?}");
+            assert!(outcome.artifacts.is_empty(), "{case}: {outcome:?}");
+            assert!(outcome.stdout.is_none(), "{case}: {outcome:?}");
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn form_compile_accepts_supported_collection_type_aliases_with_columns() {
+        for type_name in [
+            "valuetable",
+            "ТаблицаЗначений",
+            "valuetree",
+            "ДеревоЗначений",
+        ] {
+            let definition = json!({
+                "attributes": [{
+                    "name": "Rows",
+                    "type": type_name,
+                    "columns": [{"name": "Value", "type": "String"}]
+                }]
+            });
+
+            let (xml, _) = form_compile_xml(&definition, "2.20")
+                .unwrap_or_else(|error| panic!("{type_name}: {error}"));
+
+            assert!(xml.contains("<Columns>"), "{type_name}: {xml}");
+        }
+    }
+
+    #[test]
+    fn form_compile_rejects_multiple_value_paths_for_scalar_input() {
+        let definition = json!({
+            "attributes": [{"name": "Value", "type": "String"}],
+            "elements": [{
+                "input": "Editor",
+                "path": "Value",
+                "multipleValueDataPath": "Value.Item"
+            }]
+        });
+
+        let error = form_compile_xml(&definition, "2.20").unwrap_err();
+
+        assert!(error.contains("MultipleValueDataPath"), "{error}");
+        assert!(error.contains("collection"), "{error}");
+        assert!(error.contains("Value"), "{error}");
+    }
+
+    #[test]
+    fn form_compile_rejects_multiple_value_paths_outside_the_input_collection() {
+        for invalid_path in ["Other.Value", "Rows"] {
+            let definition = json!({
+                "attributes": [
+                    {
+                        "name": "Rows",
+                        "type": "ValueTable",
+                        "columns": [{"name": "Value", "type": "String"}]
+                    },
+                    {
+                        "name": "Other",
+                        "type": "ValueTable",
+                        "columns": [{"name": "Value", "type": "String"}]
+                    }
+                ],
+                "elements": [{
+                    "input": "Editor",
+                    "path": "Rows",
+                    "multipleValueDataPath": invalid_path
+                }]
+            });
+
+            let error = form_compile_xml(&definition, "2.20").unwrap_err();
+
+            assert!(
+                error.contains("MultipleValueDataPath"),
+                "{invalid_path}: {error}"
+            );
+            assert!(error.contains("Rows"), "{invalid_path}: {error}");
+            assert!(error.contains("subpath"), "{invalid_path}: {error}");
+        }
+    }
+
+    #[test]
+    fn form_compile_rejects_unknown_multiple_value_collection_column() {
+        let definition = json!({
+            "attributes": [{
+                "name": "Rows",
+                "type": "ValueTable",
+                "columns": [{"name": "Value", "type": "String"}]
+            }],
+            "elements": [{
+                "input": "Editor",
+                "path": "Rows",
+                "multipleValueDataPath": "Rows.Missing"
+            }]
+        });
+
+        let error = form_compile_xml(&definition, "2.20").unwrap_err();
+
+        assert!(error.contains("MultipleValueDataPath"), "{error}");
+        assert!(error.contains("Missing"), "{error}");
+        assert!(error.contains("column"), "{error}");
+    }
+
+    #[test]
+    fn form_compile_emits_group_title_path_before_current_row_use() {
+        let definition = json!({
+            "attributes": [{"name": "Value", "type": "String"}],
+            "elements": [{
+                "group": "Header",
+                "titleDataPath": "Value",
+                "currentRowUse": "DontUse"
+            }]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+        let document = Document::parse(&xml).unwrap();
+        let group = document
+            .descendants()
+            .find(|node| node.has_tag_name((FORM_LOGFORM_NS, "UsualGroup")))
+            .unwrap();
+        let relevant = group
+            .children()
+            .filter(|node| node.is_element())
+            .map(|node| node.tag_name().name())
+            .filter(|name| ["TitleDataPath", "CurrentRowUse"].contains(name))
+            .collect::<Vec<_>>();
+
+        assert_eq!(relevant, ["TitleDataPath", "CurrentRowUse"], "{xml}");
+    }
+
+    #[test]
+    fn form_compile_rejects_header_data_path_for_usual_group() {
+        let definition = json!({
+            "attributes": [{"name": "Value", "type": "String"}],
+            "elements": [{
+                "group": "Header",
+                "headerDataPath": "Value"
+            }]
+        });
+
+        let error = form_compile_xml(&definition, "2.20").unwrap_err();
+
+        assert!(error.contains("HeaderDataPath"), "{error}");
+        assert!(error.contains("UsualGroup"), "{error}");
+        assert!(error.contains("8.3.27"), "{error}");
+    }
+
+    #[test]
+    fn form_compile_rejects_popup_group_with_line_representation() {
+        let definition = json!({
+            "elements": [{
+                "group": "Header",
+                "behavior": "PopUp",
+                "representation": "Line"
+            }]
+        });
+
+        let error = form_compile_xml(&definition, "2.20").unwrap_err();
+
+        assert!(error.contains("PopUp"), "{error}");
+        assert!(error.contains("Line"), "{error}");
+        assert!(error.contains("8.3.27"), "{error}");
+    }
+
+    #[test]
+    fn form_compile_emits_checkbox_title_location_before_checkbox_type() {
+        let definition = json!({
+            "elements": [{
+                "check": "Enabled",
+                "titleLocation": "Bottom",
+                "checkBoxType": "Tumbler"
+            }]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+        let document = Document::parse(&xml).unwrap();
+        let check = document
+            .descendants()
+            .find(|node| node.has_tag_name((FORM_LOGFORM_NS, "CheckBoxField")))
+            .unwrap();
+        let relevant = check
+            .children()
+            .filter(|node| node.is_element())
+            .map(|node| node.tag_name().name())
+            .filter(|name| ["TitleLocation", "CheckBoxType"].contains(name))
+            .collect::<Vec<_>>();
+
+        assert_eq!(relevant, ["TitleLocation", "CheckBoxType"], "{xml}");
+    }
+
+    #[test]
+    fn form_compile_emits_button_representation_before_command_name() {
+        let definition = json!({
+            "elements": [{
+                "button": "Run",
+                "command": "Run",
+                "representation": "Text"
+            }]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+        let document = Document::parse(&xml).unwrap();
+        let button = document
+            .descendants()
+            .find(|node| node.has_tag_name((FORM_LOGFORM_NS, "Button")))
+            .unwrap();
+        let relevant = button
+            .children()
+            .filter(|node| node.is_element())
+            .map(|node| node.tag_name().name())
+            .filter(|name| ["Representation", "CommandName"].contains(name))
+            .collect::<Vec<_>>();
+
+        assert_eq!(relevant, ["Representation", "CommandName"], "{xml}");
+    }
+
+    #[test]
+    fn form_compile_emits_related_row_picture_path_before_nil_row_filter() {
+        let definition = json!({
+            "attributes": [{
+                "name": "Rows",
+                "type": "ValueTable",
+                "columns": [{"name": "Picture", "type": "Number"}]
+            }],
+            "elements": [{
+                "table": "Rows",
+                "path": "Rows",
+                "rowPictureDataPath": "Rows.Picture"
+            }]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+        let document = Document::parse(&xml).unwrap();
+        let table = document
+            .descendants()
+            .find(|node| node.has_tag_name((FORM_LOGFORM_NS, "Table")))
+            .unwrap();
+        let relevant = table
+            .children()
+            .filter(|node| node.is_element())
+            .filter(|node| {
+                ["DataPath", "RowFilter", "RowPictureDataPath"].contains(&node.tag_name().name())
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            relevant
+                .iter()
+                .map(|node| node.tag_name().name())
+                .collect::<Vec<_>>(),
+            ["DataPath", "RowPictureDataPath", "RowFilter"],
+            "{xml}"
+        );
+        assert_eq!(
+            relevant[2].attribute(("http://www.w3.org/2001/XMLSchema-instance", "nil")),
+            Some("true"),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn form_compile_rejects_unrelated_row_picture_data_path() {
+        let definition = json!({
+            "attributes": [
+                {"name": "Rows", "type": "ValueTable"},
+                {"name": "Picture", "type": "Number"}
+            ],
+            "elements": [{
+                "table": "Rows",
+                "path": "Rows",
+                "rowPictureDataPath": "Picture"
+            }]
+        });
+
+        let error = form_compile_xml(&definition, "2.20").unwrap_err();
+
+        assert!(error.contains("RowPictureDataPath"), "{error}");
+        assert!(error.contains("Rows"), "{error}");
+        assert!(error.contains("subpath"), "{error}");
+    }
+
+    #[test]
+    fn form_compile_rejects_noncanonical_input_uint32_values() {
+        for property in ["width", "height"] {
+            for value in [json!(-1), json!(1.5), json!(4_294_967_296_u64), json!("10")] {
+                let definition = json!({
+                    "elements": [{"input": "Editor", (property): value}]
+                });
+
+                let error = form_compile_xml(&definition, "2.20").unwrap_err();
+
+                assert!(error.contains(property), "{property}: {error}");
+                assert!(error.contains("0..=4294967295"), "{property}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn form_compile_accepts_input_uint32_boundaries() {
+        let definition = json!({
+            "elements": [{
+                "input": "Editor",
+                "width": 0,
+                "height": 4_294_967_295_u64
+            }]
+        });
+
+        let (xml, _) = form_compile_xml(&definition, "2.20").unwrap();
+
+        assert!(xml.contains("<Width>0</Width>"), "{xml}");
+        assert!(xml.contains("<Height>4294967295</Height>"), "{xml}");
+    }
+
+    #[test]
+    fn form_compile_rejects_missing_roots_for_all_binding_properties() {
+        for (json_key, xml_tag) in [
+            ("path", "DataPath"),
+            ("titleDataPath", "TitleDataPath"),
+            ("footerDataPath", "FooterDataPath"),
+            ("multipleValueDataPath", "MultipleValueDataPath"),
+            (
+                "multipleValuePresentDataPath",
+                "MultipleValuePresentDataPath",
+            ),
+            ("rowPictureDataPath", "RowPictureDataPath"),
+            (
+                "multipleValuePictureDataPath",
+                "MultipleValuePictureDataPath",
+            ),
+        ] {
+            let mut element = match json_key {
+                "titleDataPath" => json!({"group": "Header"}),
+                "rowPictureDataPath" => json!({"table": "Rows", "path": "Rows"}),
+                _ => json!({"input": "Value"}),
+            };
+            element[json_key] = json!("Missing.Value");
+            let definition = json!({
+                "attributes": [{"name": "Rows", "type": "ValueTable"}],
+                "elements": [element]
+            });
+
+            let Err(error) = form_compile_xml(&definition, "2.20") else {
+                panic!("{json_key} unexpectedly passed validation");
+            };
+            assert!(error.contains(xml_tag), "{json_key}: {error}");
+            assert!(error.contains("Missing"), "{json_key}: {error}");
+        }
+    }
+
+    #[test]
+    fn form_compile_uses_shared_binding_path_semantics() {
+        for path in ["Rows[0].Value", "~Rows.Value", "123", "1/2:dead-beef"] {
+            let definition = json!({
+                "attributes": [{"name": "Rows", "type": "ValueTable"}],
+                "elements": [{"input": "Value", "path": path}]
+            });
+            form_compile_xml(&definition, "2.20").unwrap_or_else(|error| panic!("{path}: {error}"));
+        }
+
+        let items_path = json!({
+            "attributes": [{"name": "Rows", "type": "ValueTable"}],
+            "elements": [{
+                "table": "Rows",
+                "path": "Rows",
+                "columns": [{
+                    "input": "Value",
+                    "path": "Items.Rows.CurrentData.Value"
+                }]
+            }]
+        });
+        form_compile_xml(&items_path, "2.20").unwrap();
+
+        for opaque_table_path in ["123", "1/2:dead-beef"] {
+            let opaque_items_path = json!({
+                "attributes": [{"name": "Rows", "type": "ValueTable"}],
+                "elements": [{
+                    "table": "Rows",
+                    "path": opaque_table_path,
+                    "columns": [{
+                        "input": "Value",
+                        "path": "Items.Rows.CurrentData.Value"
+                    }]
+                }]
+            });
+            form_compile_xml(&opaque_items_path, "2.20")
+                .unwrap_or_else(|error| panic!("{opaque_table_path}: {error}"));
+        }
+
+        let missing_table = json!({
+            "attributes": [{"name": "Rows", "type": "ValueTable"}],
+            "elements": [{
+                "input": "Value",
+                "path": "Items.Unknown.CurrentData.Value"
+            }]
+        });
+        let Err(error) = form_compile_xml(&missing_table, "2.20") else {
+            panic!("missing Items table unexpectedly passed validation");
+        };
+        assert!(
+            error.contains("table element 'Unknown' not found"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn form_compile_owner_read_failure_does_not_publish_new_or_replacement_form() {
+        for existing_output in [false, true] {
+            let context = temp_context(if existing_output {
+                "compile-owner-read-failure-replace"
+            } else {
+                "compile-owner-read-failure-create"
+            });
+            let definition_path = context.cwd.join("form.json");
+            let owner_path = context.cwd.join("src/Catalogs/Goods.xml");
+            let output_path = context
+                .cwd
+                .join("src/Catalogs/Goods/Forms/ItemForm/Ext/Form.xml");
+            write_file(&definition_path, "{}");
+            fs::create_dir_all(&owner_path).unwrap();
+            if existing_output {
+                write_file(
+                    &output_path,
+                    r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20"/>"#,
+                );
+            }
+            let output_before = fs::read(&output_path).ok();
+            let args = Map::from_iter([
+                (
+                    "JsonPath".to_string(),
+                    json!(definition_path.display().to_string()),
+                ),
+                (
+                    "OutputPath".to_string(),
+                    json!(output_path.display().to_string()),
+                ),
+            ]);
+
+            let outcome = compile_form(&args, &context);
+
+            assert!(!outcome.ok, "existing={existing_output}: {outcome:?}");
+            assert!(
+                outcome
+                    .errors
+                    .iter()
+                    .any(|error| error.contains(
+                        "form parent metadata owner is not a regular file"
+                    )),
+                "existing={existing_output}: {outcome:?}"
+            );
+            assert_eq!(
+                fs::read(&output_path).ok(),
+                output_before,
+                "existing={existing_output}"
+            );
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn form_compile_directly_rejects_existing_wrong_root_without_write() {
+        let context = temp_context("compile-existing-wrong-root");
+        let definition_path = context.cwd.join("form.json");
+        let output_path = context.cwd.join("Form.xml");
+        write_file(&definition_path, "{}");
+        let original = b"<garbage/>".to_vec();
+        fs::write(&output_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(output_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = compile_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("declared platform XML target root")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&output_path).unwrap(), original);
+        assert!(outcome.changes.is_empty(), "{outcome:?}");
+        assert!(outcome.artifacts.is_empty(), "{outcome:?}");
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_compile_post_write_failure_restores_owner_and_new_or_replacement_form() {
+        for existing_output in [false, true] {
+            let context = temp_context(if existing_output {
+                "compile-post-write-replace"
+            } else {
+                "compile-post-write-create"
+            });
+            let definition_path = context.cwd.join("form.json");
+            let owner_path = context.cwd.join("src/Catalogs/Goods.xml");
+            let output_path = context
+                .cwd
+                .join("src/Catalogs/Goods/Forms/ItemForm/Ext/Form.xml");
+            write_file(&definition_path, "{}");
+            write_file(&owner_path, &empty_catalog_xml("\r\n", false));
+            if existing_output {
+                write_file(
+                    &output_path,
+                    r#"<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20"/>"#,
+                );
+            }
+            let owner_before = fs::read(&owner_path).unwrap();
+            let output_before = fs::read(&output_path).ok();
+            let args = Map::from_iter([
+                (
+                    "JsonPath".to_string(),
+                    json!(definition_path.display().to_string()),
+                ),
+                (
+                    "OutputPath".to_string(),
+                    json!(output_path.display().to_string()),
+                ),
+            ]);
+
+            let outcome = with_commit_failpoint(CommitFailpoint::PostWriteValidation, || {
+                compile_form(&args, &context)
+            });
+
+            assert!(!outcome.ok, "existing={existing_output}: {outcome:?}");
+            assert!(
+                outcome
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("post-write validation")),
+                "existing={existing_output}: {outcome:?}"
+            );
+            assert_eq!(fs::read(&owner_path).unwrap(), owner_before);
+            assert_eq!(
+                fs::read(&output_path).ok(),
+                output_before,
+                "existing={existing_output}"
+            );
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn form_compile_rolls_back_if_unchanged_parent_owner_changes_during_publication() {
+        let context = temp_context("compile-parent-owner-race");
+        let source = context.cwd.join("src");
+        let definition_path = context.cwd.join("form.json");
+        let configuration_path = source.join("Configuration.xml");
+        let owner_path = source.join("Catalogs/Goods.xml");
+        let output_path = source.join("Catalogs/Goods/Forms/ItemForm/Ext/Form.xml");
+        write_file(
+            &context.cwd.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+        );
+        write_file(
+            &configuration_path,
+            "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\"><Configuration/></MetaDataObject>",
+        );
+        write_file(&definition_path, "{}");
+        let owner = register_form_in_object_text(&empty_catalog_xml("\n", true), "ItemForm");
+        write_file(&owner_path, &owner);
+        let concurrent_owner = owner
+            .replace(
+                "</MetaDataObject>",
+                "\t<!-- concurrent semantic owner change -->\n</MetaDataObject>",
+            )
+            .into_bytes();
+        let owner_for_hook = owner_path.clone();
+        let owner_bytes_for_hook = concurrent_owner.clone();
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(output_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = with_before_commit_hook(
+            move |_| fs::write(&owner_for_hook, &owner_bytes_for_hook).unwrap(),
+            || compile_form(&args, &context),
+        );
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome.errors.join("\n").contains("read guard"),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&owner_path).unwrap(), concurrent_owner);
+        assert!(!output_path.exists());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_compile_rejects_supported_parent_owner_that_appears_after_probe() {
+        let context = temp_context("compile-supported-parent-owner-appears");
+        let definition_path = context.cwd.join("form.json");
+        let owner_path = context.cwd.join("src/Catalogs/Goods.xml");
+        let output_path = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ItemForm/Ext/Form.xml");
+        write_file(&definition_path, "{}");
+        let supported_owner = empty_catalog_xml("\n", true).into_bytes();
+        let owner_for_hook = owner_path.clone();
+        let supported_for_hook = supported_owner.clone();
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(output_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = with_form_compile_after_parent_owner_probe_hook(
+            move |_| {
+                fs::create_dir_all(owner_for_hook.parent().unwrap()).unwrap();
+                fs::write(&owner_for_hook, &supported_for_hook).unwrap();
+            },
+            || compile_form(&args, &context),
+        );
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome.errors.join("\n").contains("absence guard"),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&owner_path).unwrap(), supported_owner);
+        assert!(!output_path.exists());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_compile_rejects_newer_parent_owner_that_appears_after_probe() {
+        let context = temp_context("compile-parent-owner-appears");
+        let definition_path = context.cwd.join("form.json");
+        let owner_path = context.cwd.join("src/Catalogs/Goods.xml");
+        let output_path = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/ItemForm/Ext/Form.xml");
+        write_file(&definition_path, "{}");
+        let newer_owner = empty_catalog_xml("\n", true)
+            .replacen(r#"version="2.20""#, r#"version="2.21""#, 1)
+            .into_bytes();
+        let owner_for_hook = owner_path.clone();
+        let newer_for_hook = newer_owner.clone();
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(output_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = with_form_compile_after_parent_owner_probe_hook(
+            move |_| {
+                fs::create_dir_all(owner_for_hook.parent().unwrap()).unwrap();
+                fs::write(&owner_for_hook, &newer_for_hook).unwrap();
+            },
+            || compile_form(&args, &context),
+        );
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome.errors.join("\n").contains("2.21"), "{outcome:?}");
+        assert_eq!(fs::read(&owner_path).unwrap(), newer_owner);
+        assert!(!output_path.exists());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_compile_exact_binds_an_explicit_from_object_derivation_source() {
+        let context = temp_context("compile-explicit-source-race");
+        let object_path = context.cwd.join("src/Catalogs/Source.xml");
+        let output_path = context
+            .cwd
+            .join("src/Catalogs/Target/Forms/ItemForm/Ext/Form.xml");
+        let source = empty_catalog_xml("\n", true);
+        write_file(&object_path, &source);
+        let concurrent_source = source
+            .replace(
+                "</MetaDataObject>",
+                "\t<!-- concurrent source change -->\n</MetaDataObject>",
+            )
+            .into_bytes();
+        let source_for_hook = object_path.clone();
+        let concurrent_for_hook = concurrent_source.clone();
+        let args = Map::from_iter([
+            ("FromObject".to_string(), json!(true)),
+            (
+                "ObjectPath".to_string(),
+                json!(object_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(output_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = with_before_commit_hook(
+            move |_| fs::write(&source_for_hook, &concurrent_for_hook).unwrap(),
+            || compile_form(&args, &context),
+        );
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome.errors.join("\n").contains("read guard"),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&object_path).unwrap(), concurrent_source);
+        assert!(!output_path.exists());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_compile_rejects_platform_invalid_parent_owner_before_writing_or_registering() {
+        let context = temp_context("compile-invalid-parent-owner");
+        let definition_path = context.cwd.join("form.json");
+        let owner_path = context.cwd.join("src/Catalogs/Goods.xml");
+        let output_path = context
+            .cwd
+            .join("src/Catalogs/Goods/Forms/CompiledForm/Ext/Form.xml");
+        write_file(&definition_path, "{}");
+        let invalid_owner = empty_catalog_xml("\n", true).replace(
+            "\t\t\t<DefaultListForm/>",
+            "\t\t\t<DefaultListForm/>\n\t\t\t<IncludeHelpInContents>truthy</IncludeHelpInContents>",
+        );
+        write_file(&owner_path, &invalid_owner);
+        let owner_before = fs::read(&owner_path).unwrap();
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(output_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = compile_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("IncludeHelpInContents")
+                    && error.contains("true or false")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&owner_path).unwrap(), owner_before);
+        assert!(!output_path.exists());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_compile_standalone_does_not_require_a_metadata_owner() {
+        let context = temp_context("compile-standalone-without-owner");
+        let definition_path = context.cwd.join("form.json");
+        let output_path = context.cwd.join("StandaloneForm.xml");
+        write_file(&definition_path, "{}");
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(output_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = compile_form(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert!(output_path.is_file());
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_compile_rejects_unsafe_output_derived_form_name_without_writing() {
+        for (case, relative_output) in [
+            ("markup", "src/Catalogs/Goods/Forms/Bad&Name/Ext/Form.xml"),
+            (
+                "traversal",
+                "src/Catalogs/Goods/Forms/../Escaped/Ext/Form.xml",
+            ),
+        ] {
+            let context = temp_context(&format!("compile-unsafe-form-name-{case}"));
+            let definition_path = context.cwd.join("form.json");
+            let owner_path = context.cwd.join("src/Catalogs/Goods.xml");
+            let output_path = context.cwd.join(relative_output);
+            write_file(&definition_path, "{}");
+            write_file(&owner_path, &empty_catalog_xml("\n", true));
+            let owner_before = fs::read(&owner_path).unwrap();
+            let args = Map::from_iter([
+                (
+                    "JsonPath".to_string(),
+                    json!(definition_path.display().to_string()),
+                ),
+                (
+                    "OutputPath".to_string(),
+                    json!(output_path.display().to_string()),
+                ),
+            ]);
+
+            let outcome = compile_form(&args, &context);
+
+            assert!(!outcome.ok, "{case}: {outcome:?}");
+            assert!(outcome.errors.iter().any(|error| {
+                error.contains("OutputPath")
+                    && error.contains("XML NCName")
+                    && error.contains("single path component")
+            }));
+            assert_eq!(fs::read(&owner_path).unwrap(), owner_before, "{case}");
+            assert!(!output_path.exists(), "{case}: {}", output_path.display());
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn form_compile_rejects_nested_binding_path_with_missing_attribute_before_write() {
+        let context = temp_context("compile-missing-data-path-root");
+        let definition_path = context.cwd.join("form.json");
+        let output_path = context.cwd.join("generated/CorpusForm/Ext/Form.xml");
+        write_file(
+            &definition_path,
+            &serde_json::to_string(&json!({
+                "attributes": [
+                    {"name": "Object", "type": "CatalogObject.CorpusCatalog", "main": true},
+                    {"name": "Rows", "type": "ValueTable"}
+                ],
+                "elements": [{
+                    "group": "Body",
+                    "children": [{
+                        "table": "Rows",
+                        "path": "Rows",
+                        "rowPictureDataPath": "Missing.Picture",
+                        "columns": [{"input": "Value", "path": "Rows.Value"}]
+                    }]
+                }]
+            }))
+            .unwrap(),
+        );
+        let args = Map::from_iter([
+            (
+                "JsonPath".to_string(),
+                json!(definition_path.display().to_string()),
+            ),
+            (
+                "OutputPath".to_string(),
+                json!(output_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = compile_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        let errors = outcome.errors.join("\n");
+        assert!(errors.contains("Missing.Picture"), "{errors}");
+        assert!(errors.contains("Missing"), "{errors}");
+        assert!(!output_path.exists(), "{outcome:?}");
+        assert!(!context.cwd.join("generated").exists(), "{outcome:?}");
+        assert!(outcome.changes.is_empty(), "{outcome:?}");
+        assert!(outcome.artifacts.is_empty(), "{outcome:?}");
+
+        let _ = fs::remove_dir_all(&context.cwd);
     }
 
     #[test]
@@ -10614,6 +15174,7 @@ mod tests {
         for (definition, expected_code) in [
             (
                 json!({
+                    "attributes": [{"name": "Rows", "type": "ValueTable"}],
                     "elements": [{
                         "table": "Rows",
                         "path": "Rows",
@@ -11414,7 +15975,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_form_expands_self_closing_event_and_element_targets() {
+    fn edit_form_rejects_self_closing_event_target_missing_required_companions() {
         let context = temp_context("edit-self-closing-event-targets");
         let form_path = context.cwd.join("Form.xml");
         let original = event_form_xml(
@@ -11444,11 +16005,14 @@ mod tests {
 
         let outcome = edit_form(&args, &context);
 
-        assert!(outcome.ok, "{outcome:?}");
-        let updated = fs::read_to_string(&form_path).unwrap();
-        assert!(updated.contains("<Events>\n\t\t<Event name=\"OnOpen\">OnOpen</Event>"));
-        assert!(updated.contains("<InputField name=\"Name\" id=\"1\">"));
-        assert!(updated.contains("<Event name=\"OnChange\">NameOnChange</Event>"));
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(outcome.errors.iter().any(|error| {
+            error.contains("InputField")
+                && error.contains("Name")
+                && error.contains("missing companion")
+        }));
+        assert!(outcome.changes.is_empty(), "{outcome:?}");
+        assert_eq!(fs::read_to_string(&form_path).unwrap(), original);
 
         let _ = fs::remove_dir_all(&context.cwd);
     }
@@ -11507,12 +16071,16 @@ mod tests {
         let form_path = context.cwd.join("Form.xml");
         let children = concat!(
             "\t\t<Table name=\"Rows\" id=\"1\">\n",
-            "\t\t\t<DataPath>Rows</DataPath>\n",
+            "\t\t\t<DataPath>Object.Rows</DataPath>\n",
             "\t\t\t<ContextMenu name=\"RowsContextMenu\" id=\"2\"/>\n",
             "\t\t\t<AutoCommandBar name=\"RowsCommandBar\" id=\"3\"/>\n",
             "\t\t\t<ExtendedTooltip name=\"RowsTooltip\" id=\"4\"/>\n",
+            "\t\t\t<SearchStringAddition name=\"RowsSearchString\" id=\"7\"/>\n",
+            "\t\t\t<ViewStatusAddition name=\"RowsViewStatus\" id=\"8\"/>\n",
+            "\t\t\t<SearchControlAddition name=\"RowsSearchControl\" id=\"9\"/>\n",
             "\t\t\t<ChildItems>\n",
             "\t\t\t\t<LabelField name=\"Description\" id=\"5\">\n",
+            "\t\t\t\t\t<ContextMenu name=\"DescriptionContextMenu\" id=\"10\"/>\n",
             "\t\t\t\t\t<ExtendedTooltip name=\"DescriptionTooltip\" id=\"6\"/>\n",
             "\t\t\t\t</LabelField>\n",
             "\t\t\t</ChildItems>\n",
@@ -12003,7 +16571,7 @@ mod tests {
     fn editable_form_xml(extension: bool) -> &'static str {
         if extension {
             r#"<?xml version="1.0" encoding="utf-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
 	<BaseForm>Catalog.ParityCatalog.Form.ItemForm</BaseForm>
 	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1">
 		<Autofill>true</Autofill>
@@ -12012,17 +16580,17 @@ mod tests {
 	</ChildItems>
 	<Attributes>
 		<Attribute name="Object" id="1">
-			<Type>CatalogObject.ParityCatalog</Type>
+			<Type><v8:Type>cfg:CatalogObject.ParityCatalog</v8:Type></Type>
 		</Attribute>
 	</Attributes>
 	<Commands>
-		<Command name="Refresh" id="2"/>
+		<Command name="Refresh" id="2"><Action>Refresh</Action></Command>
 	</Commands>
 </Form>
 "#
         } else {
             r#"<?xml version="1.0" encoding="utf-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
 	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1">
 		<Autofill>true</Autofill>
 	</AutoCommandBar>
@@ -12030,11 +16598,11 @@ mod tests {
 	</ChildItems>
 	<Attributes>
 		<Attribute name="Object" id="1">
-			<Type>CatalogObject.ParityCatalog</Type>
+			<Type><v8:Type>cfg:CatalogObject.ParityCatalog</v8:Type></Type>
 		</Attribute>
 	</Attributes>
 	<Commands>
-		<Command name="Refresh" id="2"/>
+		<Command name="Refresh" id="2"><Action>Refresh</Action></Command>
 	</Commands>
 </Form>
 "#

@@ -58,7 +58,7 @@ def detect_format_version(d):
         if parent == d:
             break
         d = parent
-    return "2.17"
+    return "2.20"
 
 
 def main():
@@ -221,6 +221,11 @@ def main():
             '\t\t<name>ИсточникДанных1</name>\n'
             '\t\t<dataSourceType>Local</dataSourceType>\n'
             '\t</dataSource>\n'
+            '\t<settingsVariant>\n'
+            '\t\t<dcsset:name>Основной</dcsset:name>\n'
+            '\t\t<dcsset:presentation xsi:type="xs:string">Основной</dcsset:presentation>\n'
+            '\t\t<dcsset:settings xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows"/>\n'
+            '\t</settingsVariant>\n'
             '</DataCompositionSchema>'
         )
         write_text_with_bom(template_file_path, content)

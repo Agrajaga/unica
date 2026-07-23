@@ -34,7 +34,8 @@ MXL_NS = "urn:test:mxl"
 MD_NS = "urn:test:md"
 REAL_MD_NS = "http://v8.1c.ru/8.3/MDClasses"
 REAL_CAI_NS = "http://v8.1c.ru/8.2/managed-application/core"
-REAL_FLOWCHART_QNAME = f"{{{REAL_MD_NS}}}Flowchart"
+REAL_SCHEME_NS = "http://v8.1c.ru/8.3/xcf/scheme"
+REAL_FLOWCHART_QNAME = f"{{{REAL_SCHEME_NS}}}GraphicalSchema"
 
 
 def sha(data):
@@ -134,6 +135,8 @@ def write_corpus(root, files):
     listed = []
     case_dir = root / "case"
     case_dir.mkdir(parents=True)
+    pre_dir = root / "pre-case"
+    pre_dir.mkdir()
     for name, text, extra in files:
         path = case_dir / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -149,9 +152,60 @@ def write_corpus(root, files):
         item = {"path": path.relative_to(root).as_posix(), "sha256": sha(path.read_bytes()), "seed": False, "family": family}
         item.update(extra)
         listed.append(item)
-    cases.append({"id": "case", "toolId": "unica.test", "xmlImpact": "created", "files": listed})
+    pre_files = []
+    pre_owner_versions = {}
+    for item in listed:
+        if item["seed"] is not True:
+            continue
+        logical = item["path"].removeprefix("case/")
+        post_path = root / item["path"]
+        pre_path = pre_dir / logical
+        pre_path.parent.mkdir(parents=True, exist_ok=True)
+        pre_path.write_bytes(post_path.read_bytes())
+        pre_item = {
+            "path": f"pre-case/{logical}",
+            "sha256": sha(pre_path.read_bytes()),
+            "family": item["family"],
+        }
+        if "ownerPath" in item:
+            pre_item["ownerPath"] = item["ownerPath"].replace("case/", "pre-case/", 1)
+        pre_files.append(pre_item)
+        parsed = __import__("lxml.etree", fromlist=["etree"]).fromstring(pre_path.read_bytes())
+        children = [child for child in parsed if isinstance(child.tag, str)]
+        if (
+            str(__import__("lxml.etree", fromlist=["etree"]).QName(parsed))
+            == f"{{{MD_NS}}}MetaDataObject"
+            and children
+            and __import__("lxml.etree", fromlist=["etree"]).QName(children[0]).localname
+            in {"Configuration", "ConfigurationExtension", "ExternalDataProcessor", "ExternalReport"}
+        ):
+            pre_owner_versions[pre_item["path"]] = "2.20"
+    pre_files.sort(key=lambda item: item["path"])
+    cases.append({
+        "id": "case",
+        "workspacePath": "case",
+        "preSnapshotPath": "pre-case",
+        "toolId": "unica.test",
+        "xmlImpact": "created",
+        "preFiles": pre_files,
+        "files": listed,
+        "preOwnerVersions": dict(sorted(pre_owner_versions.items())),
+    })
     manifest = root / "corpus-manifest.json"
-    manifest.write_text(json.dumps({"schemaVersion": 1, "profile": "test-2.20", "cases": cases}), encoding="utf-8")
+    empty_directory_paths = sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_dir() and not any(path.iterdir())
+    )
+    manifest.write_text(
+        json.dumps({
+            "schemaVersion": 2,
+            "profile": "test-2.20",
+            "emptyDirectoryPaths": empty_directory_paths,
+            "cases": cases,
+        }),
+        encoding="utf-8",
+    )
     return manifest
 
 
@@ -495,6 +549,23 @@ class VerifierContractTests(unittest.TestCase):
             self.assertEqual((report["verdict"], report["exitCode"]), ("pass", 0))
             self.assertTrue(verifier.report_matches_schema(report, json.loads(REPORT_SCHEMA.read_text())))
 
+            corpus = write_corpus(root / "entity-version", [(
+                "rights.xml",
+                "<Rights xmlns='urn:test:roles' version='2.&#50;0'><setForNewObjects>true</setForNewObjects></Rights>",
+                {},
+            )])
+            entity_report, status = verifier.verify_corpus(
+                corpus, profile, runtime, None
+            )
+            self.assertEqual(status, 1)
+            version_check = next(
+                check
+                for check in entity_report["files"][0]["checks"]
+                if check["name"] == "exportVersion"
+            )
+            self.assertEqual(version_check["status"], "fail")
+            self.assertEqual(version_check["actual"], "2.&#50;0")
+
             corpus = write_corpus(root / "bad", [("rights.xml", "<Rights xmlns='urn:test:roles' version='2.19'/>", {})])
             failed_report, status = verifier.verify_corpus(corpus, profile, runtime, None)
             self.assertEqual(status, 1)
@@ -537,7 +608,7 @@ class VerifierContractTests(unittest.TestCase):
             _, status = verifier.verify_corpus(corpus, profile, runtime, {"declarations": {"metadata": True}})
             self.assertEqual(status, 1)
 
-            corpus = write_corpus(root / "text-qname", [("owner.xml", "<MetaDataObject xmlns='urn:test:md' xmlns:v8='urn:test:v8' version='2.20'><v8:Type>missing:T</v8:Type></MetaDataObject>", {})])
+            corpus = write_corpus(root / "text-qname", [("owner.xml", "<MetaDataObject xmlns='urn:test:md' xmlns:v8='http://v8.1c.ru/8.1/data/core' version='2.20'><v8:TypeSet>missing:T</v8:TypeSet></MetaDataObject>", {})])
             _, status = verifier.verify_corpus(corpus, profile, runtime, {"declarations": {"metadata": True}})
             self.assertEqual(status, 1)
 
@@ -545,6 +616,96 @@ class VerifierContractTests(unittest.TestCase):
             (corpus.parent / "case/extra.xml").write_text("<x/>")
             with self.assertRaisesRegex(verifier.CorpusError, "unlisted XML"):
                 verifier.verify_corpus(corpus, profile, runtime, None)
+
+    def test_pre_snapshot_inventory_shape_family_and_version_are_verified(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = runtime_archive(root, basic_schemas())
+            profile = test_profile(archive)
+            runtime = verifier.verified_runtime(archive, profile)
+
+            def seeded_corpus(name):
+                return write_corpus(
+                    root / name,
+                    [
+                        (
+                            "owner.xml",
+                            "<MetaDataObject xmlns='urn:test:md' version='2.20'><Configuration/></MetaDataObject>",
+                            {"seed": True},
+                        )
+                    ],
+                )
+
+            listed_pre = seeded_corpus("listed-pre")
+            report, status = verifier.verify_corpus(
+                listed_pre,
+                profile,
+                runtime,
+                {"declarations": {"metadata": True}},
+            )
+            self.assertEqual(status, 3)
+            self.assertEqual(
+                [row["path"] for row in report["files"]],
+                ["case/owner.xml", "pre-case/owner.xml"],
+            )
+
+            corpus = seeded_corpus("old-pre")
+            manifest = json.loads(corpus.read_text())
+            pre_path = corpus.parent / manifest["cases"][0]["preFiles"][0]["path"]
+            pre_path.write_text(
+                "<MetaDataObject xmlns='urn:test:md' version='2.19'><Configuration/></MetaDataObject>"
+            )
+            new_hash = sha(pre_path.read_bytes())
+            manifest["cases"][0]["preFiles"][0]["sha256"] = new_hash
+            corpus.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(
+                verifier.CorpusError, "preOwnerVersions|pre-snapshot owners"
+            ):
+                verifier.verify_corpus(corpus, profile, runtime, None)
+
+            mutations = {
+                "removed": lambda manifest: manifest["cases"][0]["preFiles"].clear(),
+                "wrong-family": lambda manifest: manifest["cases"][0]["preFiles"][0].update(
+                    {"family": "dcs"}
+                ),
+                "bad-shape": lambda manifest: manifest["cases"][0]["preFiles"][0].update(
+                    {"newStandalone": False}
+                ),
+                "boolean-hash": lambda manifest: manifest["cases"][0]["preFiles"][0].update(
+                    {"sha256": True}
+                ),
+            }
+            for label, mutate in mutations.items():
+                with self.subTest(label=label):
+                    corpus = seeded_corpus(label)
+                    manifest = json.loads(corpus.read_text())
+                    mutate(manifest)
+                    corpus.write_text(json.dumps(manifest))
+                    with self.assertRaises(verifier.CorpusError):
+                        verifier.verify_corpus(corpus, profile, runtime, None)
+
+            corpus = seeded_corpus("tampered")
+            manifest = json.loads(corpus.read_text())
+            pre_path = corpus.parent / manifest["cases"][0]["preFiles"][0]["path"]
+            pre_path.write_text(
+                "<MetaDataObject xmlns='urn:test:md' version='2.20'><Configuration><Changed/></Configuration></MetaDataObject>"
+            )
+            with self.assertRaisesRegex(verifier.CorpusError, "hash mismatch"):
+                verifier.verify_corpus(corpus, profile, runtime, None)
+            runtime.close()
+
+    def test_qname_text_scan_uses_schema_expanded_names_not_local_names(self):
+        verifier = load_verifier()
+        core = verifier.etree.fromstring(
+            b'<r xmlns:v8="http://v8.1c.ru/8.1/data/core"><v8:Type>missing:T</v8:Type></r>'
+        )
+        plain = verifier.etree.fromstring(
+            b'<r xmlns:l="http://v8.1c.ru/8.3/xcf/logform"><l:Type>missing:CommandBarButton</l:Type><ValueType>missing:T</ValueType></r>'
+        )
+
+        self.assertEqual(verifier._unresolved_qname_prefix(core), "missing")
+        self.assertIsNone(verifier._unresolved_qname_prefix(plain))
 
     def test_owner_path_requires_a_same_case_source_set_owner_descriptor(self):
         verifier = load_verifier()
@@ -586,19 +747,26 @@ class VerifierContractTests(unittest.TestCase):
             cross_root = root / "cross-case"
             (cross_root / "one").mkdir(parents=True)
             (cross_root / "two").mkdir(parents=True)
+            (cross_root / "pre-one").mkdir()
+            (cross_root / "pre-two").mkdir()
             dcs_path = cross_root / "one/dcs.xml"
             owner_path = cross_root / "two/owner.xml"
             dcs_path.write_text("<DataCompositionSchema xmlns='urn:test:dcs'><name>x</name></DataCompositionSchema>")
             owner_path.write_text("<MetaDataObject xmlns='urn:test:md' version='2.20'><Configuration/></MetaDataObject>")
             cross_manifest = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "profile": "test-2.20",
+                "emptyDirectoryPaths": ["pre-one", "pre-two"],
                 "cases": [
-                    {"id": "one", "toolId": "unica.dcs.edit", "xmlImpact": "modified", "files": [{
+                    {"id": "one", "workspacePath": "one", "preSnapshotPath": "pre-one",
+                     "toolId": "unica.dcs.edit", "xmlImpact": "modified",
+                     "preFiles": [], "preOwnerVersions": {}, "files": [{
                         "path": "one/dcs.xml", "sha256": sha(dcs_path.read_bytes()), "seed": False,
                         "family": "dcs", "ownerPath": "two/owner.xml",
                     }]},
-                    {"id": "two", "toolId": "unica.seed", "xmlImpact": "unchanged", "files": [{
+                    {"id": "two", "workspacePath": "two", "preSnapshotPath": "pre-two",
+                     "toolId": "unica.seed", "xmlImpact": "unchanged",
+                     "preFiles": [], "preOwnerVersions": {}, "files": [{
                         "path": "two/owner.xml", "sha256": sha(owner_path.read_bytes()), "seed": True,
                         "family": "metadata",
                     }]},
@@ -613,10 +781,12 @@ class VerifierContractTests(unittest.TestCase):
     def test_client_application_interface_uses_configuration_owner_version(self):
         verifier = load_verifier()
         profile = json.loads(PROFILE.read_text())
+        profile["profile"] = "test-fixed-families"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             case = root / "case"
             case.mkdir()
+            (root / "pre-case").mkdir()
             owner = case / "Configuration.xml"
             owner.write_text(
                 f"<MetaDataObject xmlns='{REAL_MD_NS}' version='2.20'><Configuration/></MetaDataObject>"
@@ -624,12 +794,17 @@ class VerifierContractTests(unittest.TestCase):
             interface = case / "ClientApplicationInterface.xml"
             interface.write_text(f"<ClientApplicationInterface xmlns='{REAL_CAI_NS}' uuid='00000000-0000-0000-0000-000000000000'/>")
             manifest = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "profile": profile["profile"],
+                "emptyDirectoryPaths": ["pre-case"],
                 "cases": [{
                     "id": "configuration-interface",
+                    "workspacePath": "case",
+                    "preSnapshotPath": "pre-case",
                     "toolId": "unica.interface.edit",
                     "xmlImpact": "modified",
+                    "preFiles": [],
+                    "preOwnerVersions": {},
                     "files": [
                         {
                             "path": "case/Configuration.xml",
@@ -684,6 +859,7 @@ class VerifierContractTests(unittest.TestCase):
     def test_flowchart_is_known_not_covered_and_requires_root_version_2_20(self):
         verifier = load_verifier()
         profile = json.loads(PROFILE.read_text())
+        profile["profile"] = "test-fixed-families"
         self.assertIn(REAL_FLOWCHART_QNAME, profile["families"])
         self.assertEqual(
             profile["families"][REAL_FLOWCHART_QNAME],
@@ -710,14 +886,18 @@ class VerifierContractTests(unittest.TestCase):
                 root = Path(tmp)
                 case = root / "case"
                 case.mkdir()
+                (root / "pre-case").mkdir()
                 path = case / "Flowchart.xml"
                 path.write_text(xml)
                 manifest = root / "corpus-manifest.json"
                 manifest.write_text(json.dumps({
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
                     "profile": profile["profile"],
+                    "emptyDirectoryPaths": ["pre-case"],
                     "cases": [{
-                        "id": "flowchart", "toolId": "unica.meta.compile", "xmlImpact": "created",
+                        "id": "flowchart", "workspacePath": "case", "preSnapshotPath": "pre-case",
+                        "toolId": "unica.meta.compile", "xmlImpact": "created",
+                        "preFiles": [], "preOwnerVersions": {},
                         "files": [{
                             "path": "case/Flowchart.xml", "sha256": sha(path.read_bytes()),
                             "seed": False, "family": "flowchart",
@@ -726,16 +906,22 @@ class VerifierContractTests(unittest.TestCase):
                 }))
                 return verifier.verify_corpus(manifest, profile, runtime, None)
 
-        report, status = verify(f"<Flowchart xmlns='{REAL_MD_NS}' version='2.20'/>")
+        report, status = verify(
+            f"<GraphicalSchema xmlns='{REAL_SCHEME_NS}' version='2.20'/>"
+        )
         self.assertEqual(status, 3)
         self.assertEqual((report["files"][0]["coverage"], report["files"][0]["result"]), ("not-covered", "inconclusive"))
         self.assertNotIn("edtDeclaration", {check["name"] for check in report["files"][0]["checks"]})
 
-        report, status = verify(f"<Flowchart xmlns='{REAL_MD_NS}' version='2.19'/>")
+        report, status = verify(
+            f"<GraphicalSchema xmlns='{REAL_SCHEME_NS}' version='2.19'/>"
+        )
         self.assertEqual(status, 1)
         self.assertEqual(next(check for check in report["files"][0]["checks"] if check["name"] == "exportVersion")["status"], "fail")
 
-        report, status = verify(f"<NotFlowchart xmlns='{REAL_MD_NS}' version='2.20'/>")
+        report, status = verify(
+            f"<NotGraphicalSchema xmlns='{REAL_SCHEME_NS}' version='2.20'/>"
+        )
         self.assertEqual(status, 1)
         self.assertEqual(next(check for check in report["files"][0]["checks"] if check["name"] == "rootQName")["status"], "fail")
 
@@ -790,16 +976,197 @@ class VerifierContractTests(unittest.TestCase):
                 verifier._load_corpus(hardlink_corpus, "test-2.20")
 
             corpus.write_text(json.dumps(original))
-            real_open = Path.open
+            real_os_open = os.open
 
-            def deny_xml_open(path, *args, **kwargs):
-                if path.suffix.lower() == ".xml":
+            def deny_xml_open(path, flags, mode=0o777, *, dir_fd=None):
+                if Path(path).suffix.lower() == ".xml":
                     raise PermissionError("denied")
-                return real_open(path, *args, **kwargs)
+                if dir_fd is None:
+                    return real_os_open(path, flags, mode)
+                return real_os_open(path, flags, mode, dir_fd=dir_fd)
 
-            with mock.patch.object(Path, "open", new=deny_xml_open):
-                with self.assertRaisesRegex(verifier.CorpusError, "hash|read"):
+            with mock.patch("os.open", side_effect=deny_xml_open):
+                with self.assertRaisesRegex(
+                    verifier.CorpusError,
+                    "capture|snapshot|read",
+                ):
                     verifier._load_corpus(corpus, "test-2.20")
+
+    def test_corpus_schema_v2_binds_exact_empty_directory_topology(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = write_corpus(root, [
+                ("rights.xml", "<Rights xmlns='urn:test:roles' version='2.20'><setForNewObjects>true</setForNewObjects></Rights>", {}),
+            ])
+            (root / "case/Ext/Empty").mkdir(parents=True)
+            manifest = json.loads(corpus.read_text())
+            manifest["schemaVersion"] = 2
+            manifest["emptyDirectoryPaths"] = ["case/Ext/Empty", "pre-case"]
+            corpus.write_text(json.dumps(manifest))
+
+            loaded, loaded_root, files = verifier._load_corpus(corpus, "test-2.20")
+
+            self.assertEqual(loaded["schemaVersion"], 2)
+            self.assertEqual(loaded_root.resolve(), root.resolve())
+            self.assertEqual(len(files), 1)
+
+            for declared in (
+                [],
+                ["case/Ext/Empty"],
+                ["case/Ext/Empty", "pre-case", "pre-case"],
+                ["pre-case", "case/Ext/Empty"],
+                ["case/Ext/Empty", "missing"],
+                ["../escape", "pre-case"],
+                [r"case\Ext\Empty", "pre-case"],
+            ):
+                changed = json.loads(json.dumps(manifest))
+                changed["emptyDirectoryPaths"] = declared
+                corpus.write_text(json.dumps(changed))
+                with self.subTest(declared=declared):
+                    with self.assertRaisesRegex(
+                        verifier.CorpusError,
+                        "empty director|sorted|canonical",
+                    ):
+                        verifier._load_corpus(corpus, "test-2.20")
+
+            missing_inventory = json.loads(json.dumps(manifest))
+            missing_inventory.pop("emptyDirectoryPaths")
+            corpus.write_text(json.dumps(missing_inventory))
+            with self.assertRaisesRegex(verifier.CorpusError, "emptyDirectoryPaths"):
+                verifier._load_corpus(corpus, "test-2.20")
+
+            unknown_field = json.loads(json.dumps(manifest))
+            unknown_field["unexpected"] = True
+            corpus.write_text(json.dumps(unknown_field))
+            with self.assertRaisesRegex(verifier.CorpusError, "manifest.*shape|keys"):
+                verifier._load_corpus(corpus, "test-2.20")
+
+            legacy = json.loads(json.dumps(manifest))
+            legacy["schemaVersion"] = 1
+            legacy.pop("emptyDirectoryPaths")
+            corpus.write_text(json.dumps(legacy))
+            with self.assertRaisesRegex(verifier.CorpusError, "schemaVersion"):
+                verifier._load_corpus(corpus, "test-2.20")
+
+    def test_corpus_schema_v2_is_rechecked_after_topology_capture(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = write_corpus(root, [
+                ("rights.xml", "<Rights xmlns='urn:test:roles' version='2.20'><setForNewObjects>true</setForNewObjects></Rights>", {}),
+            ])
+            removed_after_capture = root / "case/Ext/Empty"
+            removed_after_capture.mkdir(parents=True)
+            manifest = json.loads(corpus.read_text())
+            manifest["emptyDirectoryPaths"] = ["case/Ext/Empty", "pre-case"]
+            corpus.write_text(json.dumps(manifest))
+            real_capture = verifier._corpus_empty_directory_paths
+
+            def capture_then_remove(path):
+                captured = real_capture(path)
+                if removed_after_capture.exists():
+                    removed_after_capture.rmdir()
+                return captured
+
+            with mock.patch.object(
+                verifier,
+                "_corpus_empty_directory_paths",
+                side_effect=capture_then_remove,
+            ):
+                with self.assertRaisesRegex(
+                    verifier.CorpusError,
+                    "empty director|topology|changed",
+                ):
+                    verifier._load_corpus(corpus, "test-2.20")
+
+    def test_corpus_snapshot_rejects_path_replacement_between_stat_and_open(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            root = Path(tmp)
+            corpus = write_corpus(root, [
+                ("rights.xml", "<Rights xmlns='urn:test:roles' version='2.20'><setForNewObjects>true</setForNewObjects></Rights>", {}),
+            ])
+            target = root / "case/rights.xml"
+            declared_payload = target.read_bytes()
+            invalid_payload = declared_payload.replace(b"2.20", b"2.19")
+            target.write_bytes(invalid_payload)
+            outside = Path(outside_tmp) / "declared.xml"
+            outside.write_bytes(declared_payload)
+            real_path_open = Path.open
+            real_os_open = os.open
+            attacked = False
+
+            def restore_target():
+                if target.is_symlink():
+                    target.unlink()
+                target.write_bytes(invalid_payload)
+
+            def path_open_with_replacement(path, *args, **kwargs):
+                nonlocal attacked
+                if Path(path) == target and not attacked:
+                    attacked = True
+                    target.unlink()
+                    target.symlink_to(outside)
+                    try:
+                        stream = real_path_open(path, *args, **kwargs)
+                    finally:
+                        restore_target()
+                    return stream
+                return real_path_open(path, *args, **kwargs)
+
+            def os_open_with_replacement(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal attacked
+                if Path(path) == target and not attacked:
+                    attacked = True
+                    target.unlink()
+                    target.symlink_to(outside)
+                    try:
+                        if dir_fd is None:
+                            return real_os_open(path, flags, mode)
+                        return real_os_open(path, flags, mode, dir_fd=dir_fd)
+                    finally:
+                        restore_target()
+                if dir_fd is None:
+                    return real_os_open(path, flags, mode)
+                return real_os_open(path, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch.object(
+                Path, "open", new=path_open_with_replacement
+            ), mock.patch("os.open", side_effect=os_open_with_replacement):
+                with self.assertRaisesRegex(
+                    verifier.CorpusError,
+                    "changed|identity|symlink|snapshot",
+                ):
+                    verifier._load_corpus(corpus, "test-2.20")
+            self.assertTrue(attacked)
+            self.assertEqual(target.read_bytes(), invalid_payload)
+
+    def test_fixed_profile_uses_the_canonical_platform_corpus_schema(self):
+        verifier = load_verifier()
+        from tests.dev.test_verify_8_3_27_platform import (
+            load_verifier as load_platform_verifier,
+            write_manifest,
+            write_platform_case,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            case_ids = sorted(load_platform_verifier().MANDATORY_CASE_IDS)
+            cases = [write_platform_case(root, case_id) for case_id in case_ids]
+            manifest_path = write_manifest(root, cases)
+            manifest = json.loads(manifest_path.read_text())
+            manifest["cases"][0]["gateVerdict"] = "pass-from-case"
+            manifest_path.write_text(json.dumps(manifest, sort_keys=True))
+
+            with self.assertRaisesRegex(
+                verifier.CorpusError,
+                "unknown.*case|fields.*exact",
+            ):
+                verifier._load_corpus(
+                    manifest_path,
+                    "1c-8.3.27-export-2.20",
+                )
 
     def test_corpus_hash_and_validation_use_the_same_immutable_snapshot(self):
         verifier = load_verifier()
@@ -888,7 +1255,12 @@ class VerifierContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             corpus = root / "corpus-manifest.json"
-            corpus.write_text(json.dumps({"schemaVersion": 1, "profile": "1c-8.3.27-export-2.20", "cases": None}))
+            corpus.write_text(json.dumps({
+                "schemaVersion": 2,
+                "profile": "1c-8.3.27-export-2.20",
+                "emptyDirectoryPaths": [],
+                "cases": None,
+            }))
             report_path = root / "report.json"
             runtime = verifier.RuntimeEvidence({"source": {}, "compilationMatrix": [], "wrappers": {}})
             with mock.patch.object(verifier, "verified_runtime", return_value=runtime), mock.patch.object(
@@ -914,6 +1286,7 @@ class VerifierContractTests(unittest.TestCase):
             corpus.write_text(json.dumps({
                 "schemaVersion": True,
                 "profile": "1c-8.3.27-export-2.20",
+                "emptyDirectoryPaths": [],
                 "cases": [],
             }))
             reports = []
@@ -946,8 +1319,9 @@ class VerifierContractTests(unittest.TestCase):
             xml.write_text("<x/>")
             corpus = root / "corpus-manifest.json"
             corpus.write_text(json.dumps({
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "profile": "broken-profile",
+                "emptyDirectoryPaths": [],
                 "cases": [{
                     "id": "case", "toolId": "unica.test", "xmlImpact": "created",
                     "files": [{"path": "case/x.xml", "sha256": sha(xml.read_bytes()), "seed": False, "family": "x"}],
@@ -1321,7 +1695,17 @@ class VerifierContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             corpus = write_corpus(root, [("x.xml", "<x/>", {})])
-            data = json.loads(corpus.read_text())
+            original = corpus.read_text()
+            data = json.loads(original)
+            corpus.write_text(
+                original.replace(
+                    '"schemaVersion": 2,',
+                    '"schemaVersion": 2, "schemaVersion": 2,',
+                    1,
+                )
+            )
+            with self.assertRaisesRegex(verifier.CorpusError, "duplicate JSON key"):
+                verifier._load_corpus(corpus, "test-2.20")
             for raw in ["../x.xml", "/tmp/x.xml"]:
                 changed = json.loads(json.dumps(data))
                 changed["cases"][0]["files"][0]["path"] = raw
@@ -1344,6 +1728,15 @@ class VerifierContractTests(unittest.TestCase):
             corpus.write_text(json.dumps(changed))
             with self.assertRaisesRegex(verifier.CorpusError, "symlink"):
                 verifier._load_corpus(corpus, "test-2.20")
+
+    def test_profile_and_schema_reader_rejects_duplicate_json_keys(self):
+        verifier = load_verifier()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "duplicate.json"
+            path.write_text('{"schemaVersion": 1, "schemaVersion": 2}')
+
+            with self.assertRaisesRegex(verifier.SourceError, "duplicate JSON key"):
+                verifier._read_json_object(path, "test object")
 
 
 if __name__ == "__main__":

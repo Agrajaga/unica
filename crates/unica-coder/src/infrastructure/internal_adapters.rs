@@ -84,6 +84,10 @@ struct SystemBslMcpRunner;
 static SYSTEM_PROCESS_RUNNER: SystemProcessRunner = SystemProcessRunner;
 static SYSTEM_BSL_MCP_RUNNER: SystemBslMcpRunner = SystemBslMcpRunner;
 
+pub(crate) fn system_process_runner() -> &'static dyn ProcessRunner {
+    &SYSTEM_PROCESS_RUNNER
+}
+
 pub struct CliAdapter<'a> {
     tool_name: &'static str,
     default_command: &'static [&'static str],

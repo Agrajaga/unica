@@ -566,7 +566,7 @@ Platform-generated CDFI sidecar `ConfigDumpInfo.xml` с корнем
 |---|---|---|
 | `name` | атрибут | Имя стандартного реквизита |
 | `LinkByType` | элемент | Связь по типу (обычно пустой) |
-| `FillChecking` | enum | `DontCheck` \| `ShowWarning` \| `ShowError` |
+| `FillChecking` | enum | `DontCheck` \| `ShowError` (контракт 8.3.27; `ShowWarning` в XDTO 8.3.27 отсутствует) |
 | `MultiLine` | boolean | Многострочное поле |
 | `FillFromFillingValue` | boolean | Заполнять из значения заполнения |
 | `CreateOnInput` | enum | `Auto` \| `Use` \| `DontUse` |

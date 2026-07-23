@@ -120,12 +120,16 @@ impl fmt::Display for FormatVersionError {
 impl std::error::Error for FormatVersionError {}
 
 pub fn classify_root_version(raw: Option<&str>) -> Result<FormatCompatibility, FormatVersionError> {
-    let actual = ExportFormatVersion::parse(raw.unwrap_or("1.0"))?;
+    let raw = raw.unwrap_or("1.0");
+    let actual = ExportFormatVersion::parse(raw)?;
     let target = ExportFormatVersion::parse(ACTIVE_FORMAT_PROFILE.export_format)
         .expect("active export format is a valid constant");
     Ok(match actual.cmp(&target) {
         Ordering::Less => FormatCompatibility::Older { actual },
-        Ordering::Equal => FormatCompatibility::Supported { actual },
+        Ordering::Equal if raw == ACTIVE_FORMAT_PROFILE.export_format => {
+            FormatCompatibility::Supported { actual }
+        }
+        Ordering::Equal => return Err(FormatVersionError::new(raw)),
         Ordering::Greater => FormatCompatibility::Newer { actual },
     })
 }
@@ -162,6 +166,15 @@ mod tests {
             classify_root_version(Some("2.21")).unwrap(),
             FormatCompatibility::Newer { .. }
         ));
+    }
+
+    #[test]
+    fn rejects_numeric_equivalents_of_the_exact_supported_literal() {
+        for raw in ["2.20.0", "02.20", "2.020"] {
+            let error = classify_root_version(Some(raw))
+                .expect_err("only the exact raw literal 2.20 is supported");
+            assert_eq!(error.code(), "formatVersionInvalid", "{raw}");
+        }
     }
 
     #[test]
