@@ -261,6 +261,7 @@ const RUNTIME_ARGS: &[&str] = &[
     "distributiveModules",
     "emptyHandlers",
     "execute",
+    "stderrOutput",
     "extension",
     "externalConnection",
     "externalConnectionServer",
@@ -305,6 +306,8 @@ const RUNTIME_ARGS: &[&str] = &[
     "unsupportedFunctional",
     "unreferenceProcedures",
     "usePrivilegedMode",
+    "waitForExit",
+    "waitTimeoutMs",
     "webClient",
     "workdir",
 ];
@@ -331,6 +334,7 @@ const RUNTIME_STRING_ARGS: &[&str] = &[
     "config",
     "connection",
     "execute",
+    "stderrOutput",
     "extension",
     "format",
     "mcpConfig",
@@ -466,6 +470,9 @@ const RUNTIME_LAUNCH_OPERATION_ARGS: &[&str] = &[
     "execute",
     "usePrivilegedMode",
     "output",
+    "stderrOutput",
+    "waitForExit",
+    "waitTimeoutMs",
     "rawKeys",
 ];
 const RUNTIME_EXTENSIONS_OPERATION_ARGS: &[&str] =
@@ -1429,6 +1436,7 @@ fn property_schema(name: &str) -> Value {
             | "unsupportedFunctional"
             | "unreferenceProcedures"
             | "usePrivilegedMode"
+            | "waitForExit"
             | "webClient"
             | "includeMethods"
             | "ignoreCase"
@@ -1445,6 +1453,7 @@ fn property_schema(name: &str) -> Value {
             | "MaxParams"
             | "maxParams"
             | "mcpPort"
+            | "waitTimeoutMs"
             | "maxOutputTokens"
             | "maxFiles"
             | "rangeStart"
@@ -1645,6 +1654,7 @@ fn expected_scalar_type(key: &str) -> Option<&'static str> {
             | "unsupportedFunctional"
             | "unreferenceProcedures"
             | "usePrivilegedMode"
+            | "waitForExit"
             | "webClient"
             | "includeMethods"
             | "ignoreCase"
@@ -1661,6 +1671,7 @@ fn expected_scalar_type(key: &str) -> Option<&'static str> {
             | "MaxParams"
             | "maxParams"
             | "mcpPort"
+            | "waitTimeoutMs"
             | "maxOutputTokens"
             | "maxFiles"
             | "rangeStart"
@@ -2158,6 +2169,9 @@ mod tests {
         assert!(schema["properties"].get("timeoutMs").is_none());
         assert_eq!(schema["properties"]["fullRebuild"]["type"], "boolean");
         assert_eq!(schema["properties"]["mcpPort"]["type"], "integer");
+        assert_eq!(schema["properties"]["waitForExit"]["type"], "boolean");
+        assert_eq!(schema["properties"]["waitTimeoutMs"]["type"], "integer");
+        assert_eq!(schema["properties"]["stderrOutput"]["type"], "string");
         assert!(schema["properties"]["operation"]["enum"]
             .as_array()
             .unwrap()

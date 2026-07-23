@@ -17,3 +17,8 @@ Use `extensions` when only extension properties need synchronization.
 Use `tools-download` when the project needs v8-runner-managed YaXUnit, Vanessa, or client MCP tool payloads refreshed.
 
 Use `launch` with `clientMode=mcp` or `clientMode=mcp-va` for client-side MCP workflows; do not hand-assemble platform launch strings.
+
+For a local external `.epf` whose exit status is required, use direct
+`clientMode=thin` with `waitForExit=true`, bounded `waitTimeoutMs`, and distinct
+`output`/`stderrOutput` paths. Without this explicit opt-in, launch remains
+asynchronous.
