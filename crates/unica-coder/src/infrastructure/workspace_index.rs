@@ -117,6 +117,15 @@ pub struct IndexBackgroundJob {
     pub lock_lease: IndexLockLease,
 }
 
+struct IndexStartSpec {
+    action: &'static str,
+    source_root: PathBuf,
+    primary: IndexCommand,
+    info: IndexCommand,
+    recovery_build: Option<IndexCommand>,
+    warning: &'static str,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BslIndexLock {
     schema_version: u32,
@@ -254,21 +263,25 @@ impl<'a> WorkspaceIndexService<'a> {
                 match other {
                     IndexReadiness::Missing => self.start_background(
                         context,
-                        "build",
-                        source_root,
-                        commands.build,
-                        commands.info,
-                        None,
-                        "rlm index build started",
+                        IndexStartSpec {
+                            action: "build",
+                            source_root,
+                            primary: commands.build,
+                            info: commands.info,
+                            recovery_build: None,
+                            warning: "rlm index build started",
+                        },
                     ),
                     IndexReadiness::Stale { .. } => self.start_background(
                         context,
-                        "update",
-                        source_root,
-                        commands.update,
-                        commands.info,
-                        Some(commands.build),
-                        "rlm index building",
+                        IndexStartSpec {
+                            action: "update",
+                            source_root,
+                            primary: commands.update,
+                            info: commands.info,
+                            recovery_build: Some(commands.build),
+                            warning: "rlm index building",
+                        },
                     ),
                     IndexReadiness::Building => IndexStartReport {
                         warnings: vec!["rlm index building".to_string()],
@@ -397,13 +410,16 @@ impl<'a> WorkspaceIndexService<'a> {
     fn start_background(
         &self,
         context: &WorkspaceContext,
-        action: &str,
-        source_root: PathBuf,
-        primary: IndexCommand,
-        info: IndexCommand,
-        recovery_build: Option<IndexCommand>,
-        warning: &str,
+        spec: IndexStartSpec,
     ) -> IndexStartReport {
+        let IndexStartSpec {
+            action,
+            source_root,
+            primary,
+            info,
+            recovery_build,
+            warning,
+        } = spec;
         let lock = lock_path(context);
         if let Some(parent) = lock.parent() {
             if let Err(error) = fs::create_dir_all(parent) {
