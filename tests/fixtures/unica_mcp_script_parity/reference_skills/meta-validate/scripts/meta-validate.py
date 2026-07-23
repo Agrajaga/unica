@@ -320,6 +320,72 @@ def text_of(node):
     return (node.text or "").strip()
 
 
+def localized_values(node):
+    values = []
+    if node is None:
+        return values
+    for item in find_all(node, "v8:item"):
+        language = inner_text(find(item, "v8:lang")).strip() or None
+        text = inner_text(find(item, "v8:content"))
+        if text.strip():
+            values.append((language, text))
+    return values
+
+
+def configuration_language_codes(directory):
+    if not directory:
+        return []
+    try:
+        configuration_tree = etree.parse(
+            os.path.join(directory, "Configuration.xml"),
+            etree.XMLParser(remove_blank_text=False),
+        )
+        configuration = find(configuration_tree.getroot(), "md:Configuration")
+        child_objects = find(configuration, "md:ChildObjects") if configuration is not None else None
+        language_names = (
+            [inner_text(node) for node in find_all(child_objects, "md:Language")]
+            if child_objects is not None
+            else []
+        )
+    except Exception:
+        return []
+
+    codes = []
+    seen = set()
+    for language_name in language_names:
+        if not language_name.strip():
+            continue
+        try:
+            language_tree = etree.parse(
+                os.path.join(directory, "Languages", f"{language_name}.xml"),
+                etree.XMLParser(remove_blank_text=False),
+            )
+            language = find(language_tree.getroot(), "md:Language")
+            properties = find(language, "md:Properties") if language is not None else None
+            language_code = (
+                inner_text(find(properties, "md:LanguageCode")).strip()
+                if properties is not None
+                else ""
+            )
+        except Exception:
+            continue
+        if language_code and language_code not in seen:
+            seen.add(language_code)
+            codes.append(language_code)
+    return codes
+
+
+def warn_long_command_text(source, text, language=None):
+    length = len(text)
+    if length <= 38:
+        return
+    language_suffix = f", language '{language}'" if language else ""
+    report_warn(
+        f"3. Properties: {source} '{text}' is longer than 38 characters ({length}) "
+        f"for the command interface{language_suffix}"
+    )
+
+
 # ── 1. Parse XML ─────────────────────────────────────────────
 
 out_line("")
@@ -496,23 +562,44 @@ else:
         if len(name_val) > 80:
             report_warn(f"3. Properties: Name '{name_val}' is longer than 80 characters ({len(name_val)})")
 
-    # Synonym
+    # Effective command-interface presentation by configuration language
     syn_node = find(props_node, "md:Synonym")
-    syn_text = ""
-    if syn_node is not None:
-        syn_item = find(syn_node, "v8:item")
-        if syn_item is not None:
-            syn_content = find(syn_item, "v8:content")
-            if syn_content is not None:
-                syn_text = inner_text(syn_content)
-    syn_present = bool(syn_text)
+    list_presentation_node = find(props_node, "md:ListPresentation")
+    synonym_values = localized_values(syn_node)
+    list_presentation_values = localized_values(list_presentation_node)
+    syn_present = bool(synonym_values)
 
-    if not syn_present:
-        report_warn("3. Properties: Synonym is empty (fill it in, v8std 474)")
-    elif len(syn_text) > 38:
-        report_warn(
-            f"3. Properties: Synonym '{syn_text}' is longer than 38 characters ({len(syn_text)}) for the command interface"
+    language_codes = configuration_language_codes(config_dir)
+    if not language_codes:
+        seen_languages = set()
+        for language, _ in list_presentation_values + synonym_values:
+            if language and language not in seen_languages:
+                seen_languages.add(language)
+                language_codes.append(language)
+
+    if not language_codes:
+        selected_values = (
+            ("ListPresentation", list_presentation_values)
+            if list_presentation_values
+            else ("Synonym", synonym_values)
         )
+        source, values = selected_values
+        for _, text in values:
+            warn_long_command_text(source, text)
+    else:
+        for language_code in language_codes:
+            list_values = [
+                text
+                for language, text in list_presentation_values
+                if language == language_code
+            ]
+            if list_values:
+                for text in list_values:
+                    warn_long_command_text("ListPresentation", text, language_code)
+            else:
+                for language, text in synonym_values:
+                    if language == language_code:
+                        warn_long_command_text("Synonym", text, language_code)
 
     if check3_ok:
         syn_info = "Synonym present" if syn_present else "no Synonym"

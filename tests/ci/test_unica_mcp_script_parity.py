@@ -807,6 +807,35 @@ SUCCESS_SCENARIOS = [
         compare_files=True,
     ),
     ParityScenario(
+        name="meta-validate-language-aware",
+        tool="unica.meta.validate",
+        skill="meta-validate",
+        script="meta-validate.py",
+        arguments={
+            "ObjectPath": "src/CommonModules/LanguageAware.xml",
+            "Detailed": True,
+        },
+        fixtures=(
+            FileFixture(
+                "meta-validate-language-aware/Configuration.xml",
+                "src/Configuration.xml",
+            ),
+            FileFixture(
+                "meta-validate-language-aware/Languages/Русский.xml",
+                "src/Languages/Русский.xml",
+            ),
+            FileFixture(
+                "meta-validate-language-aware/Languages/English.xml",
+                "src/Languages/English.xml",
+            ),
+            FileFixture(
+                "meta-validate-language-aware/CommonModules/LanguageAware.xml",
+                "src/CommonModules/LanguageAware.xml",
+            ),
+        ),
+        expect_ok=True,
+    ),
+    ParityScenario(
         name="help-add-catalog",
         tool="unica.help.add",
         skill="help-add",
