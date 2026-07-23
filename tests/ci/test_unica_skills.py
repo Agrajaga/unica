@@ -707,6 +707,7 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         all_text = f"{skill_text}\n{reference_text}"
 
         self.assertIn('"waitForExit": true', skill_text)
+        self.assertIn('"waitTimeoutMs": 30000', skill_text)
         self.assertIn('"c": "StartFeaturePlayer;', skill_text)
         self.assertIn("типизированное поле `c`", skill_text)
         self.assertIn("не через `rawKeys`", skill_text)
@@ -723,7 +724,7 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         )
         self.assertIn("`tools.va.epf_path`", skill_text)
         self.assertIn("платформенный `/Out`", all_text)
-        self.assertIn("stderr клиентского процесса 1С", all_text)
+        self.assertIn("stderr клиентского процесса 1\u0421", all_text)
         self.assertIn(
             "`unica.runtime.job.start` не принимает bounded-поля",
             skill_text,

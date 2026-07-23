@@ -855,6 +855,8 @@ fn validate_bounded_external_epf_artifact_paths(
     if args.get("waitForExit").and_then(Value::as_bool) != Some(true) {
         return Ok(());
     }
+    // The mapper rejects identical path strings; this resolved host identity check also
+    // catches aliases such as relative/absolute, symlinked, and case-only spellings.
     let resolve = |key: &str| {
         args.get(key)
             .and_then(Value::as_str)

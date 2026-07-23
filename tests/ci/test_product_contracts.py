@@ -222,7 +222,6 @@ class ProductContractTests(unittest.TestCase):
                 patch.object(
                     module,
                     "check_v8_runner_bounded_external_epf_contract",
-                    create=True,
                     return_value=["bounded failure"],
                 ) as bounded_check,
             ):
