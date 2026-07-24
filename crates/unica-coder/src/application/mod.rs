@@ -1512,8 +1512,26 @@ mod tests {
     use std::time::Duration;
 
     fn normalized_path(path: &std::path::Path) -> std::path::PathBuf {
-        crate::infrastructure::source_roots::normalize_path_identity(path)
-            .expect("test path identity must normalize")
+        let canonical = std::fs::canonicalize(path).expect("test path identity must canonicalize");
+        if std::path::MAIN_SEPARATOR == '\\' {
+            let display = canonical.to_string_lossy();
+            if let Some(path) = display.strip_prefix(r"\\?\UNC\") {
+                return std::path::PathBuf::from(format!(r"\\{path}"));
+            }
+            if let Some(path) = display.strip_prefix(r"\\?\") {
+                return std::path::PathBuf::from(path);
+            }
+        }
+        canonical
+    }
+
+    fn displayed_path(path: &std::path::Path) -> String {
+        let display = path.display().to_string();
+        if std::path::MAIN_SEPARATOR == '\\' {
+            display.replace('/', "\\")
+        } else {
+            display
+        }
     }
 
     #[test]
@@ -3697,10 +3715,9 @@ mod tests {
                 roxmltree::Document::parse(std::str::from_utf8(&bytes[3..]).unwrap())
                     .unwrap_or_else(|error| panic!("{case}: {}: {error}", path.display()));
                 assert!(
-                    result.changes.contains(&format!(
-                        "updated {}",
-                        crate::infrastructure::platform::testing::path_display_for_test(&path)
-                    )),
+                    result
+                        .changes
+                        .contains(&format!("updated {}", displayed_path(&path))),
                     "{case}: {result:?}"
                 );
             }
