@@ -7,6 +7,7 @@ use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::metadata_kinds::metadata_kind;
 use crate::infrastructure::platform_xml_owner::{
     resolve_platform_xml_owners_with_provenance, root_version_literal, PlatformXmlOwnerKind,
+    PlatformXmlOwnerProvenance,
 };
 use roxmltree::Document;
 use serde_json::{json, Map, Value};
@@ -34,6 +35,9 @@ type MetaCompileAfterOwnerValidationHook = Box<dyn FnOnce(&Path)>;
 type MetaCompileAfterFormatPlanHook = Box<dyn FnOnce()>;
 
 #[cfg(test)]
+type MetaEditAfterLineNumberLengthPolicyHook = Box<dyn FnOnce()>;
+
+#[cfg(test)]
 type MetaRemoveSubsystemChildInspectionHook = Box<dyn FnOnce(&Path)>;
 
 #[cfg(test)]
@@ -43,6 +47,9 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     static META_COMPILE_AFTER_FORMAT_PLAN_HOOK:
         std::cell::RefCell<Option<MetaCompileAfterFormatPlanHook>> =
+        const { std::cell::RefCell::new(None) };
+    static META_EDIT_AFTER_LINE_NUMBER_LENGTH_POLICY_HOOK:
+        std::cell::RefCell<Option<MetaEditAfterLineNumberLengthPolicyHook>> =
         const { std::cell::RefCell::new(None) };
     static META_REMOVE_FORCED_REPARSE_PATHS:
         std::cell::RefCell<HashSet<PathBuf>> =
@@ -104,6 +111,35 @@ fn with_meta_compile_after_format_plan_hook<T>(
 #[cfg(test)]
 fn run_meta_compile_after_format_plan_hook() {
     if let Some(hook) = META_COMPILE_AFTER_FORMAT_PLAN_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn with_meta_edit_after_line_number_length_policy_hook<T>(
+    hook: impl FnOnce() + 'static,
+    action: impl FnOnce() -> T,
+) -> T {
+    struct Reset(Option<MetaEditAfterLineNumberLengthPolicyHook>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            META_EDIT_AFTER_LINE_NUMBER_LENGTH_POLICY_HOOK.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous = META_EDIT_AFTER_LINE_NUMBER_LENGTH_POLICY_HOOK
+        .with(|slot| slot.replace(Some(Box::new(hook))));
+    let _reset = Reset(previous);
+    action()
+}
+
+#[cfg(test)]
+fn run_meta_edit_after_line_number_length_policy_hook() {
+    if let Some(hook) =
+        META_EDIT_AFTER_LINE_NUMBER_LENGTH_POLICY_HOOK.with(|slot| slot.borrow_mut().take())
+    {
         hook();
     }
 }
@@ -3703,7 +3739,7 @@ mod edit_tests {
                 "{fixed}"
             );
         }
-        for editable in ["DontUse", "Version8_3_27", "Version8_5_1"] {
+        for editable in ["DontUse", "Version8_3_27"] {
             assert!(
                 matches!(
                     meta_edit_line_number_length_policy_from_mode(editable),
@@ -3716,6 +3752,71 @@ mod edit_tests {
             meta_edit_line_number_length_policy_from_mode("Bogus"),
             MetaEditLineNumberLengthPolicy::UnknownCompatibility
         ));
+    }
+
+    #[test]
+    fn line_number_length_policy_rejects_unsupported_future_mode() {
+        for unsupported in ["Version8_5_1", "Version999_0_0"] {
+            assert!(
+                matches!(
+                    meta_edit_line_number_length_policy_from_mode(unsupported),
+                    MetaEditLineNumberLengthPolicy::UnknownCompatibility
+                ),
+                "{unsupported}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_meta_rejects_source_map_remap_after_line_number_length_authorization() {
+        let context = temp_context("line-number-length-source-map-race");
+        let project_map = context.cwd.join("v8project.yaml");
+        let source_dir = context.cwd.join("src");
+        write_file(
+            &project_map,
+            "format: DESIGNER\nsource-set:\n  - name: configuration\n    type: CONFIGURATION\n    path: src\n",
+        );
+        write_owner_with_compatibility(&source_dir, "Document", "SampleObject", "Version8_3_27");
+        write_owner_with_compatibility(
+            &source_dir.join("Documents"),
+            "Document",
+            "SampleObject",
+            "Version8_3_26",
+        );
+        let object_path = source_dir.join("Documents").join("SampleObject.xml");
+        let original = sample_object_with_line_number_length("Document", "5");
+        write_file(&object_path, &original);
+        let before = fs::read(&object_path).unwrap();
+        let project_map_for_hook = project_map.clone();
+
+        let outcome = with_meta_edit_after_line_number_length_policy_hook(
+            move || {
+                fs::write(
+                    project_map_for_hook,
+                    "format: DESIGNER\nsource-set:\n  - name: remapped\n    type: CONFIGURATION\n    path: src/Documents\n",
+                )
+                .unwrap();
+            },
+            || {
+                edit_meta(
+                    &meta_edit_args(&object_path, "modify-ts", "SampleItems: lineNumberLength=9"),
+                    &context,
+                )
+            },
+        );
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("v8project.yaml") && error.contains("changed")),
+            "{:?}",
+            outcome.errors
+        );
+        assert_eq!(fs::read(&object_path).unwrap(), before);
+
+        let _ = fs::remove_dir_all(&context.cwd);
     }
 
     #[test]
@@ -16381,6 +16482,11 @@ pub(crate) enum MetaEditLineNumberLengthPolicy {
     UnknownCompatibility,
 }
 
+struct MetaEditLineNumberLengthAuthorization {
+    policy: MetaEditLineNumberLengthPolicy,
+    provenance: Option<PlatformXmlOwnerProvenance>,
+}
+
 pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -> AdapterOutcome {
     let edit_result = (|| -> Result<(String, PathBuf, bool, Vec<String>), String> {
         let definition_file = path_arg(args, &["definitionFile", "DefinitionFile"]);
@@ -16412,7 +16518,7 @@ pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -
         let mut counts = MetaEditCounts::default();
         let mut info_lines = vec![format!("[INFO] Object: {object_type}.{object_name}")];
         let mut transaction = CompileTransaction::new();
-        if let Some(definition_file) = definition_file {
+        let line_number_length_provenance = if let Some(definition_file) = definition_file {
             let definition_path = absolutize(definition_file.clone(), &context.cwd);
             if !definition_path.exists() {
                 return Err(format!(
@@ -16424,49 +16530,58 @@ pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -
                 format!("DefinitionFile JSON parse error: {err}")
             })?
             .bind_to(&mut transaction)?;
-            let line_number_length_policy =
-                if meta_edit_definition_requests_line_number_length(&definition) {
-                    meta_edit_line_number_length_policy(
-                        &object_type,
-                        &object_path,
-                        context,
-                        &mut transaction,
-                    )?
-                } else {
-                    MetaEditLineNumberLengthPolicy::UnknownCompatibility
-                };
+            let authorization = if meta_edit_definition_requests_line_number_length(&definition) {
+                meta_edit_line_number_length_policy(
+                    &object_type,
+                    &object_path,
+                    context,
+                    &mut transaction,
+                )?
+            } else {
+                MetaEditLineNumberLengthAuthorization {
+                    policy: MetaEditLineNumberLengthPolicy::UnknownCompatibility,
+                    provenance: None,
+                }
+            };
             meta_edit_apply_definition(
                 &mut xml_text,
                 &object_type,
                 &object_name,
                 &definition,
-                line_number_length_policy,
+                authorization.policy,
                 &mut counts,
             )?;
             info_lines.extend(meta_edit_definition_info_lines(&definition));
+            authorization.provenance
         } else {
             let operation = operation.expect("checked above");
-            let line_number_length_policy =
-                if meta_edit_inline_requests_line_number_length(operation, value) {
-                    meta_edit_line_number_length_policy(
-                        &object_type,
-                        &object_path,
-                        context,
-                        &mut transaction,
-                    )?
-                } else {
-                    MetaEditLineNumberLengthPolicy::UnknownCompatibility
-                };
+            let authorization = if meta_edit_inline_requests_line_number_length(operation, value) {
+                meta_edit_line_number_length_policy(
+                    &object_type,
+                    &object_path,
+                    context,
+                    &mut transaction,
+                )?
+            } else {
+                MetaEditLineNumberLengthAuthorization {
+                    policy: MetaEditLineNumberLengthPolicy::UnknownCompatibility,
+                    provenance: None,
+                }
+            };
             meta_edit_apply_inline_operation(
                 &mut xml_text,
                 &object_type,
                 &object_name,
                 operation,
                 value,
-                line_number_length_policy,
+                authorization.policy,
                 &mut counts,
             )?;
-        }
+            authorization.provenance
+        };
+
+        #[cfg(test)]
+        run_meta_edit_after_line_number_length_policy_hook();
 
         Document::parse(xml_text.trim_start_matches('\u{feff}'))
             .map_err(|err| format!("XML parse error after meta-edit: {err}"))?;
@@ -16476,6 +16591,9 @@ pub(crate) fn edit_meta(args: &Map<String, Value>, context: &WorkspaceContext) -
         let mut warnings = Vec::new();
         if changed {
             transaction.replace_bytes(&object_path, &original_bytes, serialized_bytes)?;
+            if let Some(provenance) = line_number_length_provenance {
+                provenance.bind_to(&mut transaction)?;
+            }
             guard_active_format_owner(&mut transaction, &object_path, context)?;
             let validation_path = object_path.clone();
             warnings = transaction
@@ -16636,22 +16754,30 @@ pub(crate) fn meta_edit_object_identity(xml_text: &str) -> Result<(String, Strin
     Ok((object_type, object_name))
 }
 
-pub(crate) fn meta_edit_line_number_length_policy(
+fn meta_edit_line_number_length_policy(
     object_type: &str,
     object_path: &Path,
     context: &WorkspaceContext,
     transaction: &mut CompileTransaction,
-) -> Result<MetaEditLineNumberLengthPolicy, String> {
+) -> Result<MetaEditLineNumberLengthAuthorization, String> {
     if matches!(
         object_type,
         "Report" | "DataProcessor" | "ExternalReport" | "ExternalDataProcessor"
     ) {
-        return Ok(MetaEditLineNumberLengthPolicy::NotApplicable);
+        return Ok(MetaEditLineNumberLengthAuthorization {
+            policy: MetaEditLineNumberLengthPolicy::NotApplicable,
+            provenance: None,
+        });
     }
 
     let resolution = match resolve_platform_xml_owners_with_provenance(object_path, context) {
         Ok(resolution) => resolution,
-        Err(_) => return Ok(MetaEditLineNumberLengthPolicy::UnknownCompatibility),
+        Err(_) => {
+            return Ok(MetaEditLineNumberLengthAuthorization {
+                policy: MetaEditLineNumberLengthPolicy::UnknownCompatibility,
+                provenance: None,
+            })
+        }
     };
     let Some(owner) = resolution.owners.iter().find(|owner| {
         matches!(
@@ -16659,7 +16785,10 @@ pub(crate) fn meta_edit_line_number_length_policy(
             PlatformXmlOwnerKind::Configuration | PlatformXmlOwnerKind::Extension
         )
     }) else {
-        return Ok(MetaEditLineNumberLengthPolicy::UnknownCompatibility);
+        return Ok(MetaEditLineNumberLengthAuthorization {
+            policy: MetaEditLineNumberLengthPolicy::UnknownCompatibility,
+            provenance: None,
+        });
     };
     if owner.path != object_path {
         transaction.guard_or_verify_exact_preimage(&owner.path, &owner.raw)?;
@@ -16680,15 +16809,24 @@ pub(crate) fn meta_edit_line_number_length_policy(
         .map(str::trim)
         .filter(|mode| !mode.is_empty())
     else {
-        return Ok(MetaEditLineNumberLengthPolicy::UnknownCompatibility);
+        return Ok(MetaEditLineNumberLengthAuthorization {
+            policy: MetaEditLineNumberLengthPolicy::UnknownCompatibility,
+            provenance: None,
+        });
     };
 
-    Ok(meta_edit_line_number_length_policy_from_mode(mode))
+    Ok(MetaEditLineNumberLengthAuthorization {
+        policy: meta_edit_line_number_length_policy_from_mode(mode),
+        provenance: Some(resolution.provenance),
+    })
 }
 
 pub(crate) fn meta_edit_line_number_length_policy_from_mode(
     mode: &str,
 ) -> MetaEditLineNumberLengthPolicy {
+    if !cf_validate_enum_allowed("CompatibilityMode").contains(&mode) {
+        return MetaEditLineNumberLengthPolicy::UnknownCompatibility;
+    }
     if mode == "DontUse" {
         return MetaEditLineNumberLengthPolicy::Editable;
     }
