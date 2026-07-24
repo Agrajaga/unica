@@ -2,11 +2,13 @@
 
 use crate::application::operation_descriptors::{FORM_PATH, OBJECT_PATH};
 use crate::application::AdapterOutcome;
+use crate::domain::form_edit::validate_form_edit_definition;
 use crate::domain::format_profile::{classify_root_version, FormatCompatibility};
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::platform_xml_owner::{root_version_literal, MANAGED_FORM_ROOT};
 use crate::infrastructure::source_roots::normalize_path_identity;
 use roxmltree::Document;
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -165,12 +167,26 @@ pub(crate) fn validate_form(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
 ) -> AdapterOutcome {
+    validate_form_with_source(args, context, None)
+}
+
+fn validate_form_with_source(
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+    source_override: Option<(&Path, &str)>,
+) -> AdapterOutcome {
     let result = (|| -> Result<(bool, String, PathBuf, Vec<String>), String> {
-        let raw_path = required_path(args, FORM_PATH, "FormPath")?;
-        let form_path = resolve_form_info_path(absolutize(raw_path, &context.cwd));
-        if !form_path.is_file() {
-            return Err(format!("File not found: {}", form_path.display()));
-        }
+        let form_path = match source_override {
+            Some((path, _)) => path.to_path_buf(),
+            None => {
+                let raw_path = required_path(args, FORM_PATH, "FormPath")?;
+                let path = resolve_form_info_path(absolutize(raw_path, &context.cwd));
+                if !path.is_file() {
+                    return Err(format!("File not found: {}", path.display()));
+                }
+                path
+            }
+        };
 
         let detailed = bool_arg(args, &["detailed", "Detailed"]);
         let max_errors = int_arg(args, &["maxErrors", "MaxErrors"])
@@ -179,7 +195,10 @@ pub(crate) fn validate_form(
             .unwrap_or(30);
         let form_name = form_validation_name(&form_path);
 
-        let text = read_utf8_sig(&form_path)?;
+        let text = match source_override {
+            Some((_, source)) => source.to_string(),
+            None => read_utf8_sig(&form_path)?,
+        };
         let source = text.trim_start_matches('\u{feff}');
         let doc = match Document::parse(source) {
             Ok(doc) => doc,
@@ -710,22 +729,17 @@ fn resolve_form_binding_path(
     }
 
     let clean_path = strip_form_binding_prefixes(data_path);
-    let mut segments = clean_path.split('.');
-    let root_attr = segments.next().unwrap_or("");
+    let root_attr = clean_path.split('.').next().unwrap_or("");
     if root_attr != "Items" {
         return FormBindingPathResolution::Attribute(root_attr.to_string());
     }
 
-    let table_name = segments.next().unwrap_or("");
-    let current_data = segments.next().unwrap_or("");
-    if table_name.is_empty() || current_data != "CurrentData" {
+    let Some(table_name) = form_items_current_data_target(&clean_path) else {
         return FormBindingPathResolution::UnknownItemsShape;
-    }
+    };
 
-    match table_path(table_name) {
-        FormBindingTablePath::Missing => {
-            FormBindingPathResolution::MissingTable(table_name.to_string())
-        }
+    match table_path(&table_name) {
+        FormBindingTablePath::Missing => FormBindingPathResolution::MissingTable(table_name),
         FormBindingTablePath::Unbound => FormBindingPathResolution::Skip,
         FormBindingTablePath::Bound(table_path) => {
             let table_path = table_path.trim();
@@ -739,6 +753,15 @@ fn resolve_form_binding_path(
             }
         }
     }
+}
+
+fn form_items_current_data_target(value: &str) -> Option<String> {
+    let path = value.strip_prefix("Items.")?;
+    let (target, remainder) = path.rsplit_once(".CurrentData")?;
+    if target.is_empty() || (!remainder.is_empty() && !remainder.starts_with('.')) {
+        return None;
+    }
+    Some(target.to_string())
 }
 
 pub(crate) fn strip_form_binding_prefixes(value: &str) -> String {
@@ -4120,14 +4143,28 @@ fn append_form_compile_stats(stdout: &mut String, stats: &FormCompileStats) {
 }
 
 pub(crate) fn edit_form(args: &Map<String, Value>, context: &WorkspaceContext) -> AdapterOutcome {
-    edit_form_with_mode(args, context, FormEditMode::Apply)
+    apply_with_data(args, context).outcome
 }
 
 pub(crate) fn preview_form_edit(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
 ) -> AdapterOutcome {
-    edit_form_with_mode(args, context, FormEditMode::Preview)
+    preview_with_data(args, context).outcome
+}
+
+pub(crate) fn apply_with_data(
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+) -> FormEditExecution {
+    form_edit_with_mode_data(args, context, FormEditMode::Apply)
+}
+
+pub(crate) fn preview_with_data(
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+) -> FormEditExecution {
+    form_edit_with_mode_data(args, context, FormEditMode::Preview)
 }
 
 pub(crate) fn has_edit_payload(args: &Map<String, Value>) -> bool {
@@ -4160,7 +4197,56 @@ pub(crate) fn edit_form_with_mode(
     context: &WorkspaceContext,
     mode: FormEditMode,
 ) -> AdapterOutcome {
-    let edit_result = (|| -> Result<(String, PathBuf, bool, Vec<String>), String> {
+    form_edit_with_mode_data(args, context, mode).outcome
+}
+
+pub(crate) struct FormEditExecution {
+    pub(crate) outcome: AdapterOutcome,
+    pub(crate) data: Option<FormEditData>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FormEditData {
+    changed: bool,
+    removed: Vec<FormEditRemovedElement>,
+    validation: FormEditValidation,
+}
+
+#[derive(Debug, Serialize)]
+struct FormEditRemovedElement {
+    name: String,
+    kind: String,
+    reason: FormEditRemovalReason,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum FormEditRemovalReason {
+    Requested,
+    Contained,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum FormEditValidation {
+    Passed,
+}
+
+struct FormEditSuccess {
+    stdout: String,
+    form_path: PathBuf,
+    changed: bool,
+    warnings: Vec<String>,
+    removals: Vec<FormEditPlannedRemoval>,
+}
+
+fn form_edit_with_mode_data(
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+    mode: FormEditMode,
+) -> FormEditExecution {
+    let edit_result = (|| -> Result<FormEditSuccess, String> {
         let form_path_raw = required_path(args, FORM_PATH, "FormPath")?;
         let form_path = absolutize(form_path_raw.clone(), &context.cwd);
         if !form_path.exists() {
@@ -4197,7 +4283,10 @@ pub(crate) fn edit_form_with_mode(
         if let Some(commands) = defn.get("commands").and_then(Value::as_array) {
             form_edit_validate_named_objects(&xml_text, commands, "Command", "command")?;
         }
+        let planned_removals = form_edit_plan_removals(&defn, &xml_text)?;
+        form_edit_validate_removal_definition_conflicts(&defn, &planned_removals)?;
         let planned_events = form_edit_plan_events(&defn, &xml_text)?;
+        form_edit_apply_planned_removals(&mut xml_text, &planned_removals);
         let form_name = form_edit_form_name(&form_path);
         let mut elem_ids = FormIdAllocator {
             next: form_edit_next_id(
@@ -4319,7 +4408,13 @@ pub(crate) fn edit_form_with_mode(
             .map_err(|err| format!("[ERROR] XML parse error after edit: {err}"))?;
         let edited_root = edited_document.root_element();
         require_form_root(edited_root).map_err(|error| format!("[ERROR] {error}"))?;
+        form_edit_validate_surviving_removal_references(edited_root, &planned_removals)?;
         form_edit_validate_emitted_type_qnames(edited_root, &emitted_type_qnames)?;
+        form_edit_require_valid(validate_form_with_source(
+            args,
+            context,
+            Some((&form_path, &xml_text)),
+        ))?;
         let changed = xml_text != original_xml_text;
         let mut warnings = Vec::new();
         if changed && !mode.is_preview() {
@@ -4334,6 +4429,29 @@ pub(crate) fn edit_form_with_mode(
         }
 
         let mut stdout = format!("=== form-edit: {form_name} ===\n\n");
+        if !planned_removals.is_empty() {
+            stdout.push_str(if mode.is_preview() {
+                "Planned removals:\n"
+            } else {
+                "Removed elements:\n"
+            });
+            for removal in &planned_removals {
+                stdout.push_str(&format!("  - {} ({})\n", removal.name, removal.kind));
+                if !removal.contained.is_empty() {
+                    stdout.push_str("    contained: ");
+                    stdout.push_str(
+                        &removal
+                            .contained
+                            .iter()
+                            .map(|node| format!("{} ({})", node.name, node.kind))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    );
+                    stdout.push('\n');
+                }
+            }
+            stdout.push('\n');
+        }
         if !added_form_events.is_empty() {
             stdout.push_str(if mode.is_preview() {
                 "Planned form events:\n"
@@ -4386,6 +4504,21 @@ pub(crate) fn edit_form_with_mode(
         if !added_element_events.is_empty() {
             total_parts.push(format!("{} element event(s)", added_element_events.len()));
         }
+        if !planned_removals.is_empty() {
+            let contained = planned_removals
+                .iter()
+                .map(|removal| removal.contained.len())
+                .sum::<usize>();
+            if contained > 0 {
+                total_parts.push(format!(
+                    "{} element removal(s) (+{} contained)",
+                    planned_removals.len(),
+                    contained
+                ));
+            } else {
+                total_parts.push(format!("{} element removal(s)", planned_removals.len()));
+            }
+        }
         if !added_elements.is_empty() {
             if companion_count > 0 {
                 total_parts.push(format!(
@@ -4411,52 +4544,399 @@ pub(crate) fn edit_form_with_mode(
         }
         stdout.push_str("Run /form-validate to verify.\n");
 
-        Ok((stdout, form_path, changed, warnings))
+        Ok(FormEditSuccess {
+            stdout,
+            form_path,
+            changed,
+            warnings,
+            removals: planned_removals,
+        })
     })();
 
     match edit_result {
-        Ok((stdout, form_path, changed, warnings)) => AdapterOutcome {
-            ok: true,
-            summary: if mode.is_preview() && !changed {
-                "dry run: unica.form.edit found an idempotent no-op".to_string()
-            } else if !changed {
-                "unica.form.edit completed with idempotent no-op".to_string()
-            } else if mode.is_preview() {
-                "dry run: unica.form.edit planned native managed form changes".to_string()
-            } else {
-                "unica.form.edit completed with native managed form editor".to_string()
-            },
-            changes: if changed {
-                vec![format!(
-                    "{} {}",
-                    if mode.is_preview() {
-                        "would update"
-                    } else {
-                        "updated"
-                    },
-                    form_path.display()
-                )]
-            } else {
-                Vec::new()
-            },
+        Ok(FormEditSuccess {
+            stdout,
+            form_path,
+            changed,
             warnings,
-            errors: Vec::new(),
-            artifacts: vec![form_path.display().to_string()],
-            stdout: Some(stdout),
-            stderr: None,
-            command: None,
+            removals,
+        }) => FormEditExecution {
+            outcome: AdapterOutcome {
+                ok: true,
+                summary: if mode.is_preview() && !changed {
+                    "dry run: unica.form.edit found an idempotent no-op".to_string()
+                } else if !changed {
+                    "unica.form.edit completed with idempotent no-op".to_string()
+                } else if mode.is_preview() {
+                    "dry run: unica.form.edit planned native managed form changes".to_string()
+                } else {
+                    "unica.form.edit completed with native managed form editor".to_string()
+                },
+                changes: if changed {
+                    vec![format!(
+                        "{} {}",
+                        if mode.is_preview() {
+                            "would update"
+                        } else {
+                            "updated"
+                        },
+                        form_path.display()
+                    )]
+                } else {
+                    Vec::new()
+                },
+                warnings,
+                errors: Vec::new(),
+                artifacts: vec![form_path.display().to_string()],
+                stdout: Some(stdout),
+                stderr: None,
+                command: None,
+            },
+            data: Some(FormEditData {
+                changed,
+                removed: form_edit_removed_elements(&removals),
+                validation: FormEditValidation::Passed,
+            }),
         },
-        Err(error) => AdapterOutcome {
-            ok: false,
-            summary: "unica.form.edit failed in native managed form editor".to_string(),
-            changes: Vec::new(),
-            warnings: Vec::new(),
-            errors: vec![error.clone()],
-            artifacts: Vec::new(),
-            stdout: None,
-            stderr: Some(format!("{error}\n")),
-            command: None,
+        Err(error) => FormEditExecution {
+            outcome: AdapterOutcome {
+                ok: false,
+                summary: "unica.form.edit failed in native managed form editor".to_string(),
+                changes: Vec::new(),
+                warnings: Vec::new(),
+                errors: vec![error.clone()],
+                artifacts: Vec::new(),
+                stdout: None,
+                stderr: Some(format!("{error}\n")),
+                command: None,
+            },
+            data: None,
         },
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FormEditContainedNode {
+    name: String,
+    kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FormEditPlannedRemoval {
+    name: String,
+    kind: String,
+    contained: Vec<FormEditContainedNode>,
+    range: Range<usize>,
+}
+
+fn form_edit_removed_elements(removals: &[FormEditPlannedRemoval]) -> Vec<FormEditRemovedElement> {
+    removals
+        .iter()
+        .flat_map(|removal| {
+            std::iter::once(FormEditRemovedElement {
+                name: removal.name.clone(),
+                kind: removal.kind.clone(),
+                reason: FormEditRemovalReason::Requested,
+            })
+            .chain(removal.contained.iter().map(|node| FormEditRemovedElement {
+                name: node.name.clone(),
+                kind: node.kind.clone(),
+                reason: FormEditRemovalReason::Contained,
+            }))
+        })
+        .collect()
+}
+
+fn form_edit_plan_removals(
+    definition: &Value,
+    xml_text: &str,
+) -> Result<Vec<FormEditPlannedRemoval>, String> {
+    let Some(requests) = definition.get("removeElements").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let document =
+        Document::parse(xml_text).map_err(|error| format!("[ERROR] XML parse error: {error}"))?;
+    let root = document.root_element();
+    require_form_root(root).map_err(|error| format!("[ERROR] {error}"))?;
+    let base_form = form_validation_child(root, "BaseForm");
+    let mut planned = Vec::with_capacity(requests.len());
+
+    for request in requests {
+        let name = request
+            .get("name")
+            .and_then(Value::as_str)
+            .expect("validated removeElements request must contain a string name");
+        let named_nodes = root
+            .descendants()
+            .filter(|node| {
+                node.is_element()
+                    && node.tag_name().namespace() == Some(FORM_LOGFORM_NS)
+                    && node.attribute("name") == Some(name)
+                    && !base_form.is_some_and(|base| {
+                        *node == base || node.ancestors().any(|ancestor| ancestor == base)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let public_nodes = named_nodes
+            .iter()
+            .copied()
+            .filter(|node| {
+                node.parent().is_some_and(|parent| {
+                    parent.is_element()
+                        && parent.tag_name().namespace() == Some(FORM_LOGFORM_NS)
+                        && parent.tag_name().name() == "ChildItems"
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let target = match public_nodes.as_slice() {
+            [] if named_nodes.is_empty() => {
+                return Err(format!(
+                    "FORM_ELEMENT_NOT_FOUND: form element `{name}` was not found"
+                ));
+            }
+            [] => {
+                return Err(format!(
+                    "FORM_EDIT_REMOVE_ELEMENT_PROTECTED: form element `{name}` is not directly owned by a logform ChildItems container"
+                ));
+            }
+            [target] => *target,
+            _ => {
+                return Err(format!(
+                    "FORM_EDIT_REMOVE_ELEMENT_AMBIGUOUS: form element `{name}` has {} public matches",
+                    public_nodes.len()
+                ));
+            }
+        };
+
+        let range = xml_element_line_range(xml_text, target.range());
+        if let Some(existing) = planned
+            .iter()
+            .find(|existing: &&FormEditPlannedRemoval| ranges_overlap(&existing.range, &range))
+        {
+            return Err(format!(
+                "FORM_EDIT_REMOVE_ELEMENT_OVERLAP: removal `{name}` overlaps removal `{}`",
+                existing.name
+            ));
+        }
+        let contained = target
+            .descendants()
+            .skip(1)
+            .filter_map(|node| {
+                if !node.is_element() || node.tag_name().namespace() != Some(FORM_LOGFORM_NS) {
+                    return None;
+                }
+                let name = node.attribute("name")?;
+                // Form elements and structural companions have stable IDs.
+                // Named properties such as <Event name="OnChange"> do not.
+                node.attribute("id")?;
+                Some(FormEditContainedNode {
+                    name: name.to_string(),
+                    kind: node.tag_name().name().to_string(),
+                })
+            })
+            .collect();
+        planned.push(FormEditPlannedRemoval {
+            name: name.to_string(),
+            kind: target.tag_name().name().to_string(),
+            contained,
+            range,
+        });
+    }
+
+    Ok(planned)
+}
+
+fn form_edit_removed_node_names(removals: &[FormEditPlannedRemoval]) -> HashSet<&str> {
+    removals
+        .iter()
+        .flat_map(|removal| {
+            std::iter::once(removal.name.as_str())
+                .chain(removal.contained.iter().map(|node| node.name.as_str()))
+        })
+        .collect()
+}
+
+fn form_edit_validate_removal_definition_conflicts(
+    definition: &Value,
+    removals: &[FormEditPlannedRemoval],
+) -> Result<(), String> {
+    if removals.is_empty() {
+        return Ok(());
+    }
+    let removed_names = form_edit_removed_node_names(removals);
+
+    for property in ["into", "after"] {
+        if let Some(target) = definition.get(property).and_then(Value::as_str) {
+            if removed_names.contains(target) {
+                return Err(format!(
+                    "FORM_EDIT_REMOVE_DEFINITION_CONFLICT: definition property `{property}` targets removed element `{target}`"
+                ));
+            }
+        }
+    }
+
+    if let Some(events) = definition.get("elementEvents").and_then(Value::as_array) {
+        for (index, event) in events.iter().enumerate() {
+            let Some(target) = event
+                .as_object()
+                .and_then(|object| object.get("element"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if removed_names.contains(target) {
+                return Err(format!(
+                    "FORM_EDIT_REMOVE_DEFINITION_CONFLICT: definition property `elementEvents[{index}].element` targets removed element `{target}`"
+                ));
+            }
+        }
+    }
+
+    if let Some(elements) = definition.get("elements").and_then(Value::as_array) {
+        form_edit_validate_removed_new_element_names(elements, "elements", &removed_names)?;
+    }
+    Ok(())
+}
+
+fn form_edit_validate_removed_new_element_names(
+    elements: &[Value],
+    property: &str,
+    removed_names: &HashSet<&str>,
+) -> Result<(), String> {
+    for (index, element) in elements.iter().enumerate() {
+        let element_property = format!("{property}[{index}]");
+        if let Some(name) = form_edit_element_display_name(element) {
+            if removed_names.contains(name.as_str()) {
+                return Err(format!(
+                    "FORM_EDIT_REMOVE_DEFINITION_CONFLICT: definition property `{element_property}` defines removed element `{name}`"
+                ));
+            }
+        }
+        let Some(object) = element.as_object() else {
+            continue;
+        };
+        for nested_property in ["children", "columns"] {
+            if let Some(nested) = object.get(nested_property).and_then(Value::as_array) {
+                form_edit_validate_removed_new_element_names(
+                    nested,
+                    &format!("{element_property}.{nested_property}"),
+                    removed_names,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn form_edit_validate_surviving_removal_references(
+    root: roxmltree::Node<'_, '_>,
+    removals: &[FormEditPlannedRemoval],
+) -> Result<(), String> {
+    if removals.is_empty() {
+        return Ok(());
+    }
+    let removed_names = form_edit_removed_node_names(removals);
+    let base_form = form_validation_child(root, "BaseForm");
+
+    for node in root.descendants().filter(|node| {
+        node.is_element()
+            && node.tag_name().namespace() == Some(FORM_LOGFORM_NS)
+            && !base_form.is_some_and(|base| {
+                *node == base || node.ancestors().any(|ancestor| ancestor == base)
+            })
+    }) {
+        let property = node.tag_name().name();
+        if FORM_BINDING_PATH_PROPERTIES
+            .iter()
+            .any(|(_, xml_property)| *xml_property == property)
+        {
+            let value = node.text().unwrap_or("").trim();
+            if let Some(target) = form_edit_items_binding_target(value) {
+                if removed_names.contains(target.as_str()) {
+                    return Err(form_edit_surviving_reference_diagnostic(
+                        node, property, value, &target,
+                    ));
+                }
+            }
+        } else if property == "CommandName" {
+            let value = node.text().unwrap_or("").trim();
+            if let Some(target) = form_edit_item_standard_command_target(value) {
+                if removed_names.contains(target) {
+                    return Err(form_edit_surviving_reference_diagnostic(
+                        node, property, value, target,
+                    ));
+                }
+            }
+        } else if property == "Item"
+            && node.parent().is_some_and(|parent| {
+                parent.is_element()
+                    && parent.tag_name().namespace() == Some(FORM_LOGFORM_NS)
+                    && parent.tag_name().name() == "AdditionSource"
+            })
+        {
+            let value = node.text().unwrap_or("").trim();
+            if removed_names.contains(value) {
+                return Err(form_edit_surviving_reference_diagnostic(
+                    node,
+                    "AdditionSource/Item",
+                    value,
+                    value,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn form_edit_items_binding_target(value: &str) -> Option<String> {
+    let canonical = strip_form_binding_prefixes(value.trim());
+    form_items_current_data_target(&canonical)
+}
+
+fn form_edit_item_standard_command_target(value: &str) -> Option<&str> {
+    let value = value.trim().strip_prefix("Form.Item.")?;
+    let (target, command) = value.rsplit_once(".StandardCommand.")?;
+    (!target.is_empty() && !command.is_empty()).then_some(target)
+}
+
+fn form_edit_surviving_reference_diagnostic(
+    reference: roxmltree::Node<'_, '_>,
+    property: &str,
+    value: &str,
+    target: &str,
+) -> String {
+    let owner = reference
+        .ancestors()
+        .skip(1)
+        .find(|ancestor| {
+            ancestor.is_element()
+                && ancestor.tag_name().namespace() == Some(FORM_LOGFORM_NS)
+                && ancestor.attribute("name").is_some()
+        })
+        .and_then(|ancestor| ancestor.attribute("name"))
+        .unwrap_or("<form>");
+    format!(
+        "FORM_EDIT_REMOVE_SURVIVING_REFERENCE: surviving element `{owner}` property `{property}` references removed element `{target}` (value `{value}`)"
+    )
+}
+
+fn ranges_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
+    left.start < right.end && right.start < left.end
+}
+
+fn form_edit_apply_planned_removals(xml_text: &mut String, removals: &[FormEditPlannedRemoval]) {
+    let mut ranges = removals
+        .iter()
+        .map(|removal| removal.range.clone())
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|range| std::cmp::Reverse(range.start));
+    for range in ranges {
+        xml_text.replace_range(range, "");
     }
 }
 
@@ -4609,9 +5089,7 @@ fn form_edit_resolve_definition_guarded(
             Err("unica.form.edit accepts exactly one of JsonPath or inline definition".to_string())
         }
         (Some(definition), None) => {
-            if !definition.is_object() {
-                return Err("unica.form.edit argument `definition` must be object".to_string());
-            }
+            validate_form_edit_definition(definition)?;
             Ok(definition.clone())
         }
         (None, Some(json_path_raw)) => {
@@ -4623,9 +5101,7 @@ fn form_edit_resolve_definition_guarded(
                 format!("failed to parse form edit JSON: {err}")
             })?
             .bind_to(transaction)?;
-            if !definition.is_object() {
-                return Err("form edit JSON root must be an object".to_string());
-            }
+            validate_form_edit_definition(&definition)?;
             Ok(definition)
         }
         (None, None) => {
@@ -5434,20 +5910,23 @@ pub(crate) fn form_edit_publish_preserving_bom(
             "FormPath".to_string(),
             Value::String(validation_path.display().to_string()),
         )]);
-        let outcome = validate_form(&validation_args, context);
-        if outcome.ok {
-            return Ok(());
-        }
-        let details = if outcome.errors.is_empty() {
-            outcome
-                .stdout
-                .unwrap_or_else(|| "validation returned no diagnostics".to_string())
-        } else {
-            outcome.errors.join("; ")
-        };
-        Err(format!("form validation failed: {details}"))
+        form_edit_require_valid(validate_form(&validation_args, context))
     })?;
     Ok(report.cleanup_warnings)
+}
+
+fn form_edit_require_valid(outcome: AdapterOutcome) -> Result<(), String> {
+    if outcome.ok {
+        return Ok(());
+    }
+    let details = if outcome.errors.is_empty() {
+        outcome
+            .stdout
+            .unwrap_or_else(|| "validation returned no diagnostics".to_string())
+    } else {
+        outcome.errors.join("; ")
+    };
+    Err(format!("form validation failed: {details}"))
 }
 
 pub(crate) fn form_edit_form_name(path: &Path) -> String {
@@ -10958,6 +11437,1090 @@ mod tests {
     }
 
     #[test]
+    fn form_edit_contract_rejects_unknown_json_path_section_before_write() {
+        let context = temp_context("edit-strict-json-path");
+        let form_path = context.cwd.join("Form.xml");
+        let json_path = context.cwd.join("edit.json");
+        write_file(&form_path, editable_form_xml(false));
+        let original = fs::read(&form_path).unwrap();
+        write_file(&json_path, r#"{"unexpectedSection": []}"#);
+
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "JsonPath".to_string(),
+                json!(json_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("FORM_EDIT_UNKNOWN_SECTION")),
+            "{:?}",
+            outcome.errors
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_preview_plans_exact_subtree_and_reports_contained_nodes() {
+        let context = temp_context("edit-remove-exact");
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_edit_remove_test_xml(
+            r#"		<InputField name="Target" id="1">
+			<DataPath>Object.Target</DataPath>
+			<ContextMenu name="TargetContextMenu" id="2"/>
+			<ExtendedTooltip name="TargetExtendedTooltip" id="3"/>
+		</InputField>
+		<InputField name="TargetDetails" id="4">
+			<ContextMenu name="TargetDetailsContextMenu" id="5"/>
+			<ExtendedTooltip name="TargetDetailsExtendedTooltip" id="6"/>
+		</InputField>
+"#,
+        )
+        .into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"removeElements": [{"name": "Target"}]}),
+            ),
+        ]);
+
+        let outcome = preview_form_edit(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .changes
+                .iter()
+                .any(|change| change.contains("would update")),
+            "{outcome:?}"
+        );
+        let stdout = outcome.stdout.unwrap_or_default();
+        assert!(stdout.contains("Planned removals:"), "{stdout}");
+        assert!(stdout.contains("  - Target (InputField)"), "{stdout}");
+        assert!(
+            stdout.contains(
+                "    contained: TargetContextMenu (ContextMenu), TargetExtendedTooltip (ExtendedTooltip)"
+            ),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("TargetDetails"), "{stdout}");
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let outcome = edit_form(&args, &context);
+        assert!(outcome.ok, "{outcome:?}");
+        let updated = fs::read_to_string(&form_path).unwrap();
+        assert!(
+            !updated.contains("<InputField name=\"Target\" id=\"1\">"),
+            "{updated}"
+        );
+        assert!(!updated.contains("TargetContextMenu"), "{updated}");
+        assert!(!updated.contains("TargetExtendedTooltip"), "{updated}");
+        assert!(updated.contains("name=\"TargetDetails\""), "{updated}");
+
+        let applied = fs::read(&form_path).unwrap();
+        let repeated = edit_form(&args, &context);
+        assert!(!repeated.ok, "{repeated:?}");
+        assert!(
+            repeated
+                .errors
+                .iter()
+                .any(|error| error.contains("FORM_ELEMENT_NOT_FOUND")),
+            "{repeated:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), applied);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_matches_element_names_exactly_without_trimming() {
+        let context = temp_context("edit-remove-exact-whitespace");
+        let form_path = context.cwd.join("Form.xml");
+        let original =
+            form_edit_remove_test_xml("\t\t<InputField name=\"Target\" id=\"1\"/>\n").into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"removeElements": [{"name": "Target "}]}),
+            ),
+        ]);
+
+        let outcome = preview_form_edit(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("FORM_ELEMENT_NOT_FOUND")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_applies_to_an_input_field_inside_table_child_items() {
+        let context = temp_context("edit-remove-table-column-input");
+        let form_path = context.cwd.join("Form.xml");
+        fs::write(&form_path, form_edit_remove_test_xml("")).unwrap();
+        let create_args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({
+                    "attributes": [{
+                        "name": "Rows",
+                        "type": "ТаблицаЗначений",
+                        "columns": [{"name": "Value", "type": "string"}]
+                    }],
+                    "elements": [{
+                        "table": "Rows",
+                        "path": "Rows",
+                        "columns": [{"input": "Value", "path": "Rows.Value"}]
+                    }]
+                }),
+            ),
+        ]);
+        let created = edit_form(&create_args, &context);
+        assert!(created.ok, "{created:?}");
+        let before_removal = fs::read_to_string(&form_path).unwrap();
+        assert!(
+            before_removal.contains("<Table name=\"Rows\""),
+            "{before_removal}"
+        );
+        assert!(
+            before_removal.contains("<InputField name=\"Value\""),
+            "{before_removal}"
+        );
+
+        let remove_args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"removeElements": [{"name": "Value"}]}),
+            ),
+        ]);
+        let removed = edit_form(&remove_args, &context);
+        assert!(removed.ok, "{removed:?}");
+        let updated = fs::read_to_string(&form_path).unwrap();
+        assert!(updated.contains("<Table name=\"Rows\""), "{updated}");
+        assert!(!updated.contains("<InputField name=\"Value\""), "{updated}");
+        assert!(
+            updated.contains("<Column name=\"Value\""),
+            "attribute column must remain: {updated}"
+        );
+        let validation = validate_form(&remove_args, &context);
+        assert!(validation.ok, "{validation:?}");
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_apply_is_atomic_when_a_later_target_is_missing() {
+        let context = temp_context("edit-remove-atomic-missing");
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_edit_remove_test_xml(
+            r#"		<InputField name="First" id="1"/>
+		<InputField name="Second" id="2"/>
+"#,
+        )
+        .into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({
+                    "removeElements": [
+                        {"name": "First"},
+                        {"name": "Missing"},
+                        {"name": "Second"}
+                    ]
+                }),
+            ),
+        ]);
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("FORM_ELEMENT_NOT_FOUND")),
+            "{outcome:?}"
+        );
+        assert!(outcome.changes.is_empty(), "{outcome:?}");
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_rolls_back_when_a_mixed_addition_is_invalid() {
+        let context = temp_context("edit-remove-atomic-invalid-addition");
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_edit_remove_test_xml(
+            r#"		<InputField name="Target" id="1">
+			<ContextMenu name="TargetContextMenu" id="2"/>
+			<ExtendedTooltip name="TargetExtendedTooltip" id="3"/>
+		</InputField>
+"#,
+        )
+        .into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({
+                    "removeElements": [{"name": "Target"}],
+                    "elements": [{"input": "Broken", "path": "Missing.Value"}]
+                }),
+            ),
+        ]);
+
+        let preview = preview_form_edit(&args, &context);
+        assert!(!preview.ok, "{preview:?}");
+        assert!(
+            preview
+                .errors
+                .iter()
+                .any(|error| error.contains("attribute 'Missing' not found")),
+            "{preview:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let apply = edit_form(&args, &context);
+        assert!(!apply.ok, "{apply:?}");
+        assert_eq!(apply.errors, preview.errors);
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_apply_preserves_bom_and_crlf() {
+        let context = temp_context("edit-remove-bom-crlf");
+        let form_path = context.cwd.join("Form.xml");
+        let crlf_xml = form_edit_remove_test_xml(
+            r#"		<InputField name="RemoveMe" id="1">
+			<ContextMenu name="RemoveMeContextMenu" id="2"/>
+			<ExtendedTooltip name="RemoveMeExtendedTooltip" id="3"/>
+		</InputField>
+		<InputField name="KeepMe" id="4">
+			<ContextMenu name="KeepMeContextMenu" id="5"/>
+			<ExtendedTooltip name="KeepMeExtendedTooltip" id="6"/>
+		</InputField>
+"#,
+        )
+        .replace('\n', "\r\n");
+        let mut original = vec![0xef, 0xbb, 0xbf];
+        original.extend_from_slice(crlf_xml.as_bytes());
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"removeElements": [{"name": "RemoveMe"}]}),
+            ),
+        ]);
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let updated = fs::read(&form_path).unwrap();
+        assert!(updated.starts_with(&[0xef, 0xbb, 0xbf]), "{updated:?}");
+        assert!(
+            !updated[3..].starts_with(&[0xef, 0xbb, 0xbf]),
+            "{updated:?}"
+        );
+        let updated_text = std::str::from_utf8(&updated[3..]).unwrap();
+        assert_platform_text_uses_crlf_without_bare_lf(updated_text);
+        assert!(
+            !updated_text.contains("name=\"RemoveMe\""),
+            "{updated_text}"
+        );
+        assert!(updated_text.contains("name=\"KeepMe\""), "{updated_text}");
+
+        let validation = validate_form(&args, &context);
+        assert!(validation.ok, "{validation:?}");
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_preview_apply_and_no_op_validate_the_projected_form() {
+        let context = temp_context("edit-remove-project-validation");
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_edit_remove_test_xml(
+            r#"		<InputField name="RemoveMe" id="1">
+			<ContextMenu name="RemoveMeContextMenu" id="2"/>
+			<ExtendedTooltip name="RemoveMeExtendedTooltip" id="3"/>
+		</InputField>
+		<InputField name="AlreadyInvalid" id="4"/>
+"#,
+        )
+        .into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let removal_args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"removeElements": [{"name": "RemoveMe"}]}),
+            ),
+        ]);
+
+        let preview = preview_form_edit(&removal_args, &context);
+        assert!(!preview.ok, "{preview:?}");
+        assert!(
+            preview.errors.iter().any(
+                |error| error.contains("AlreadyInvalid") && error.contains("missing companion")
+            ),
+            "{preview:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let apply = edit_form(&removal_args, &context);
+        assert!(!apply.ok, "{apply:?}");
+        assert_eq!(apply.errors, preview.errors);
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let no_op_args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            ("definition".to_string(), json!({})),
+        ]);
+        let no_op = edit_form(&no_op_args, &context);
+        assert!(!no_op.ok, "{no_op:?}");
+        assert!(
+            no_op.errors.iter().any(
+                |error| error.contains("AlreadyInvalid") && error.contains("missing companion")
+            ),
+            "{no_op:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_preview_reports_missing_target_with_stable_code() {
+        let context = temp_context("edit-remove-missing");
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_edit_remove_test_xml("").into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"removeElements": [{"name": "Missing"}]}),
+            ),
+        ]);
+
+        let outcome = preview_form_edit(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("FORM_ELEMENT_NOT_FOUND")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_preview_rejects_ambiguous_public_target() {
+        let context = temp_context("edit-remove-ambiguous");
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_edit_remove_test_xml(
+            r#"		<InputField name="Duplicate" id="1"/>
+		<UsualGroup name="Container" id="2">
+			<ChildItems>
+				<InputField name="Duplicate" id="3"/>
+			</ChildItems>
+		</UsualGroup>
+"#,
+        )
+        .into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"removeElements": [{"name": "Duplicate"}]}),
+            ),
+        ]);
+
+        let outcome = preview_form_edit(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("FORM_EDIT_REMOVE_ELEMENT_AMBIGUOUS")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_scopes_extension_targets_to_the_working_tree() {
+        let context = temp_context("edit-remove-extension-working-tree");
+        let form_path = context.cwd.join("Form.xml");
+        let target = r#"		<InputField name="Target" id="1">
+			<ContextMenu name="TargetContextMenu" id="2"/>
+			<ExtendedTooltip name="TargetExtendedTooltip" id="3"/>
+		</InputField>
+"#;
+        let baseline = format!(
+            r#"{target}		<InputField name="BaselineDependent" id="4">
+			<DataPath>Items.Target.CurrentData.Value</DataPath>
+			<ContextMenu name="BaselineDependentContextMenu" id="5"/>
+			<ExtendedTooltip name="BaselineDependentExtendedTooltip" id="6"/>
+		</InputField>
+"#
+        );
+        let original = form_edit_remove_extension_test_xml(target, baseline.as_str()).into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"removeElements": [{"name": "Target"}]}),
+            ),
+        ]);
+
+        let preview = preview_form_edit(&args, &context);
+        assert!(preview.ok, "{preview:?}");
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let apply = edit_form(&args, &context);
+        assert!(apply.ok, "{apply:?}");
+        let updated = fs::read_to_string(&form_path).unwrap();
+        let document = Document::parse(&updated).unwrap();
+        let root = document.root_element();
+        let base_form = form_validation_child(root, "BaseForm").unwrap();
+        assert!(
+            form_validation_child(root, "ChildItems")
+                .unwrap()
+                .descendants()
+                .all(|node| node.attribute("name") != Some("Target")),
+            "{updated}"
+        );
+        assert!(
+            base_form
+                .descendants()
+                .any(|node| node.attribute("name") == Some("Target")),
+            "{updated}"
+        );
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_never_targets_a_baseline_only_element() {
+        let context = temp_context("edit-remove-extension-baseline-only");
+        let form_path = context.cwd.join("Form.xml");
+        let baseline_target = r#"		<InputField name="Target" id="1">
+			<ContextMenu name="TargetContextMenu" id="2"/>
+			<ExtendedTooltip name="TargetExtendedTooltip" id="3"/>
+		</InputField>
+"#;
+        let original = form_edit_remove_extension_test_xml("", baseline_target).into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"removeElements": [{"name": "Target"}]}),
+            ),
+        ]);
+
+        let preview = preview_form_edit(&args, &context);
+        assert!(!preview.ok, "{preview:?}");
+        assert!(
+            preview
+                .errors
+                .iter()
+                .any(|error| error.contains("FORM_ELEMENT_NOT_FOUND")),
+            "{preview:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_preview_rejects_protected_root_and_nested_targets() {
+        for (case, name, child_items) in [
+            ("root", "FormCommandBar", ""),
+            (
+                "nested",
+                "TargetContextMenu",
+                r#"		<InputField name="Target" id="1">
+			<ContextMenu name="TargetContextMenu" id="2"/>
+		</InputField>
+"#,
+            ),
+        ] {
+            let context = temp_context(&format!("edit-remove-protected-{case}"));
+            let form_path = context.cwd.join("Form.xml");
+            let original = form_edit_remove_test_xml(child_items).into_bytes();
+            fs::write(&form_path, &original).unwrap();
+            let args = Map::from_iter([
+                (
+                    "FormPath".to_string(),
+                    json!(form_path.display().to_string()),
+                ),
+                (
+                    "definition".to_string(),
+                    json!({"removeElements": [{"name": name}]}),
+                ),
+            ]);
+
+            let outcome = preview_form_edit(&args, &context);
+
+            assert!(!outcome.ok, "{case}: {outcome:?}");
+            assert!(
+                outcome
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("FORM_EDIT_REMOVE_ELEMENT_PROTECTED")),
+                "{case}: {outcome:?}"
+            );
+            assert_eq!(fs::read(&form_path).unwrap(), original);
+
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn form_edit_remove_preview_rejects_overlapping_requested_subtrees() {
+        let context = temp_context("edit-remove-overlap");
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_edit_remove_test_xml(
+            r#"		<UsualGroup name="Container" id="1">
+			<ChildItems>
+				<InputField name="Nested" id="2"/>
+			</ChildItems>
+			<ExtendedTooltip name="ContainerExtendedTooltip" id="3"/>
+		</UsualGroup>
+"#,
+        )
+        .into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({
+                    "removeElements": [
+                        {"name": "Container"},
+                        {"name": "Nested"}
+                    ]
+                }),
+            ),
+        ]);
+
+        let outcome = preview_form_edit(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("FORM_EDIT_REMOVE_ELEMENT_OVERLAP")),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    fn assert_form_edit_remove_rejected_identically(
+        case: &str,
+        child_items: &str,
+        definition: Value,
+        expected_diagnostic_parts: &[&str],
+    ) {
+        let context = temp_context(case);
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_edit_remove_test_xml(child_items).into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            ("definition".to_string(), definition),
+        ]);
+
+        let preview = preview_form_edit(&args, &context);
+        assert!(!preview.ok, "{case} preview: {preview:?}");
+        assert_eq!(
+            fs::read(&form_path).unwrap(),
+            original,
+            "{case} preview changed source bytes"
+        );
+
+        let apply = edit_form(&args, &context);
+        assert!(!apply.ok, "{case} apply: {apply:?}");
+        assert_eq!(
+            fs::read(&form_path).unwrap(),
+            original,
+            "{case} apply changed source bytes"
+        );
+        assert_eq!(
+            preview.errors, apply.errors,
+            "{case}: preview/apply errors differ"
+        );
+        assert_eq!(
+            preview.stderr, apply.stderr,
+            "{case}: preview/apply stderr differs"
+        );
+        for expected in expected_diagnostic_parts {
+            assert!(
+                preview.errors.iter().any(|error| error.contains(expected)),
+                "{case}: missing {expected:?} in {preview:?}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_rejects_new_element_names_at_every_definition_depth() {
+        let child_items = "\t\t<InputField name=\"Target\" id=\"1\"/>\n";
+        for (case, elements, property) in [
+            (
+                "edit-remove-conflicting-root-element",
+                json!([{"input": "Target"}]),
+                "elements[0]",
+            ),
+            (
+                "edit-remove-conflicting-child-element",
+                json!([{"group": "AddedGroup", "children": [{"input": "Target"}]}]),
+                "elements[0].children[0]",
+            ),
+            (
+                "edit-remove-conflicting-column-element",
+                json!([{
+                    "table": "AddedTable",
+                    "path": "Rows",
+                    "columns": [{"input": "Target", "path": "Rows.Target"}]
+                }]),
+                "elements[0].columns[0]",
+            ),
+        ] {
+            assert_form_edit_remove_rejected_identically(
+                case,
+                child_items,
+                json!({
+                    "removeElements": [{"name": "Target"}],
+                    "elements": elements
+                }),
+                &["FORM_EDIT_REMOVE_DEFINITION_CONFLICT", property, "Target"],
+            );
+        }
+    }
+
+    #[test]
+    fn form_edit_remove_rejects_into_and_after_targets_in_removed_subtrees() {
+        let child_items = r#"		<UsualGroup name="Container" id="1">
+			<ChildItems>
+				<InputField name="Nested" id="2"/>
+			</ChildItems>
+		</UsualGroup>
+"#;
+        for (property, target) in [("into", "Nested"), ("after", "Container")] {
+            assert_form_edit_remove_rejected_identically(
+                &format!("edit-remove-conflicting-{property}"),
+                child_items,
+                json!({
+                    "removeElements": [{"name": "Container"}],
+                    (property): target,
+                    "elements": [{"input": "Added"}]
+                }),
+                &["FORM_EDIT_REMOVE_DEFINITION_CONFLICT", property, target],
+            );
+        }
+    }
+
+    #[test]
+    fn form_edit_remove_does_not_treat_event_names_as_contained_elements() {
+        let context = temp_context("edit-remove-event-name-is-not-element");
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_edit_remove_test_xml(
+            r#"		<InputField name="Target" id="1">
+			<Events>
+				<Event name="OnChange">TargetOnChange</Event>
+			</Events>
+			<ContextMenu name="TargetContextMenu" id="2"/>
+			<ExtendedTooltip name="TargetExtendedTooltip" id="3"/>
+		</InputField>
+		<UsualGroup name="OnChange" id="4">
+			<ChildItems/>
+			<ExtendedTooltip name="OnChangeExtendedTooltip" id="5"/>
+		</UsualGroup>
+"#,
+        )
+        .into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({
+                    "removeElements": [{"name": "Target"}],
+                    "into": "OnChange",
+                    "elements": [{"input": "Added"}]
+                }),
+            ),
+        ]);
+
+        let preview = preview_with_data(&args, &context);
+        assert!(preview.outcome.ok, "{:?}", preview.outcome);
+        let data = serde_json::to_value(preview.data).unwrap();
+        assert!(
+            data["removed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|removed| removed["name"] != "OnChange"),
+            "{data}"
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let apply = edit_form(&args, &context);
+        assert!(apply.ok, "{apply:?}");
+        let updated = fs::read_to_string(&form_path).unwrap();
+        assert!(!updated.contains("TargetOnChange"), "{updated}");
+        assert!(updated.contains("name=\"OnChange\""), "{updated}");
+        assert!(updated.contains("name=\"Added\""), "{updated}");
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_rejects_element_events_for_removed_subtree_nodes() {
+        let child_items = r#"		<InputField name="Target" id="1">
+			<DataPath>Object.Target</DataPath>
+			<ContextMenu name="TargetContextMenu" id="2"/>
+			<ExtendedTooltip name="TargetExtendedTooltip" id="3"/>
+		</InputField>
+"#;
+        assert_form_edit_remove_rejected_identically(
+            "edit-remove-conflicting-element-event",
+            child_items,
+            json!({
+                "removeElements": [{"name": "Target"}],
+                "elementEvents": [{
+                    "element": "TargetContextMenu",
+                    "name": "OnChange",
+                    "handler": "TargetOnChange"
+                }]
+            }),
+            &[
+                "FORM_EDIT_REMOVE_DEFINITION_CONFLICT",
+                "elementEvents[0].element",
+                "TargetContextMenu",
+            ],
+        );
+    }
+
+    #[test]
+    fn form_edit_remove_rejects_surviving_supported_xml_references() {
+        let cases = [
+            (
+                "binding-path",
+                r#"		<InputField name="Target" id="1"/>
+		<InputField name="Dependent" id="2">
+			<DataPath>Items.Target.CurrentData.Value</DataPath>
+		</InputField>
+"#,
+                "DataPath",
+                "Dependent",
+            ),
+            (
+                "standard-command",
+                r#"		<InputField name="Target" id="1"/>
+		<Button name="Dependent" id="2">
+			<CommandName>Form.Item.Target.StandardCommand.Add</CommandName>
+		</Button>
+"#,
+                "CommandName",
+                "Dependent",
+            ),
+            (
+                "dotted-standard-command-target",
+                r#"		<Table name="Table.Group" id="1"/>
+			<Button name="Dependent" id="2">
+				<CommandName>Form.Item.Table.Group.StandardCommand.Add</CommandName>
+			</Button>
+"#,
+                "CommandName",
+                "Dependent",
+            ),
+            (
+                "contained-companion-standard-command",
+                r#"		<InputField name="Target" id="1">
+			<ContextMenu name="TargetContextMenu" id="2"/>
+			<ExtendedTooltip name="TargetExtendedTooltip" id="3"/>
+		</InputField>
+			<Button name="Dependent" id="4">
+				<CommandName>Form.Item.TargetContextMenu.StandardCommand.Add</CommandName>
+				<ExtendedTooltip name="DependentExtendedTooltip" id="5"/>
+			</Button>
+"#,
+                "CommandName",
+                "Dependent",
+            ),
+            (
+                "dotted-binding-path",
+                r#"		<Table name="Table.Group" id="1"/>
+			<InputField name="Dependent" id="2">
+				<DataPath>Items.Table.Group.CurrentData.Value</DataPath>
+				<ContextMenu name="DependentContextMenu" id="3"/>
+				<ExtendedTooltip name="DependentExtendedTooltip" id="4"/>
+			</InputField>
+"#,
+                "DataPath",
+                "Dependent",
+            ),
+            (
+                "addition-source-item",
+                r#"		<Table name="Target" id="1"/>
+		<SearchStringAddition name="Dependent" id="2">
+			<AdditionSource>
+				<Item>Target</Item>
+				<Type>SearchStringRepresentation</Type>
+			</AdditionSource>
+		</SearchStringAddition>
+"#,
+                "AdditionSource/Item",
+                "Dependent",
+            ),
+        ];
+
+        for (case, child_items, property, owner) in cases {
+            let removal_target = if case.starts_with("dotted-") {
+                "Table.Group"
+            } else {
+                "Target"
+            };
+            let reference_target = if case == "contained-companion-standard-command" {
+                "TargetContextMenu"
+            } else {
+                removal_target
+            };
+            assert_form_edit_remove_rejected_identically(
+                &format!("edit-remove-dangling-{case}"),
+                child_items,
+                json!({"removeElements": [{"name": removal_target}]}),
+                &[
+                    "FORM_EDIT_REMOVE_SURVIVING_REFERENCE",
+                    property,
+                    owner,
+                    reference_target,
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn form_edit_remove_rejects_prefixed_items_reference_for_inline_and_json_path() {
+        let child_items = r#"		<InputField name="Target" id="1"/>
+		<InputField name="Dependent" id="2">
+			<DataPath>~Items.Target.CurrentData.Value</DataPath>
+		</InputField>
+"#;
+        let definition = json!({"removeElements": [{"name": "Target"}]});
+
+        for definition_mode in ["definition", "JsonPath"] {
+            let context = temp_context(&format!(
+                "edit-remove-prefixed-items-{}",
+                definition_mode.to_ascii_lowercase()
+            ));
+            let form_path = context.cwd.join("Form.xml");
+            let original_form = form_edit_remove_test_xml(child_items).into_bytes();
+            fs::write(&form_path, &original_form).unwrap();
+            let mut args = Map::from_iter([(
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            )]);
+            let definition_path = context.cwd.join("edit.json");
+            let original_definition = serde_json::to_vec_pretty(&definition).unwrap();
+            if definition_mode == "definition" {
+                args.insert("definition".to_string(), definition.clone());
+            } else {
+                fs::write(&definition_path, &original_definition).unwrap();
+                args.insert(
+                    "JsonPath".to_string(),
+                    json!(definition_path.display().to_string()),
+                );
+            }
+
+            let preview = preview_form_edit(&args, &context);
+            let form_after_preview = fs::read(&form_path).unwrap();
+            let apply = edit_form(&args, &context);
+            let form_after_apply = fs::read(&form_path).unwrap();
+
+            assert!(!preview.ok, "{definition_mode} preview: {preview:?}");
+            assert!(!apply.ok, "{definition_mode} apply: {apply:?}");
+            assert_eq!(
+                preview.errors, apply.errors,
+                "{definition_mode}: preview/apply errors differ"
+            );
+            assert_eq!(
+                preview.stderr, apply.stderr,
+                "{definition_mode}: preview/apply stderr differs"
+            );
+            let expected_diagnostic = "FORM_EDIT_REMOVE_SURVIVING_REFERENCE: surviving element \
+`Dependent` property `DataPath` references removed element `Target` \
+(value `~Items.Target.CurrentData.Value`)";
+            for outcome in [&preview, &apply] {
+                assert!(
+                    outcome
+                        .errors
+                        .iter()
+                        .any(|error| error == expected_diagnostic),
+                    "{definition_mode}: {outcome:?}"
+                );
+            }
+            assert_eq!(
+                form_after_preview, original_form,
+                "{definition_mode}: preview changed source bytes"
+            );
+            assert_eq!(
+                form_after_apply, original_form,
+                "{definition_mode}: apply changed source bytes"
+            );
+            if definition_mode == "JsonPath" {
+                assert_eq!(
+                    fs::read(&definition_path).unwrap(),
+                    original_definition,
+                    "JsonPath definition bytes changed"
+                );
+            }
+
+            let _ = fs::remove_dir_all(&context.cwd);
+        }
+    }
+
+    #[test]
+    fn form_edit_remove_rejects_only_exact_surviving_references_outside_removed_subtrees() {
+        let context = temp_context("edit-remove-reference-exactness");
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_edit_remove_test_xml(
+            r#"		<InputField name="Table" id="1">
+			<ContextMenu name="TableContextMenu" id="2"/>
+			<ExtendedTooltip name="TableExtendedTooltip" id="3"/>
+		</InputField>
+		<Table name="Table.Group" id="4">
+			<ContextMenu name="TableGroupContextMenu" id="5"/>
+			<AutoCommandBar name="TableGroupCommandBar" id="6"/>
+			<SearchStringAddition name="TableGroupSearchString" id="7"/>
+			<ViewStatusAddition name="TableGroupViewStatus" id="8"/>
+			<SearchControlAddition name="TableGroupSearchControl" id="9"/>
+		</Table>
+		<InputField name="Survivor" id="10">
+			<DataPath>~Items.Table.Group.CurrentData.Value</DataPath>
+			<ContextMenu name="SurvivorContextMenu" id="11"/>
+			<ExtendedTooltip name="SurvivorExtendedTooltip" id="12"/>
+		</InputField>
+"#,
+        )
+        .into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"removeElements": [{"name": "Table"}]}),
+            ),
+        ]);
+
+        let preview = preview_form_edit(&args, &context);
+
+        assert!(preview.ok, "{preview:?}");
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
     fn edit_form_uses_extension_id_floor_when_base_form_exists() {
         let context = temp_context("edit-extension-ids");
         let form_path = context.cwd.join("Form.xml");
@@ -16405,7 +17968,7 @@ mod tests {
                 ),
             ]);
 
-            let outcome = NativeOperationAdapter::invoke(
+            let outcome = NativeOperationAdapter::invoke_with_data(
                 "form-edit",
                 "unica.form.edit",
                 &args,
@@ -16413,7 +17976,8 @@ mod tests {
                 true,
                 true,
             )
-            .unwrap();
+            .unwrap()
+            .adapter;
 
             assert_eq!(outcome.ok, expected_ok, "{outcome:?}");
             if expected_ok {
@@ -16533,6 +18097,21 @@ mod tests {
         );
         format!(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Form xmlns=\"{FORM_LOGFORM_NS}\" xmlns:cfg=\"http://v8.1c.ru/8.1/data/enterprise/current-config\" xmlns:v8=\"{FORM_V8_NS}\" version=\"2.20\">\n{base_form}\t<AutoCommandBar name=\"FormCommandBar\" id=\"-1\"/>\n{form_events}\t<ChildItems>\n{child_items}\t</ChildItems>\n{attributes}\t<Commands/>\n</Form>\n"
+        )
+    }
+
+    fn form_edit_remove_test_xml(child_items: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Form xmlns=\"{FORM_LOGFORM_NS}\" version=\"2.20\">\n\t<AutoCommandBar name=\"FormCommandBar\" id=\"-1\"/>\n\t<ChildItems>\n{child_items}\t</ChildItems>\n\t<Attributes/>\n\t<Commands/>\n</Form>\n"
+        )
+    }
+
+    fn form_edit_remove_extension_test_xml(
+        working_child_items: &str,
+        base_child_items: &str,
+    ) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Form xmlns=\"{FORM_LOGFORM_NS}\" version=\"2.20\">\n\t<AutoCommandBar name=\"FormCommandBar\" id=\"-1\"/>\n\t<ChildItems>\n{working_child_items}\t</ChildItems>\n\t<Attributes/>\n\t<Commands/>\n\t<BaseForm version=\"2.20\">\n\t\t<AutoCommandBar name=\"FormCommandBar\" id=\"-1\"/>\n\t\t<ChildItems>\n{base_child_items}\t\t</ChildItems>\n\t\t<Attributes/>\n\t\t<Commands/>\n\t</BaseForm>\n</Form>\n"
         )
     }
 
