@@ -736,7 +736,11 @@ mod tests {
             "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
         )
         .unwrap();
-        std::fs::write(src.join("Configuration.xml"), "<MetaDataObject/>").unwrap();
+        std::fs::write(
+            src.join("Configuration.xml"),
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Configuration/></MetaDataObject>"#,
+        )
+        .unwrap();
         std::fs::write(src.join("CommonModules/Sample.xml"), "<MetaDataObject/>").unwrap();
         std::fs::write(&module, "Procedure Run()\nEndProcedure\n").unwrap();
         let args = json!({

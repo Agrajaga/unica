@@ -8,6 +8,38 @@ import sys
 import xml.etree.ElementTree as ET
 
 
+def ensure_extended_property_state(path, property_name):
+    with open(path, "r", encoding="utf-8-sig", newline="") as source:
+        xml = source.read()
+    if (
+        f"<xr:Property>{property_name}</xr:Property>" in xml
+        and "<xr:State>Extended</xr:State>" in xml
+    ):
+        return
+
+    newline = "\r\n" if "\r\n" in xml else "\n"
+    state = newline.join(
+        [
+            "\t\t<InternalInfo>",
+            "\t\t\t<xr:PropertyState>",
+            f"\t\t\t\t<xr:Property>{property_name}</xr:Property>",
+            "\t\t\t\t<xr:State>Extended</xr:State>",
+            "\t\t\t</xr:PropertyState>",
+            "\t\t</InternalInfo>",
+        ]
+    )
+    if "\t\t<InternalInfo/>" in xml:
+        updated = xml.replace("\t\t<InternalInfo/>", state, 1)
+    elif "\t\t</InternalInfo>" in xml:
+        entry = newline.join(state.split(newline)[1:-1]) + newline
+        updated = xml.replace("\t\t</InternalInfo>", entry + "\t\t</InternalInfo>", 1)
+    else:
+        raise ValueError(f"InternalInfo not found in {path}")
+
+    with open(path, "w", encoding="utf-8-sig", newline="") as target:
+        target.write(updated)
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -214,6 +246,17 @@ def main():
             )
             print()
 
+    if len(parts) >= 4 and parts[2] == "Form":
+        descriptor_file = form_meta_file
+        extended_property = "Form"
+    else:
+        descriptor_file = os.path.join(extension_path, dir_name, f"{obj_name}.xml")
+        extended_property = "Module" if obj_type == "CommonModule" else parts[2]
+    if not os.path.isfile(descriptor_file):
+        print(f"Borrowed metadata descriptor not found: {descriptor_file}", file=sys.stderr)
+        sys.exit(1)
+    ensure_extended_property_state(descriptor_file, extended_property)
+
     # --- Check if file exists and append ---
     bsl_dir = os.path.dirname(bsl_file)
     if not os.path.isdir(bsl_dir):
@@ -241,6 +284,7 @@ def main():
     print(f'     \u0414\u0435\u043a\u043e\u0440\u0430\u0442\u043e\u0440:    {decorator}("{method_name}")')  # Декоратор:
     print(f"     \u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u0430:    {proc_name}()")  # Процедура:
     print(f"     \u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442:     {context_annotation}")  # Контекст:
+    print(f"     XML-\u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435: {extended_property} = Extended ({descriptor_file})")
 
 
 if __name__ == "__main__":

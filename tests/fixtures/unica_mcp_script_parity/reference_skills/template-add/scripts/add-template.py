@@ -4,7 +4,6 @@
 
 import argparse
 import os
-import re
 import sys
 import uuid
 
@@ -45,20 +44,16 @@ def write_text_with_bom(path, text):
         f.write(text)
 
 
-def detect_format_version(d):
-    while d:
-        cfg_path = os.path.join(d, "Configuration.xml")
-        if os.path.isfile(cfg_path):
-            with open(cfg_path, "r", encoding="utf-8-sig") as f:
-                head = f.read(2000)
-            m = re.search(r'<MetaDataObject[^>]+version="(\d+\.\d+)"', head)
-            if m:
-                return m.group(1)
-        parent = os.path.dirname(d)
-        if parent == d:
-            break
-        d = parent
-    return "2.17"
+def require_object_format_version(object_xml_path):
+    root = etree.parse(object_xml_path, etree.XMLParser(remove_blank_text=False)).getroot()
+    actual = root.get("version")
+    if actual != "2.20":
+        shown = repr(actual) if actual is not None else "missing"
+        raise ValueError(
+            f"Unsupported export format version {shown} in {object_xml_path}; "
+            "expected exact '2.20'"
+        )
+    return actual
 
 
 def main():
@@ -82,8 +77,6 @@ def main():
     set_main_dcs = args.SetMainSKD
 
     tmpl = TYPE_MAP[template_type]
-
-    format_version = detect_format_version(os.path.abspath(src_dir))
 
     # --- Checks ---
 
@@ -114,6 +107,12 @@ def main():
             print(f"Ожидается: <SrcDir>/<ObjectName>.xml", file=sys.stderr)
             print(f"Подсказка: SrcDir должен указывать на папку типа объектов (например Reports), а не на корень конфигурации", file=sys.stderr)
             sys.exit(1)
+
+    try:
+        format_version = require_object_format_version(root_xml_path)
+    except (OSError, ValueError, etree.XMLSyntaxError) as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)
 
     processor_dir = os.path.join(src_dir, object_name)
     templates_dir = os.path.join(processor_dir, "Templates")
@@ -221,6 +220,11 @@ def main():
             '\t\t<name>ИсточникДанных1</name>\n'
             '\t\t<dataSourceType>Local</dataSourceType>\n'
             '\t</dataSource>\n'
+            '\t<settingsVariant>\n'
+            '\t\t<dcsset:name>Основной</dcsset:name>\n'
+            '\t\t<dcsset:presentation xsi:type="xs:string">Основной</dcsset:presentation>\n'
+            '\t\t<dcsset:settings xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows"/>\n'
+            '\t</settingsVariant>\n'
             '</DataCompositionSchema>'
         )
         write_text_with_bom(template_file_path, content)

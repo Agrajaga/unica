@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod cancellation;
 pub mod events;
+pub mod format_profile;
 pub mod project_sources;
 pub mod source_roots;
 pub mod workspace;

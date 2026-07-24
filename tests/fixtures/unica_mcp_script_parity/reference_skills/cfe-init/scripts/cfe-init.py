@@ -52,7 +52,7 @@ def main():
 
     # MDClasses format version — inherited from the base config so the extension stays uniform
     # with it (a 2.13 base must yield a 2.13 extension, else platform import rejects the mismatch).
-    format_version = "2.17"
+    format_version = "2.20"
 
     # --- Resolve ConfigPath ---
     base_lang_uuid = "00000000-0000-0000-0000-000000000000"

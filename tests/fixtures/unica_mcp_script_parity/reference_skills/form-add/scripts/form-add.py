@@ -190,7 +190,7 @@ def detect_format_version(d):
         if parent == d:
             break
         d = parent
-    return "2.17"
+    return "2.20"
 
 
 def save_xml_with_bom(tree, path):
@@ -407,10 +407,7 @@ def main():
         form_xml = (
             f'<?xml version="1.0" encoding="UTF-8"?>\n'
             f'<Form {form_ns_decl} version="{format_version}">\n'
-            '\t<AutoCommandBar name="\u0424\u043e\u0440\u043c\u0430\u041a\u043e\u043c\u0430\u043d\u0434\u043d\u0430\u044f\u041f\u0430\u043d\u0435\u043b\u044c" id="-1">\n'
-            '\t\t<Autofill>true</Autofill>\n'
-            '\t</AutoCommandBar>\n'
-            '\t<ChildItems/>\n'
+            '\t<AutoCommandBar name="\u0424\u043e\u0440\u043c\u0430\u041a\u043e\u043c\u0430\u043d\u0434\u043d\u0430\u044f\u041f\u0430\u043d\u0435\u043b\u044c" id="-1"/>\n'
             '\t<Attributes>\n'
             '\t\t<Attribute name="\u0421\u043f\u0438\u0441\u043e\u043a" id="1">\n'
             '\t\t\t<Type>\n'
@@ -433,10 +430,7 @@ def main():
         form_xml = (
             f'<?xml version="1.0" encoding="UTF-8"?>\n'
             f'<Form {form_ns_decl} version="{format_version}">\n'
-            '\t<AutoCommandBar name="\u0424\u043e\u0440\u043c\u0430\u041a\u043e\u043c\u0430\u043d\u0434\u043d\u0430\u044f\u041f\u0430\u043d\u0435\u043b\u044c" id="-1">\n'
-            '\t\t<Autofill>true</Autofill>\n'
-            '\t</AutoCommandBar>\n'
-            '\t<ChildItems/>\n'
+            '\t<AutoCommandBar name="\u0424\u043e\u0440\u043c\u0430\u041a\u043e\u043c\u0430\u043d\u0434\u043d\u0430\u044f\u041f\u0430\u043d\u0435\u043b\u044c" id="-1"/>\n'
             '\t<Attributes>\n'
             f'\t\t<Attribute name="{main_attr_name}" id="1">\n'
             '\t\t\t<Type>\n'
@@ -479,10 +473,15 @@ def main():
         form_xml = (
             f'<?xml version="1.0" encoding="UTF-8"?>\n'
             f'<Form {form_ns_decl} version="{format_version}">\n'
-            '\t<AutoCommandBar name="\u0424\u043e\u0440\u043c\u0430\u041a\u043e\u043c\u0430\u043d\u0434\u043d\u0430\u044f\u041f\u0430\u043d\u0435\u043b\u044c" id="-1">\n'
-            '\t\t<Autofill>true</Autofill>\n'
-            '\t</AutoCommandBar>\n'
-            '\t<ChildItems/>\n'
+            + ('\t<UseForFoldersAndItems>Items</UseForFoldersAndItems>\n' if object_type == 'Catalog' else '')
+            + (
+                '\t<ReportFormType>Main</ReportFormType>\n'
+                '\t<AutoShowState>Auto</AutoShowState>\n'
+                '\t<ReportResultViewMode>Auto</ReportResultViewMode>\n'
+                '\t<ViewModeApplicationOnSetReportResult>Auto</ViewModeApplicationOnSetReportResult>\n'
+                if object_type in ('Report', 'ExternalReport') else ''
+            )
+            + '\t<AutoCommandBar name="\u0424\u043e\u0440\u043c\u0430\u041a\u043e\u043c\u0430\u043d\u0434\u043d\u0430\u044f\u041f\u0430\u043d\u0435\u043b\u044c" id="-1"/>\n'
             '\t<Attributes>\n'
             f'\t\t<Attribute name="{main_attr_name}" id="1">\n'
             '\t\t\t<Type>\n'

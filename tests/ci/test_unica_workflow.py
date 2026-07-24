@@ -37,6 +37,8 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
         self.assertIn("cargo clippy --workspace --all-targets --all-features -- -D warnings", text)
         self.assertIn("cargo test --workspace -- --test-threads=1", text)
         self.assertIn("python -m unittest discover -s tests/ci --durations 20", text)
+        self.assertIn("python -m unittest discover -s tests/dev --durations 20", text)
+        self.assertIn("python -m py_compile scripts/dev/*.py tests/dev/*.py", text)
         self.assertIn("python scripts/ci/check-version-contract.py", text)
 
     def test_every_pull_request_gets_a_stable_aggregate_gate(self) -> None:
