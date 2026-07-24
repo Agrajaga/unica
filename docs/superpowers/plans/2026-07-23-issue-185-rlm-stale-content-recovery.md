@@ -273,7 +273,7 @@ cargo test -p unica-coder infrastructure::workspace_index::tests::fresh_info_rep
 Expected: the first two tests fail because startup/readiness ignore the failed
 marker. The fresh-info test should already pass and protects the reset rule.
 
-- [x] **Step 7: Implement matching failed-marker lookup and precedence**
+- [x] **Step 7: Implement matching terminal failed-marker lookup and precedence**
 
 Add:
 
@@ -284,6 +284,7 @@ fn failed_status_for_source(
 ) -> Option<String> {
     let status = read_bsl_index_status(context)?;
     if status.status != "failed"
+        || status.failure_class != Some(BslIndexFailureClass::Terminal)
         || !stored_path_matches(status.source_root.as_deref(), source_root)
     {
         return None;
@@ -291,6 +292,10 @@ fn failed_status_for_source(
     status.message
 }
 ```
+
+`BslIndexStatus::failed` persists `failure_class: retryable`.
+`BslIndexStatus::terminal_failure` persists `failure_class: terminal`.
+Legacy markers without the typed field remain retryable.
 
 In `start_for_workspace_cancellable`, keep the existing `Ready` branch first.
 Before starting maintenance for any other readiness, return:
@@ -792,18 +797,13 @@ where
                     );
                 }
                 other => {
-                    let final_status = other
-                        .stale_status()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("{other:?}"));
-                    let message = format!(
-                        "rlm index update finished but info is stale (content); recovery build finished but info is still {final_status}"
-                    );
                     let _ = write_status_path(
                         &job.status_path,
-                        BslIndexStatus::failed(
-                            message.as_str(),
-                            Some(&job.source_root),
+                        failed_status_from_readiness(
+                            &other,
+                            &job.source_root,
+                            "rlm index update finished but info is stale (content); recovery build finished but final info is",
+                            true,
                         )
                         .with_last_run(recovery_metrics),
                     );
@@ -811,19 +811,25 @@ where
             }
         }
         other => {
-            let message = format!(
-                "rlm index {} finished but info is {other:?}",
-                job.action
-            );
             let _ = write_status_path(
                 &job.status_path,
-                BslIndexStatus::failed(message.as_str(), Some(&job.source_root))
-                    .with_last_run(primary_metrics),
+                failed_status_from_readiness(
+                    &other,
+                    &job.source_root,
+                    format!("rlm index {} finished but info is", job.action).as_str(),
+                    false,
+                )
+                .with_last_run(primary_metrics),
             );
         }
     }
 }
 ```
+
+The shared `failed_status_from_readiness` conversion preserves a leading
+`cancelled:` detail after both info probes. It marks only a stale final result
+after a successful recovery build terminal; cancellation, timeout, unavailable
+info, and command failures remain retryable.
 
 Extract the existing primary failure formatting into:
 
@@ -1069,7 +1075,9 @@ cargo fmt --all -- --check
 Expected: PASS. If it reports formatting differences, run `cargo fmt --all`,
 inspect the diff, and rerun the check.
 
-- [x] **Step 2: Run the complete crate test suite** *(completed with environment caveats: all five OS-error-1314 symlink-creation tests are an approved Windows privilege limitation; the remaining cancellation timing assertion is pre-existing and load-sensitive, passing focused in 0.13s but failing once under full-suite load)*
+- [x] **Step 2: Run the complete crate test suite** *(620 passed, 2 ignored;
+  the only five failures require Windows symlink privilege and fail with
+  OS error 1314 in this worker)*
 
 Run:
 
@@ -1079,7 +1087,9 @@ cargo test -p unica-coder
 
 Expected: all tests pass.
 
-- [ ] **Step 3: Run package-contract checks** *(blocked: product contracts passed 16/16, but the bundled-tool checker could not run because the CI-built bundle is absent and its approved clean-bundle download stalled at 0 bytes)*
+- [ ] **Step 3: Run package-contract checks** *(pending the next CI run for the
+  new real mtime-drift contract; the prior PR head passed bundled-tool checks on
+  macOS, Linux, and Windows)*
 
 Run:
 
@@ -1090,13 +1100,19 @@ python scripts/ci/check-tool-contracts.py
 
 Current result:
 
-- `tests/ci/test_product_contracts.py`: PASS, 16/16;
-- `scripts/ci/check-tool-contracts.py`: BLOCKED until a CI-built bundle is
-  available.
+- local `tests/ci/test_product_contracts.py`: PASS, including the checker
+  orchestration regression;
+- local direct bundled-tool execution on win-x64: PASS using the exact v1.26.0
+  release asset whose SHA-256 matches `tools.lock.json`;
+- GitHub build-tools jobs for the prior PR head: PASS on darwin-arm64,
+  linux-x64, and win-x64;
+- next GitHub build-tools run: must execute the new real packaged-binary
+  sequence `fresh -> mtime-only stale -> Changed: 0/Fast path: True -> stale ->
+  build -> fresh`.
 
-Expected after the missing bundle is available: the bundled-tool checker passes,
-the public server remains `unica`, and no bundled tool contract changes are
-detected.
+Expected: the new packaged-binary recovery contract passes on every build-tools
+target, the public server remains `unica`, and no bundled tool contract changes
+are detected.
 
 - [x] **Step 4: Inspect the final diff**
 

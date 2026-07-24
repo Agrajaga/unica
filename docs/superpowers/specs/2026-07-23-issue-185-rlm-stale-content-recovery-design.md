@@ -31,6 +31,8 @@ RLM command-line contract.
   active lock.
 - Preserve the original stale-content reason in recovery diagnostics.
 - Surface a terminal failed marker instead of starting an endless retry loop.
+- Keep cancellation, timeout, tool-execution, and other operational failures
+  retryable after their cause is removed.
 - Keep `RLM_INDEX_SAMPLE_SIZE` and strict freshness detection enabled.
 - Preserve the existing behavior for missing, fresh, and actively building
   indexes.
@@ -98,7 +100,7 @@ The update state machine is:
 
 ```text
 update
-  |-- command failed ------------------------------> failed
+  |-- command failed ------------------------------> failed (retryable)
   |
   `-- command succeeded
         |
@@ -107,15 +109,16 @@ update
               |-- stale (content)
               |      |
               |      `-- build
-              |            |-- command failed -----> failed
+              |            |-- command failed -----> failed (retryable)
               |            |
               |            `-- command succeeded
               |                  |
               |                  `-- info
               |                        |-- fresh ---> ready
-              |                        `-----------> failed
+              |                        |-- stale ---> failed (terminal)
+              |                        `-----------> failed (retryable)
               |
-              `-- any other non-ready state -------> failed
+              `-- any other non-ready state -------> failed (retryable)
 ```
 
 The Unica index lock remains owned for the complete update, fallback build,
@@ -139,7 +142,8 @@ show:
 - timing or command metrics remain available under the existing last-run
   diagnostics boundary.
 
-On failure, the marker is `failed` and its message contains both:
+On failure, the marker is `failed` with a persisted `failure_class` of either
+`retryable` or `terminal`. Its message contains both:
 
 - the original post-update `stale (content)` reason;
 - the rebuild failure or final non-fresh status.
@@ -151,8 +155,11 @@ This preserves the causal chain instead of reporting only the last command.
 An active lock has priority over marker state: while a worker owns the lock,
 readiness is `Building`.
 
-Without an active lock, a matching `failed` marker for the resolved source root
-is terminal. Both maintenance startup and readiness checks honor it:
+Without an active lock, only a matching `failed` marker whose persisted
+`failure_class` is `terminal` blocks maintenance for the resolved source root.
+Terminal is written only after a successful update and recovery build still
+produce a stale final `info` result. Both maintenance startup and readiness
+checks honor that marker:
 
 - startup does not overwrite it by launching another automatic update;
 - readiness returns `Failed(marker.message)`;
@@ -163,7 +170,13 @@ If `index info` reports a fresh index, freshness wins and the marker is replaced
 with `ready`. This allows a manual or external rebuild to recover the workspace
 without deleting marker files.
 
-The failed marker comparison uses normalized source-root identity so a marker
+Cancellation, timeout, process-launch, tool-execution, disk-full, and malformed
+or unavailable `info` failures use `failure_class: retryable`. Legacy failed
+markers without a class are also treated as retryable. Their diagnostic remains
+available on disk, but the next request may start maintenance again. This avoids
+requiring a cache reset after a transient failure.
+
+The terminal marker comparison uses normalized source-root identity so a marker
 from another source set cannot block the current one.
 
 ### Workspace service and adapters
@@ -187,13 +200,18 @@ No MCP request or response schema changes are required.
 - Update command failure: record the existing update failure, with no fallback.
 - Post-update info execution failure: record the info failure, with no fallback.
 - Post-update `stale (content)`: run exactly one fallback build.
-- Fallback build failure, cancellation, or timeout: record a terminal failure
+- Fallback build failure, cancellation, or timeout: record a retryable failure
   containing the stale-content recovery context.
-- Final info failure or non-fresh status: record a terminal failure containing
-  both the recovery context and final status.
+- Final info cancellation, execution failure, or unavailable status: record a
+  retryable failure containing both the recovery context and final status.
+- Final stale status after a successful recovery build: record a terminal
+  failure because the one-shot recovery policy was exhausted.
 - Cancellation continues to use the stable `cancelled:` prefix.
-- Lock acquisition, heartbeat, stale-lock recovery, and release semantics stay
-  unchanged.
+- Update, post-update info, recovery build, and final info all run through the
+  same lock-loss cancellation wrapper. In-memory ownership is checked on each
+  child poll; disk-backed ownership is checked on heartbeat refresh. Losing
+  either cancels the active child, prevents later recovery commands, and stops
+  the displaced worker from overwriting replacement state.
 
 ## Tests
 
@@ -206,6 +224,9 @@ No MCP request or response schema changes are required.
   job, then writes `ready` after fresh info.
 - The successful ready marker retains the recovery reason and recovery action.
 - Rebuild failure writes `failed` with the original stale-content reason.
+- Retryable failures do not block the next automatic maintenance attempt.
+- Cancellation after the primary update preserves the stable `cancelled:`
+  prefix and remains retryable.
 - A non-fresh final info result writes `failed` and does not recurse.
 - Cancellation during fallback preserves the cancellation prefix and releases
   the lock.
@@ -225,9 +246,18 @@ No MCP request or response schema changes are required.
 - RLM-backed tools show the failed reason rather than `rlm index building`.
 - Stale readiness without an active lock is not described as active building.
 
-The worker tests use scripted `IndexRunner` outputs to model the exact
-`update -> info(stale content) -> build -> info(fresh)` sequence. They do not
-disable `RLM_INDEX_SAMPLE_SIZE`.
+The worker tests use scripted `IndexRunner` outputs to model the state machine.
+The build-tools contract gate additionally runs the exact packaged
+`rlm-bsl-index` against a clean temporary Git fixture and proves:
+
+1. initial build is fresh;
+2. changing only tracked-file mtimes produces `stale (content)`;
+3. update reports `Changed: 0` and `Fast path: True`;
+4. the following info remains `stale (content)`;
+5. a full build restores `fresh`.
+
+The fixture uses explicit sampling thresholds for a young, small index; it does
+not disable freshness sampling.
 
 ## Follow-up
 

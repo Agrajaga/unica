@@ -59,9 +59,18 @@ pub struct BslIndexStatus {
     pub source_root: Option<String>,
     pub db_path: Option<String>,
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<BslIndexFailureClass>,
     pub updated_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_run: Option<BslIndexRunMetrics>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BslIndexFailureClass {
+    Retryable,
+    Terminal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -495,6 +504,7 @@ impl BslIndexStatus {
             source_root: Some(source_root.display().to_string()),
             db_path: Some(db_path.display().to_string()),
             message: None,
+            failure_class: None,
             updated_at: now_secs(),
             last_run: None,
         }
@@ -506,6 +516,7 @@ impl BslIndexStatus {
             source_root: source_root.map(|path| path.display().to_string()),
             db_path: None,
             message: Some(format!("rlm index {action} started")),
+            failure_class: None,
             updated_at: now_secs(),
             last_run: None,
         }
@@ -517,6 +528,19 @@ impl BslIndexStatus {
             source_root: source_root.map(|path| path.display().to_string()),
             db_path: None,
             message: Some(message.to_string()),
+            failure_class: Some(BslIndexFailureClass::Retryable),
+            updated_at: now_secs(),
+            last_run: None,
+        }
+    }
+
+    fn terminal_failure(message: &str, source_root: Option<&Path>) -> Self {
+        Self {
+            status: "failed".to_string(),
+            source_root: source_root.map(|path| path.display().to_string()),
+            db_path: None,
+            message: Some(message.to_string()),
+            failure_class: Some(BslIndexFailureClass::Terminal),
             updated_at: now_secs(),
             last_run: None,
         }
@@ -528,6 +552,7 @@ impl BslIndexStatus {
             source_root: source_root.map(|path| path.display().to_string()),
             db_path: None,
             message: Some(message.to_string()),
+            failure_class: None,
             updated_at: now_secs(),
             last_run: None,
         }
@@ -895,39 +920,52 @@ where
                     );
                 }
                 other => {
-                    let final_status = other
-                        .stale_status()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("{other:?}"));
-                    let message = match &other {
-                        IndexReadiness::Failed(error) | IndexReadiness::Unavailable(error)
-                            if error.starts_with(CANCELLED_PREFIX) =>
-                        {
-                            recovery_failure_message(
-                                "rlm index update finished but info is stale (content); recovery build final info was cancelled",
-                                error,
-                            )
-                        }
-                        _ => format!(
-                            "rlm index update finished but info is stale (content); recovery build finished but info is still {final_status}"
-                        ),
-                    };
                     write_background_status(
                         &job,
-                        BslIndexStatus::failed(message.as_str(), Some(&job.source_root))
-                            .with_last_run(recovery_metrics),
+                        failed_status_from_readiness(
+                            &other,
+                            &job.source_root,
+                            "rlm index update finished but info is stale (content); recovery build finished but final info is",
+                            true,
+                        )
+                        .with_last_run(recovery_metrics),
                     );
                 }
             }
         }
         other => {
-            let message = format!("rlm index {} finished but info is {other:?}", job.action);
             write_background_status(
                 &job,
-                BslIndexStatus::failed(message.as_str(), Some(&job.source_root))
-                    .with_last_run(primary_metrics),
+                failed_status_from_readiness(
+                    &other,
+                    &job.source_root,
+                    format!("rlm index {} finished but info is", job.action).as_str(),
+                    false,
+                )
+                .with_last_run(primary_metrics),
             );
         }
+    }
+}
+
+fn failed_status_from_readiness(
+    readiness: &IndexReadiness,
+    source_root: &Path,
+    context: &str,
+    recovery_exhausted: bool,
+) -> BslIndexStatus {
+    let detail = match readiness {
+        IndexReadiness::Missing => "missing".to_string(),
+        IndexReadiness::Stale { status } => status.clone(),
+        IndexReadiness::Building => "building".to_string(),
+        IndexReadiness::Failed(error) | IndexReadiness::Unavailable(error) => error.clone(),
+        IndexReadiness::Ready { .. } => "fresh".to_string(),
+    };
+    let message = recovery_failure_message(context, &detail);
+    if recovery_exhausted && matches!(readiness, IndexReadiness::Stale { .. }) {
+        BslIndexStatus::terminal_failure(message.as_str(), Some(source_root))
+    } else {
+        BslIndexStatus::failed(message.as_str(), Some(source_root))
     }
 }
 
@@ -1388,7 +1426,9 @@ fn ready_status_preserving_last_run(
 
 fn failed_status_for_source(context: &WorkspaceContext, source_root: &Path) -> Option<String> {
     let status = read_bsl_index_status(context)?;
-    if status.status != "failed" || !stored_path_matches(status.source_root.as_deref(), source_root)
+    if status.status != "failed"
+        || status.failure_class != Some(BslIndexFailureClass::Terminal)
+        || !stored_path_matches(status.source_root.as_deref(), source_root)
     {
         return None;
     }
@@ -1750,7 +1790,7 @@ source-set:
         fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
         write_status(
             &context,
-            BslIndexStatus::failed(
+            BslIndexStatus::terminal_failure(
                 "update left stale (content); recovery build failed",
                 Some(&context.workspace_root.join("src")),
             ),
@@ -1778,12 +1818,37 @@ source-set:
     }
 
     #[test]
+    fn retryable_cancelled_marker_does_not_block_automatic_restart() {
+        let context = test_context("retryable-cancelled-marker");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        write_status(
+            &context,
+            BslIndexStatus::failed(
+                "cancelled: rlm index build stopped",
+                Some(&context.workspace_root.join("src")),
+            ),
+        )
+        .unwrap();
+        let runner = RecordingIndexRunner {
+            outputs: RefCell::new(vec![IndexOutput::success("Index not found\n")]),
+            ..Default::default()
+        };
+        let service = WorkspaceIndexService::with_runner(&runner);
+
+        let report = service.start_for_workspace(&context, &Map::new(), false);
+
+        assert_eq!(report.warnings, vec!["rlm index build started".to_string()]);
+        assert_eq!(runner.backgrounds.borrow().len(), 1);
+        cleanup(&context);
+    }
+
+    #[test]
     fn ready_index_returns_matching_failed_marker_message() {
         let context = test_context("failed-readiness");
         fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
         write_status(
             &context,
-            BslIndexStatus::failed(
+            BslIndexStatus::terminal_failure(
                 "update left stale (content); recovery build failed",
                 Some(&context.workspace_root.join("src")),
             ),
@@ -1815,7 +1880,10 @@ source-set:
         let original_message = "update left stale (content); recovery build failed";
         write_status(
             &context,
-            BslIndexStatus::failed(original_message, Some(&context.workspace_root.join("src"))),
+            BslIndexStatus::terminal_failure(
+                original_message,
+                Some(&context.workspace_root.join("src")),
+            ),
         )
         .unwrap();
         let runner = FailingInfoRunner;
@@ -1843,7 +1911,10 @@ source-set:
         let original_message = "update left stale (content); recovery build failed";
         write_status(
             &context,
-            BslIndexStatus::failed(original_message, Some(&context.workspace_root.join("src"))),
+            BslIndexStatus::terminal_failure(
+                original_message,
+                Some(&context.workspace_root.join("src")),
+            ),
         )
         .unwrap();
         let runner = FailingInfoRunner;
@@ -1868,7 +1939,10 @@ source-set:
         let original_message = "update left stale (content); recovery build failed";
         write_status(
             &context,
-            BslIndexStatus::failed(original_message, Some(&context.workspace_root.join("src"))),
+            BslIndexStatus::terminal_failure(
+                original_message,
+                Some(&context.workspace_root.join("src")),
+            ),
         )
         .unwrap();
         fs::write(
@@ -1906,7 +1980,7 @@ source-set:
         fs::write(&db_path, "").unwrap();
         write_status(
             &context,
-            BslIndexStatus::failed(
+            BslIndexStatus::terminal_failure(
                 "old recovery failure",
                 Some(&context.workspace_root.join("src")),
             ),
@@ -1937,7 +2011,7 @@ source-set:
         fs::create_dir_all(context.workspace_root.join("other")).unwrap();
         write_status(
             &context,
-            BslIndexStatus::failed(
+            BslIndexStatus::terminal_failure(
                 "failure for another source root",
                 Some(&context.workspace_root.join("other")),
             ),
@@ -1977,7 +2051,7 @@ source-set:
         let original_message = "failed marker through equivalent source spelling";
         write_status(
             &context,
-            BslIndexStatus::failed(original_message, Some(&equivalent_source)),
+            BslIndexStatus::terminal_failure(original_message, Some(&equivalent_source)),
         )
         .unwrap();
         let runner = RecordingIndexRunner {
@@ -2164,6 +2238,36 @@ source-set:
     }
 
     #[test]
+    fn cancelled_post_update_info_preserves_cancellation_prefix() {
+        let context = test_context("update-cancelled-info");
+        let mut job = test_background_job(&context, "update");
+        job.recovery_build = Some(inert_index_command(&context, "build"));
+        let mut outputs = vec![
+            IndexOutput::success("Updated in 0.1s"),
+            IndexOutput {
+                status_success: false,
+                status: "cancelled".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: true,
+                duration_ms: 1,
+            },
+        ]
+        .into_iter();
+
+        run_background_job_with(job, |_command, _lease| {
+            Ok(outputs.next().expect("scripted output"))
+        });
+
+        let status = read_bsl_index_status(&context).unwrap();
+        assert_eq!(status.failure_class, Some(BslIndexFailureClass::Retryable));
+        let message = status.message.unwrap();
+        assert!(message.starts_with(CANCELLED_PREFIX), "{message}");
+        cleanup(&context);
+    }
+
+    #[test]
     fn failed_recovery_preserves_stale_content_cause() {
         let context = test_context("stale-content-recovery-failed");
         let mut job = test_background_job(&context, "update");
@@ -2189,6 +2293,7 @@ source-set:
 
         let status = read_bsl_index_status(&context).unwrap();
         assert_eq!(status.status, "failed");
+        assert_eq!(status.failure_class, Some(BslIndexFailureClass::Retryable));
         let message = status.message.unwrap();
         assert!(message.contains("stale (content) after update"));
         assert!(message.contains("disk full"));
@@ -2278,7 +2383,8 @@ source-set:
         assert_eq!(calls, 4);
         let status = read_bsl_index_status(&context).unwrap();
         assert_eq!(status.status, "failed");
-        assert!(status.message.unwrap().contains("still stale (content)"));
+        assert_eq!(status.failure_class, Some(BslIndexFailureClass::Terminal));
+        assert!(status.message.unwrap().contains("stale (content)"));
         cleanup(&context);
     }
 

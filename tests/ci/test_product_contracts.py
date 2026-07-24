@@ -370,6 +370,40 @@ class ProductContractTests(unittest.TestCase):
 
             self.assertEqual(module.check_rlm_schema(db_path), [])
 
+    def test_rlm_mtime_recovery_contract_checks_real_cli_sequence(self) -> None:
+        module = load_contract_module()
+        outputs = iter(
+            [
+                (0, "Index built\n"),
+                (0, "Status: fresh\n"),
+                (0, "Status: stale (content)\n"),
+                (0, "Changed: 0\nFast path: True\n"),
+                (0, "Status: stale (content)\n"),
+                (0, "Index built\n"),
+                (0, "Status: fresh\n"),
+            ]
+        )
+        actions = []
+
+        def run_rlm(command, cwd, env):
+            actions.append(command[2])
+            self.assertEqual(cwd, Path(command[3]))
+            self.assertEqual(env["RLM_INDEX_SAMPLE_SIZE"], "1000")
+            self.assertEqual(env["RLM_INDEX_SAMPLE_THRESHOLD"], "0")
+            self.assertEqual(env["RLM_INDEX_SKIP_SAMPLE_HOURS"], "0")
+            return next(outputs)
+
+        errors = module.check_rlm_mtime_recovery_contract(
+            Path("rlm-bsl-index"),
+            run_rlm=run_rlm,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            actions,
+            ["build", "info", "info", "update", "info", "build", "info"],
+        )
+
     def test_rlm_schema_contract_reports_missing_column(self) -> None:
         module = load_contract_module()
 
