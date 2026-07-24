@@ -11611,6 +11611,10 @@ mod tests {
         assert!(outcome.ok, "{outcome:?}");
         let updated = fs::read(&form_path).unwrap();
         assert!(updated.starts_with(&[0xef, 0xbb, 0xbf]), "{updated:?}");
+        assert!(
+            !updated[3..].starts_with(&[0xef, 0xbb, 0xbf]),
+            "{updated:?}"
+        );
         let updated_text = std::str::from_utf8(&updated[3..]).unwrap();
         assert_platform_text_uses_crlf_without_bare_lf(updated_text);
         assert!(
