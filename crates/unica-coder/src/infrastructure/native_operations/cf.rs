@@ -4523,7 +4523,8 @@ mod cf_init_transaction_tests {
             let outcome = create_configuration_scaffold(&init_args("Demo", None), &context);
 
             assert!(!outcome.ok, "{relative}: {outcome:?}");
-            let existing_display = existing.display().to_string();
+            let existing_display =
+                crate::infrastructure::platform::testing::path_display_for_test(&existing);
             assert!(
                 outcome.errors.join("\n").contains(&existing_display),
                 "{relative}: {outcome:?}"

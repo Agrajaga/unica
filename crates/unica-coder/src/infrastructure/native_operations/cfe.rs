@@ -8362,8 +8362,8 @@ mod tests {
         assert_eq!(
             outcome.artifacts,
             vec![
-                module.display().to_string(),
-                descriptor.display().to_string()
+                crate::infrastructure::platform::testing::path_display_for_test(&module),
+                crate::infrastructure::platform::testing::path_display_for_test(&descriptor)
             ]
         );
         let _ = fs::remove_dir_all(&context.cwd);

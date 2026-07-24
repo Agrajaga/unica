@@ -1081,7 +1081,23 @@ mod tests {
     use crate::domain::workspace::WorkspaceContext;
     use crate::infrastructure::native_operations::cfe::cfe_borrow_format_dependency_inspection;
     use crate::infrastructure::native_operations::dcs::analyze_dcs_info;
+    use crate::infrastructure::source_roots::normalize_path_identity;
     use serde_json::{Map, Value};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_ROOT_NONCE: AtomicU64 = AtomicU64::new(0);
+
+    fn test_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "unica-format-guard-{label}-{}-{}",
+            std::process::id(),
+            TEST_ROOT_NONCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn normalized_path(path: &std::path::Path) -> std::path::PathBuf {
+        normalize_path_identity(path).expect("test path identity must normalize")
+    }
 
     fn context(root: &std::path::Path) -> WorkspaceContext {
         WorkspaceContext {
@@ -1264,10 +1280,7 @@ mod tests {
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
             diagnostic["root"],
-            std::fs::canonicalize(&graph.form_wrapper)
-                .unwrap()
-                .display()
-                .to_string()
+            normalized_path(&graph.form_wrapper).display().to_string()
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1300,10 +1313,7 @@ mod tests {
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
             diagnostic["root"],
-            std::fs::canonicalize(&graph.form_xml)
-                .unwrap()
-                .display()
-                .to_string()
+            normalized_path(&graph.form_xml).display().to_string()
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1384,21 +1394,14 @@ mod tests {
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
             diagnostic["root"],
-            std::fs::canonicalize(&graph.form_xml)
-                .unwrap()
-                .display()
-                .to_string()
+            normalized_path(&graph.form_xml).display().to_string()
         );
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn older_dump_blocks_mutation_and_recommends_platform_reexport() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-old-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("old");
         let path = config(&root, Some("2.19"));
         let before = std::fs::read(&path).unwrap();
         let mut args = Map::new();
@@ -1431,11 +1434,7 @@ mod tests {
 
     #[test]
     fn version_owning_target_cannot_hide_behind_supported_source_set_owner() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-target-version-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("target-version");
         config(&root, Some("2.20"));
         let form = root.join("src/Catalogs/Items/Forms/Item/Ext/Form.xml");
         std::fs::create_dir_all(form.parent().unwrap()).unwrap();
@@ -1462,7 +1461,7 @@ mod tests {
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
             diagnostic["root"],
-            std::fs::canonicalize(&form).unwrap().display().to_string()
+            normalized_path(&form).display().to_string()
         );
         assert_eq!(std::fs::read(&form).unwrap(), before);
         let _ = std::fs::remove_dir_all(root);
@@ -1470,11 +1469,7 @@ mod tests {
 
     #[test]
     fn support_edit_public_guard_blocks_newer_nearest_uuid_descriptor_before_handler() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-support-nearest-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("support-nearest");
         config(&root, Some("2.20"));
         let bin = root.join("src/Ext/ParentConfigurations.bin");
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
@@ -1511,10 +1506,7 @@ mod tests {
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
             diagnostic["root"],
-            std::fs::canonicalize(&descriptor)
-                .unwrap()
-                .display()
-                .to_string()
+            normalized_path(&descriptor).display().to_string()
         );
         assert!(outcome.summary.contains("export format guard"));
         assert_eq!(std::fs::read(&bin).unwrap(), bin_before);
@@ -1523,11 +1515,7 @@ mod tests {
 
     #[test]
     fn cf_init_public_guard_blocks_newer_existing_post_validation_dependency() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-cf-init-home-page-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("cf-init-home-page");
         let home_page = root.join("src/Ext/HomePageWorkArea.xml");
         std::fs::create_dir_all(home_page.parent().unwrap()).unwrap();
         std::fs::write(
@@ -1549,10 +1537,7 @@ mod tests {
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
             diagnostic["root"],
-            std::fs::canonicalize(&home_page)
-                .unwrap()
-                .display()
-                .to_string()
+            normalized_path(&home_page).display().to_string()
         );
         assert!(!root.join("src/Configuration.xml").exists());
         let _ = std::fs::remove_dir_all(root);
@@ -1560,11 +1545,7 @@ mod tests {
 
     #[test]
     fn support_edit_public_guard_blocks_newer_uuid_probe_without_uuid() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-support-probe-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("support-probe");
         config(&root, Some("2.20"));
         let bin = root.join("src/Ext/ParentConfigurations.bin");
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
@@ -1597,10 +1578,7 @@ mod tests {
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
             diagnostic["root"],
-            std::fs::canonicalize(&descriptor)
-                .unwrap()
-                .display()
-                .to_string()
+            normalized_path(&descriptor).display().to_string()
         );
         assert_eq!(std::fs::read(&bin).unwrap(), bin_before);
         let _ = std::fs::remove_dir_all(root);
@@ -1608,11 +1586,7 @@ mod tests {
 
     #[test]
     fn support_edit_capability_does_not_guard_an_unread_uuid_descriptor() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-support-capability-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("support-capability");
         config(&root, Some("2.20"));
         let bin = root.join("src/Ext/ParentConfigurations.bin");
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
@@ -1643,11 +1617,7 @@ mod tests {
 
     #[test]
     fn support_edit_capability_does_not_guard_a_direct_unread_object_xml() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-support-capability-direct-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("support-capability-direct");
         config(&root, Some("2.20"));
         let bin = root.join("src/Ext/ParentConfigurations.bin");
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
@@ -1676,11 +1646,7 @@ mod tests {
 
     #[test]
     fn support_edit_public_guard_ignores_newer_unrelated_uuid_descriptor() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-support-unrelated-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("support-unrelated");
         config(&root, Some("2.20"));
         let bin = root.join("src/Ext/ParentConfigurations.bin");
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
@@ -1719,11 +1685,7 @@ mod tests {
 
     #[test]
     fn content_tools_preflight_their_exact_metadata_wrappers() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-content-wrapper-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("content-wrapper");
         config(&root, Some("2.20"));
         std::fs::write(
             root.join("v8project.yaml"),
@@ -1814,11 +1776,7 @@ mod tests {
 
     #[test]
     fn detached_role_reads_preflight_the_exact_xml_read_by_each_handler() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-detached-role-read-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("detached-role-read");
         let role_dir = root.join("detached/Roles/Reader");
         let rights = role_dir.join("Ext/Rights.xml");
         let wrapper = root.join("detached/Roles/Reader.xml");
@@ -1885,11 +1843,7 @@ mod tests {
 
     #[test]
     fn dcs_info_auto_discovery_preflights_every_scanned_wrapper_and_selected_content() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-dcs-info-discovery-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("dcs-info-discovery");
         let report = root.join("detached/Reports/Sales");
         let templates = report.join("Templates");
         let selected_wrapper = templates.join("Main.xml");
@@ -1933,11 +1887,7 @@ mod tests {
 
     #[test]
     fn dcs_info_multiple_candidates_preflights_scanned_prefix_before_handler_error() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-dcs-info-multiple-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("dcs-info-multiple");
         let report = root.join("detached/Reports/Sales");
         let templates = report.join("Templates");
         let newer_wrapper = templates.join("A_Newer.xml");
@@ -1980,13 +1930,7 @@ mod tests {
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
             diagnostic["root"],
-            Value::String(
-                newer_wrapper
-                    .canonicalize()
-                    .unwrap_or(newer_wrapper)
-                    .display()
-                    .to_string()
-            ),
+            Value::String(normalized_path(&newer_wrapper).display().to_string()),
             "sorted inspection order must make warning attribution deterministic"
         );
 
@@ -2005,11 +1949,7 @@ mod tests {
 
     #[test]
     fn external_init_format_preflight_defers_missing_and_semantic_arguments_to_handler() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-external-invalid-args-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("external-invalid-args");
         std::fs::create_dir_all(&root).unwrap();
 
         for tool in ["unica.epf.init", "unica.erf.init"] {
@@ -2039,11 +1979,7 @@ mod tests {
 
     #[test]
     fn newer_dependency_takes_precedence_over_older_migration_advice() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-mixed-versions-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("mixed-versions");
         config(&root, Some("2.21"));
         let form = root.join("src/Catalogs/Items/Forms/Item/Ext/Form.xml");
         std::fs::create_dir_all(form.parent().unwrap()).unwrap();
@@ -2075,11 +2011,7 @@ mod tests {
 
     #[test]
     fn newer_dependency_takes_precedence_across_independent_effective_paths() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-multi-path-priority-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("multi-path-priority");
         std::fs::create_dir_all(&root).unwrap();
         let extension = root.join("Extension.xml");
         let base = root.join("Base.xml");
@@ -2123,11 +2055,7 @@ mod tests {
 
     #[test]
     fn cfe_borrow_guard_keeps_newer_source_prefix_before_late_missing_form_error() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-cfe-borrow-error-prefix-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("cfe-borrow-error-prefix");
         let base = root.join("src/Configuration.xml");
         let source_object = root.join("src/Catalogs/Items.xml");
         let extension = root.join("ext/Configuration.xml");
@@ -2190,11 +2118,7 @@ mod tests {
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
             diagnostic["root"],
-            source_object
-                .canonicalize()
-                .unwrap_or(source_object)
-                .display()
-                .to_string()
+            normalized_path(&source_object).display().to_string()
         );
         assert!(!root.join("ext/Catalogs/Items.xml").exists());
         let _ = std::fs::remove_dir_all(root);
@@ -2202,11 +2126,7 @@ mod tests {
 
     #[test]
     fn new_dump_inside_older_source_set_requires_user_driven_reexport() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-new-dump-nested-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("new-dump-nested");
         let owner = config(&root, Some("2.19"));
         let before = std::fs::read(&owner).unwrap();
         let output = root.join("src/Nested");
@@ -2230,7 +2150,7 @@ mod tests {
         assert_eq!(diagnostic["actualFormat"], "2.19");
         assert_eq!(
             diagnostic["root"],
-            std::fs::canonicalize(&owner).unwrap().display().to_string()
+            normalized_path(&owner).display().to_string()
         );
         assert_eq!(std::fs::read(&owner).unwrap(), before);
         assert!(!output.exists());
@@ -2239,11 +2159,7 @@ mod tests {
 
     #[test]
     fn new_dump_allows_an_exact_empty_configured_source_set_root() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-new-empty-root-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("new-empty-root");
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(
             root.join("v8project.yaml"),
@@ -2264,11 +2180,7 @@ mod tests {
 
     #[test]
     fn cfe_init_output_inside_older_source_set_is_not_hidden_by_missing_base() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-cfe-output-owner-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("cfe-output-owner");
         let owner = config(&root, Some("2.19"));
         let output = root.join("src/NestedExtension");
         let mut args = Map::new();
@@ -2291,11 +2203,7 @@ mod tests {
 
     #[test]
     fn code_patch_inside_older_source_set_uses_the_same_format_boundary() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-code-patch-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("code-patch");
         config(&root, Some("2.19"));
         let module = root.join("src/CommonModules/Core/Ext/Module.bsl");
         std::fs::create_dir_all(module.parent().unwrap()).unwrap();
@@ -2515,13 +2423,13 @@ mod tests {
                 "form-add",
                 "path",
                 object_dir,
-                vec![object_xml.canonicalize().unwrap()],
+                vec![normalized_path(&object_xml)],
             ),
             (
                 "subsystem-edit",
                 "Path",
                 subsystem_dir,
-                vec![subsystem_xml.canonicalize().unwrap()],
+                vec![normalized_path(&subsystem_xml)],
             ),
             ("dcs-edit", "path", template_dir, vec![template_xml]),
             ("form-edit", "Path", form_xml.clone(), vec![form_xml]),
@@ -2673,7 +2581,7 @@ mod tests {
         ));
         let configuration = config(&root, Some("2.19"));
         let src = configuration.parent().unwrap().to_path_buf();
-        let canonical_configuration = configuration.canonicalize().unwrap();
+        let canonical_configuration = normalized_path(&configuration);
         let home_page = canonical_configuration
             .parent()
             .unwrap()
@@ -2704,7 +2612,7 @@ mod tests {
                 "cfe-validate",
                 "Path",
                 extension,
-                vec![extension_configuration.canonicalize().unwrap()],
+                vec![normalized_path(&extension_configuration)],
             ),
             ("role-info", "path", role_dir.clone(), vec![rights.clone()]),
             (
@@ -2728,11 +2636,7 @@ mod tests {
 
     #[test]
     fn read_only_xml_analyzers_preflight_the_exact_file_resolved_from_a_directory() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-read-resolved-xml-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("read-resolved-xml");
         let catalog_dir = root.join("detached/Catalogs/Goods");
         let catalog_xml = root.join("detached/Catalogs/Goods.xml");
         let form_dir = catalog_dir.join("Forms/Main");
@@ -2807,11 +2711,7 @@ mod tests {
 
     #[test]
     fn read_only_xml_analyzers_warn_for_resolved_newer_roots_and_allow_exact_2_20_roots() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-read-resolved-version-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let root = test_root("read-resolved-version");
         let catalog_dir = root.join("detached/Catalogs/Goods");
         let catalog_xml = root.join("detached/Catalogs/Goods.xml");
         let form_dir = catalog_dir.join("Forms/Main");
@@ -3607,10 +3507,10 @@ mod tests {
         };
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
-            std::path::PathBuf::from(diagnostic["root"].as_str().unwrap())
-                .canonicalize()
-                .unwrap(),
-            command_interface.canonicalize().unwrap()
+            normalized_path(&std::path::PathBuf::from(
+                diagnostic["root"].as_str().unwrap()
+            )),
+            normalized_path(&command_interface)
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3656,10 +3556,10 @@ mod tests {
         };
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
-            std::path::PathBuf::from(diagnostic["root"].as_str().unwrap())
-                .canonicalize()
-                .unwrap(),
-            child.canonicalize().unwrap()
+            normalized_path(&std::path::PathBuf::from(
+                diagnostic["root"].as_str().unwrap()
+            )),
+            normalized_path(&child)
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3697,10 +3597,10 @@ mod tests {
         };
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
-            std::path::PathBuf::from(diagnostic["root"].as_str().unwrap())
-                .canonicalize()
-                .unwrap(),
-            document.canonicalize().unwrap()
+            normalized_path(&std::path::PathBuf::from(
+                diagnostic["root"].as_str().unwrap()
+            )),
+            normalized_path(&document)
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3855,10 +3755,10 @@ mod tests {
         };
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
-            std::path::PathBuf::from(diagnostic["root"].as_str().unwrap())
-                .canonicalize()
-                .unwrap(),
-            configuration.canonicalize().unwrap()
+            normalized_path(&std::path::PathBuf::from(
+                diagnostic["root"].as_str().unwrap()
+            )),
+            normalized_path(&configuration)
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3930,10 +3830,10 @@ mod tests {
         };
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
-            std::path::PathBuf::from(diagnostic["root"].as_str().unwrap())
-                .canonicalize()
-                .unwrap(),
-            referrer.canonicalize().unwrap()
+            normalized_path(&std::path::PathBuf::from(
+                diagnostic["root"].as_str().unwrap()
+            )),
+            normalized_path(&referrer)
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3981,10 +3881,10 @@ mod tests {
         };
         assert_eq!(diagnostic["actualFormat"], "2.21");
         assert_eq!(
-            std::path::PathBuf::from(diagnostic["root"].as_str().unwrap())
-                .canonicalize()
-                .unwrap(),
-            subsystem.canonicalize().unwrap()
+            normalized_path(&std::path::PathBuf::from(
+                diagnostic["root"].as_str().unwrap()
+            )),
+            normalized_path(&subsystem)
         );
         let _ = std::fs::remove_dir_all(root);
     }

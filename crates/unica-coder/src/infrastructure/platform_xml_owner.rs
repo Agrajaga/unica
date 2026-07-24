@@ -1007,6 +1007,10 @@ mod tests {
         }
     }
 
+    fn normalized_path(path: &Path) -> PathBuf {
+        normalize_path_identity(path).expect("test path identity must normalize")
+    }
+
     fn create_file_link_or_skip(source: &Path, target: &Path) -> bool {
         match create_file_link_fixture_for_test(source, target)
             .expect("unexpected file-link creation error must fail the test")
@@ -1100,7 +1104,7 @@ mod tests {
         let owners = resolve_platform_xml_owners(&path, &context).unwrap();
 
         assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].path, fs::canonicalize(&path).unwrap());
+        assert_eq!(owners[0].path, normalized_path(&path));
         assert_eq!(owners[0].version.as_deref(), Some("2.20"));
         assert_eq!(owners[0].kind, PlatformXmlOwnerKind::Standalone);
         let _ = fs::remove_dir_all(&context.cwd);
@@ -1333,7 +1337,7 @@ mod tests {
             resolve_platform_xml_owners(owner.parent().unwrap(), &context).expect("owner resolves");
 
         assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].path, fs::canonicalize(&owner).unwrap());
+        assert_eq!(owners[0].path, normalized_path(&owner));
         assert_eq!(owners[0].version.as_deref(), Some("2.21"));
         let _ = fs::remove_dir_all(&context.cwd);
     }
@@ -1354,7 +1358,7 @@ mod tests {
                 .expect("owner resolves");
 
         assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].path, fs::canonicalize(&owner).unwrap());
+        assert_eq!(owners[0].path, normalized_path(&owner));
         assert_eq!(owners[0].version.as_deref(), Some("2.19"));
         let _ = fs::remove_dir_all(&context.cwd);
     }
@@ -1374,7 +1378,7 @@ mod tests {
             .expect("exact planned owner resolves");
 
         assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].path, fs::canonicalize(&target).unwrap());
+        assert_eq!(owners[0].path, normalized_path(&target));
         assert_eq!(owners[0].version.as_deref(), Some("2.21"));
         let _ = fs::remove_dir_all(&context.cwd);
     }
@@ -1394,7 +1398,7 @@ mod tests {
             .expect("versionless exact planned owner resolves");
 
         assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].path, fs::canonicalize(&target).unwrap());
+        assert_eq!(owners[0].path, normalized_path(&target));
         assert_eq!(owners[0].version, None);
         let _ = fs::remove_dir_all(&context.cwd);
     }
@@ -1425,7 +1429,7 @@ mod tests {
             .expect("versionless CAI inherits its source-set owner");
 
         assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].path, fs::canonicalize(&owner).unwrap());
+        assert_eq!(owners[0].path, normalized_path(&owner));
         assert_eq!(owners[0].version.as_deref(), Some("2.20"));
         let _ = fs::remove_dir_all(&context.cwd);
     }
@@ -1474,12 +1478,9 @@ mod tests {
         assert_eq!(
             actual,
             vec![
-                (fs::canonicalize(&content).unwrap(), "2.22".to_string()),
-                (fs::canonicalize(&wrapper).unwrap(), "2.21".to_string()),
-                (
-                    fs::canonicalize(&configuration).unwrap(),
-                    "2.20".to_string()
-                ),
+                (normalized_path(&content), "2.22".to_string()),
+                (normalized_path(&wrapper), "2.21".to_string()),
+                (normalized_path(&configuration), "2.20".to_string()),
             ]
         );
         let _ = fs::remove_dir_all(&context.cwd);
@@ -1527,12 +1528,9 @@ mod tests {
 
         assert_eq!(
             paths,
-            vec![
-                fs::canonicalize(&wrapper).unwrap(),
-                fs::canonicalize(&configuration).unwrap(),
-            ]
+            vec![normalized_path(&wrapper), normalized_path(&configuration),]
         );
-        assert!(!paths.contains(&fs::canonicalize(unrelated).unwrap()));
+        assert!(!paths.contains(&normalized_path(&unrelated)));
         let _ = fs::remove_dir_all(&context.cwd);
     }
 
@@ -1573,9 +1571,9 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                fs::canonicalize(&rights).unwrap(),
-                fs::canonicalize(&wrapper).unwrap(),
-                fs::canonicalize(&configuration).unwrap(),
+                normalized_path(&rights),
+                normalized_path(&wrapper),
+                normalized_path(&configuration),
             ]
         );
         let _ = fs::remove_dir_all(&context.cwd);
@@ -1634,7 +1632,7 @@ mod tests {
         .expect("nested ownership boundary resolves");
 
         assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].path, fs::canonicalize(nested_owner).unwrap());
+        assert_eq!(owners[0].path, normalized_path(&nested_owner));
         assert_eq!(owners[0].version.as_deref(), Some("2.20"));
         let _ = fs::remove_dir_all(&context.cwd);
     }

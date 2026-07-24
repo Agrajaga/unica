@@ -690,7 +690,7 @@ mod owner_contract_tests {
             .unwrap();
 
         assert!(!outcome.ok, "{outcome:?}");
-        let diagnostics = outcome.errors.join("\n");
+        let diagnostics = outcome.errors.join("\n").replace('\\', "/");
         assert!(
             diagnostics.contains("EventSubscription")
                 && diagnostics.contains("CatalogObject.MissingCatalog")
@@ -18284,7 +18284,10 @@ mod tests {
             include_str!("../../../../../tests/fixtures/platform_8_3_27/exchange_plan/Content.xml");
 
         assert_eq!(*name, "Content.xml");
-        assert_eq!(content.replace("\r\n", "\n"), expected);
+        assert_eq!(
+            content.replace("\r\n", "\n"),
+            expected.replace("\r\n", "\n")
+        );
     }
 
     #[test]

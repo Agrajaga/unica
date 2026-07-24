@@ -1511,6 +1511,11 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    fn normalized_path(path: &std::path::Path) -> std::path::PathBuf {
+        crate::infrastructure::source_roots::normalize_path_identity(path)
+            .expect("test path identity must normalize")
+    }
+
     #[test]
     fn lists_unica_orchestrator_scope() {
         let names = tools().iter().map(|tool| tool.name).collect::<Vec<_>>();
@@ -3692,9 +3697,10 @@ mod tests {
                 roxmltree::Document::parse(std::str::from_utf8(&bytes[3..]).unwrap())
                     .unwrap_or_else(|error| panic!("{case}: {}: {error}", path.display()));
                 assert!(
-                    result
-                        .changes
-                        .contains(&format!("updated {}", path.display())),
+                    result.changes.contains(&format!(
+                        "updated {}",
+                        crate::infrastructure::platform::testing::path_display_for_test(&path)
+                    )),
                     "{case}: {result:?}"
                 );
             }
@@ -5044,10 +5050,7 @@ mod tests {
             assert_eq!(diagnostic["compatibility"], "invalid", "{label}");
             assert_eq!(
                 diagnostic["root"],
-                std::fs::canonicalize(&target)
-                    .unwrap()
-                    .display()
-                    .to_string(),
+                normalized_path(&target).display().to_string(),
                 "{label}"
             );
             assert_eq!(std::fs::read(&target).unwrap(), before, "{label}");
@@ -5288,10 +5291,7 @@ mod tests {
             assert_eq!(diagnostic["actualFormat"], "2.21", "{tool}: {result:?}");
             assert_eq!(
                 diagnostic["root"],
-                std::fs::canonicalize(&target)
-                    .unwrap()
-                    .display()
-                    .to_string(),
+                normalized_path(&target).display().to_string(),
                 "{tool}: {result:?}"
             );
             assert_eq!(std::fs::read(&target).unwrap(), newer, "{tool}");
@@ -5536,10 +5536,7 @@ mod tests {
                     assert_eq!(diagnostic["actualFormat"], "2.21", "{tool}: {result:?}");
                     assert_eq!(
                         diagnostic["root"],
-                        std::fs::canonicalize(&second)
-                            .unwrap()
-                            .display()
-                            .to_string(),
+                        normalized_path(&second).display().to_string(),
                         "{tool}: {result:?}"
                     );
                     assert!(!external.join("Created.xml").exists(), "{tool}");
@@ -5671,10 +5668,7 @@ mod tests {
         assert_eq!(diagnostic["compatibility"], "newer");
         assert_eq!(
             diagnostic["root"],
-            std::fs::canonicalize(&target_path)
-                .unwrap()
-                .display()
-                .to_string(),
+            normalized_path(&target_path).display().to_string(),
             "{result:?}"
         );
         let errors = result.errors.join("\n");

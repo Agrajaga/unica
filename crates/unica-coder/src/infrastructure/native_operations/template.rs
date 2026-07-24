@@ -895,6 +895,10 @@ mod tests {
     use super::*;
     use crate::application::UnicaApplication;
 
+    fn displayed_path(path: &Path) -> String {
+        crate::infrastructure::platform::testing::path_display_for_test(path)
+    }
+
     fn temp_context(name: &str) -> WorkspaceContext {
         let root = std::env::temp_dir().join(format!(
             "unica-template-{name}-{}-{}",
@@ -1869,10 +1873,10 @@ mod tests {
         assert!(!ext.join("Template.html").exists());
         assert!(outcome
             .artifacts
-            .contains(&ext.join("Template.xml").display().to_string()));
+            .contains(&displayed_path(&ext.join("Template.xml"))));
         assert!(outcome
             .artifacts
-            .contains(&ext.join("Template/ru.html").display().to_string()));
+            .contains(&displayed_path(&ext.join("Template/ru.html"))));
         let _ = fs::remove_dir_all(&context.cwd);
     }
 
@@ -1959,7 +1963,7 @@ mod tests {
         let expected =
             include_str!("../../../../../tests/fixtures/platform_8_3_27/mxl/Template.xml");
 
-        assert_eq!(xml, expected);
+        assert_eq!(xml.replace("\r\n", "\n"), expected.replace("\r\n", "\n"));
     }
 
     #[test]
