@@ -294,7 +294,7 @@ used to rewrite platform-valid XML.
 
 Two independent corpus generations use manifest `schemaVersion: 2` and have the
 same normalized case-contract SHA-256
-`e1f9b8b73288699b5202df1c0814110b255fa80eec908f1b7ea921f55acb82f8`.
+`52d9889946c1e44ebf542721eee8a83c4ba525526f97fb1fe2f4f74074a7a161`.
 The digest includes the complete `emptyDirectoryPaths` inventory. Their
 complete public inventory contains 63 platform checkpoints: 52 configuration,
 nine extension, one EPF, and one ERF.

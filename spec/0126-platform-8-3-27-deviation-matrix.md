@@ -177,7 +177,7 @@ same-source-set owner.
 | Stable auxiliary payloads outside platform checkpoint roots | 141 |
 | Total regular corpus files | 1039, including 63 case reports and one manifest |
 | Empty corpus directories | 90 |
-| Pinned normalized case-contract SHA-256 | `e1f9b8b73288699b5202df1c0814110b255fa80eec908f1b7ea921f55acb82f8` |
+| Pinned normalized case-contract SHA-256 | `52d9889946c1e44ebf542721eee8a83c4ba525526f97fb1fe2f4f74074a7a161` |
 
 Representative branch counts include 23 `meta.compile` kinds, five
 `template.add` kinds, three `cf.edit` branches, two `cfe.borrow` branches, and
