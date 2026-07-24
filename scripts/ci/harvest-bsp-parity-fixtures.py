@@ -30,6 +30,7 @@ METADATA_ROOT_LIMITS = {
     "Documents": 1,
     "Enums": 1,
     "InformationRegisters": 1,
+    "Languages": 1,
     "Reports": 1,
 }
 CATEGORY_LIMITS = {

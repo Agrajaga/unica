@@ -154,8 +154,9 @@ class PackageUnicaPluginTests(unittest.TestCase):
             ):
                 projected.append(entry["target"])
 
-        self.assertEqual(len(projected), 16)
+        self.assertEqual(len(projected), 17)
         self.assertIn("cf/Configuration.xml", projected)
+        self.assertIn("meta/Languages/Русский.xml", projected)
         self.assertTrue(all(target.endswith(".xml") for target in projected))
 
     def test_bsp_parity_fixture_bytes_are_not_transformed_by_git(self) -> None:
