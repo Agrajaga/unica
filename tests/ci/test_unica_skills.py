@@ -626,6 +626,16 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                     skill_text,
                 )
 
+        meta_edit_docs = [
+            self.skill_root() / "meta-edit" / "SKILL.md",
+            self.skill_root() / "meta-edit" / "child-operations.md",
+        ]
+        for doc_path in meta_edit_docs:
+            doc = doc_path.read_text(encoding="utf-8")
+            with self.subTest(path=doc_path.relative_to(self.repo_root())):
+                self.assertRegex(doc, r"не\s+новее `Version8_3_26`")
+                self.assertNotRegex(doc, r"`Version8_3_26`\s+и старше")
+
     def test_all_skills_do_not_expose_internal_mcp_names(self) -> None:
         forbidden = [
             "unica-coder",

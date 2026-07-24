@@ -28,7 +28,7 @@
 - Consumes: `ACTIVE_FORMAT_PROFILE.platform_line`, `cf_validate_enum_allowed`, and `MetaEditLineNumberLengthPolicy`.
 - Produces: `meta_edit_line_number_length_policy_for_platform(mode, platform_line) -> MetaEditLineNumberLengthPolicy`.
 
-- [ ] **Step 1: Write the failing policy matrix**
+- [x] **Step 1: Write the failing policy matrix**
 
 Add a unit test with these expectations:
 
@@ -50,7 +50,7 @@ for (mode, platform_line, expected) in [
 Also assert that `DontUse` with `8.3.27.2074` and `invalid` returns
 `UnknownCompatibility`.
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run:
 
@@ -61,7 +61,7 @@ cargo test --package unica-coder line_number_length_policy_uses_effective_platfo
 Expected: compilation fails because
 `meta_edit_line_number_length_policy_for_platform` does not exist.
 
-- [ ] **Step 3: Implement minimal normalization**
+- [x] **Step 3: Implement minimal normalization**
 
 Import `ACTIVE_FORMAT_PROFILE`. Add a strict three-component dotted platform
 line parser and the policy helper:
@@ -91,7 +91,7 @@ fn meta_edit_line_number_length_policy_for_platform(
 Make `meta_edit_line_number_length_policy_from_mode` delegate to this helper
 with `ACTIVE_FORMAT_PROFILE.platform_line`.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run:
 
@@ -111,13 +111,13 @@ Expected: all selected tests pass.
 - Consumes: the effective-version policy from Task 1.
 - Produces: identical reader-facing semantics in both public documentation locations.
 
-- [ ] **Step 1: Update both documentation locations**
+- [x] **Step 1: Update both documentation locations**
 
 State that `DontUse` resolves to the active platform profile, an explicit
 `VersionX` resolves to `X`, and values `5..=9` are editable only when that
 effective version is newer than `8.3.26`.
 
-- [ ] **Step 2: Run focused and repository verification**
+- [x] **Step 2: Run focused and repository verification**
 
 Run:
 
@@ -131,7 +131,7 @@ git diff --check
 
 Expected: every command exits `0`; Rust and Python suites report zero failures.
 
-- [ ] **Step 3: Commit and publish**
+- [x] **Step 3: Commit and publish**
 
 Stage only the Rust change, the two skill documents, this plan, and its design
 document. Commit as `fix: derive effective compatibility version`, push
