@@ -1,10 +1,19 @@
-use super::operation_descriptors::native_operation_descriptor;
+use super::operation_descriptors::{native_operation_descriptor, native_path_alias_groups};
 use super::{RuntimeJobAction, ToolHandler, ToolSpec};
+use crate::domain::form_edit::{form_edit_definition_schema, validate_form_edit_definition};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
 const COMMON_ARGS: &[&str] = &["cwd", "dryRun", "confirm"];
+const CODE_PATCH_ARGS: &[&str] = &[
+    "path",
+    "operation",
+    "selector",
+    "content",
+    "position",
+    "sourceDir",
+];
 const RUNTIME_JOB_STATUS_ARGS: &[&str] = &["jobId"];
 const RUNTIME_JOB_WAIT_ARGS: &[&str] = &["jobId", "timeoutSeconds"];
 const RUNTIME_JOB_LOGS_ARGS: &[&str] = &["jobId", "tailChars"];
@@ -54,6 +63,9 @@ const META_EDIT_OPERATIONS: &[&str] = &[
     "set-basedOn",
     "set-inputByString",
 ];
+const CFE_PATCH_METHOD_CONTEXTS: &[&str] = &["НаСервере", "НаКлиенте", "НаСервереБезКонтекста"];
+const CFE_PATCH_METHOD_INTERCEPTOR_TYPES: &[&str] = &["Before", "After"];
+const CFE_PATCH_METHOD_IDENTIFIER_PATTERN: &str = r"^[A-Za-z_А-Яа-яЁё][A-Za-z0-9_А-Яа-яЁё]*$";
 
 const NATIVE_XML_DSL_ARGS: &[&str] = &[
     "BaseForm",
@@ -253,6 +265,7 @@ const RUNTIME_ARGS: &[&str] = &[
     "distributiveModules",
     "emptyHandlers",
     "execute",
+    "stderrOutput",
     "extension",
     "externalConnection",
     "externalConnectionServer",
@@ -297,6 +310,8 @@ const RUNTIME_ARGS: &[&str] = &[
     "unsupportedFunctional",
     "unreferenceProcedures",
     "usePrivilegedMode",
+    "waitForExit",
+    "waitTimeoutMs",
     "webClient",
     "workdir",
 ];
@@ -323,6 +338,7 @@ const RUNTIME_STRING_ARGS: &[&str] = &[
     "config",
     "connection",
     "execute",
+    "stderrOutput",
     "extension",
     "format",
     "mcpConfig",
@@ -458,6 +474,9 @@ const RUNTIME_LAUNCH_OPERATION_ARGS: &[&str] = &[
     "execute",
     "usePrivilegedMode",
     "output",
+    "stderrOutput",
+    "waitForExit",
+    "waitTimeoutMs",
     "rawKeys",
 ];
 const RUNTIME_EXTENSIONS_OPERATION_ARGS: &[&str] =
@@ -562,20 +581,99 @@ pub fn input_schema_for_tool(tool: &ToolSpec) -> Value {
         properties.insert(name.to_string(), property_schema_for_tool(tool, name));
     }
 
+    let mut required = required_args(tool);
+    let mut required_path_aliases = Vec::new();
+    if let ToolHandler::NativeOperation { operation, .. } = tool.handler {
+        for group in native_path_alias_groups(operation) {
+            if let Some(index) = required
+                .iter()
+                .position(|required| *required == group.canonical)
+            {
+                required.remove(index);
+                required_path_aliases.push(json!({
+                    "anyOf": group
+                        .aliases
+                        .iter()
+                        .map(|alias| json!({"required": [alias]}))
+                        .collect::<Vec<_>>()
+                }));
+            }
+        }
+    }
+
     let mut schema = json!({
         "type": "object",
         "additionalProperties": false,
         "properties": properties,
-        "required": required_args(tool),
+        "required": required,
     });
+    if !required_path_aliases.is_empty() {
+        schema["allOf"] = Value::Array(required_path_aliases);
+    }
     if tool.name == "unica.form.edit" {
-        schema["oneOf"] = json!([
+        schema["anyOf"] = json!([
             {"required": ["JsonPath"]},
             {"required": ["jsonPath"]},
             {"required": ["definition"]}
         ]);
     }
     schema
+}
+
+pub(crate) fn normalize_native_path_aliases(
+    tool: ToolSpec,
+    args: &Map<String, Value>,
+) -> Result<Map<String, Value>, String> {
+    let mut normalized = args.clone();
+    let ToolHandler::NativeOperation { operation, .. } = tool.handler else {
+        return Ok(normalized);
+    };
+
+    for group in native_path_alias_groups(operation) {
+        let present = group
+            .aliases
+            .iter()
+            .filter_map(|alias| args.get(*alias).map(|value| (*alias, value)))
+            .collect::<Vec<_>>();
+        if present.is_empty() {
+            continue;
+        }
+
+        let non_empty = present
+            .iter()
+            .copied()
+            .filter(|(_, value)| !is_empty_path_alias_value(value))
+            .collect::<Vec<_>>();
+        if let Some((_, expected)) = non_empty.first().copied() {
+            if non_empty.iter().any(|(_, value)| *value != expected) {
+                return Err(format!(
+                    "{} received conflicting path aliases with different non-empty values: {}",
+                    tool.name,
+                    non_empty
+                        .iter()
+                        .map(|(alias, _)| *alias)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+
+        let selected = non_empty
+            .first()
+            .or_else(|| present.first())
+            .map(|(_, value)| (*value).clone())
+            .expect("present path aliases cannot be empty");
+        for alias in group.aliases {
+            normalized.remove(*alias);
+        }
+        normalized.insert(group.canonical.to_string(), selected);
+    }
+
+    Ok(normalized)
+}
+
+fn is_empty_path_alias_value(value: &Value) -> bool {
+    value.as_str().is_some_and(|value| value.trim().is_empty())
 }
 
 pub fn validate_tool_arguments(
@@ -602,12 +700,14 @@ pub fn validate_tool_arguments(
         validate_runtime_job_arguments(tool.name, action, args, dry_run)?;
     }
     validate_code_arguments(tool, args, dry_run)?;
+    validate_code_patch_arguments(tool, args)?;
     validate_meta_edit_arguments(tool, args)?;
     validate_form_add_arguments(tool, args)?;
     validate_form_edit_arguments(tool, args, dry_run)?;
     validate_template_add_arguments(tool, args)?;
     validate_support_arguments(tool, args, dry_run)?;
     validate_external_init_arguments(tool, args)?;
+    validate_cfe_patch_method_arguments(tool, args)?;
 
     if !dry_run || is_external_init_tool(tool) {
         for required in required_args(&tool) {
@@ -618,6 +718,152 @@ pub fn validate_tool_arguments(
     }
 
     Ok(())
+}
+
+fn validate_code_patch_arguments(tool: ToolSpec, args: &Map<String, Value>) -> Result<(), String> {
+    if tool.name != "unica.code.patch" {
+        return Ok(());
+    }
+    for key in ["path", "operation", "content", "position"] {
+        let value = args
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{} argument `{key}` must be a non-empty string", tool.name))?;
+        if value.trim().is_empty() {
+            return Err(format!(
+                "{} argument `{key}` must be a non-empty string",
+                tool.name
+            ));
+        }
+    }
+    if args.get("operation").and_then(Value::as_str) != Some("insert") {
+        return Err(format!("{} supports only operation `insert`", tool.name));
+    }
+    if !matches!(
+        args.get("position").and_then(Value::as_str),
+        Some("before" | "after")
+    ) {
+        return Err(format!(
+            "{} argument `position` must be `before` or `after`",
+            tool.name
+        ));
+    }
+    let selector = args
+        .get("selector")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{} argument `selector` must be an object", tool.name))?;
+    if selector.len() != 1
+        || !selector
+            .keys()
+            .all(|key| matches!(key.as_str(), "method" | "anchor"))
+    {
+        return Err(format!(
+            "{} selector must contain exactly one of `method` or `anchor`",
+            tool.name
+        ));
+    }
+    let value = selector
+        .values()
+        .next()
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    if value.is_none() {
+        return Err(format!(
+            "{} selector value must be a non-empty string",
+            tool.name
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cfe_patch_method_arguments(
+    tool: ToolSpec,
+    args: &Map<String, Value>,
+) -> Result<(), String> {
+    if tool.name != "unica.cfe.patch_method" {
+        return Ok(());
+    }
+    for aliases in [
+        &["MethodName", "methodName"][..],
+        &["Context", "context"][..],
+        &["InterceptorType", "interceptorType"][..],
+        &["IsFunction", "isFunction"][..],
+    ] {
+        validate_unique_alias_group(tool.name, args, aliases)?;
+    }
+    for name in ["MethodName", "methodName"] {
+        let Some(value) = args.get(name) else {
+            continue;
+        };
+        let value = value
+            .as_str()
+            .ok_or_else(|| format!("{} argument `{name}` must be string", tool.name))?;
+        if !is_cfe_patch_method_identifier(value) {
+            return Err(format!(
+                "{} argument `MethodName` must be a valid 1C identifier",
+                tool.name
+            ));
+        }
+    }
+    for name in ["Context", "context"] {
+        let Some(value) = args.get(name) else {
+            continue;
+        };
+        let value = value
+            .as_str()
+            .ok_or_else(|| format!("{} argument `{name}` must be string", tool.name))?;
+        if !CFE_PATCH_METHOD_CONTEXTS.contains(&value) {
+            return Err(format!(
+                "{} argument `Context` must be one of: {}",
+                tool.name,
+                CFE_PATCH_METHOD_CONTEXTS.join(", ")
+            ));
+        }
+    }
+    for name in ["InterceptorType", "interceptorType"] {
+        let Some(value) = args.get(name) else {
+            continue;
+        };
+        let value = value
+            .as_str()
+            .ok_or_else(|| format!("{} argument `{name}` must be string", tool.name))?;
+        if !CFE_PATCH_METHOD_INTERCEPTOR_TYPES.contains(&value) {
+            return Err(format!(
+                "{} argument `InterceptorType` must be one of: {}",
+                tool.name,
+                CFE_PATCH_METHOD_INTERCEPTOR_TYPES.join(", ")
+            ));
+        }
+    }
+    for name in ["IsFunction", "isFunction"] {
+        let Some(value) = args.get(name) else {
+            continue;
+        };
+        let value = value
+            .as_bool()
+            .ok_or_else(|| format!("{} argument `{name}` must be boolean", tool.name))?;
+        if value {
+            return Err(format!(
+                "{} v1 requires a parameterless procedure; a base method signature resolver for functions and parameterized methods is not implemented",
+                tool.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_cfe_patch_method_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let valid_start = |ch: char| {
+        ch == '_'
+            || ch.is_ascii_alphabetic()
+            || ('А'..='я').contains(&ch)
+            || matches!(ch, 'Ё' | 'ё')
+    };
+    valid_start(first) && chars.all(|ch| valid_start(ch) || ch.is_ascii_digit())
 }
 
 fn validate_external_init_arguments(
@@ -675,6 +921,10 @@ fn validate_form_edit_arguments(
                 tool.name
             ));
         }
+    }
+
+    if let Some(definition) = args.get("definition") {
+        validate_form_edit_definition(definition)?;
     }
 
     Ok(())
@@ -1218,7 +1468,11 @@ fn allowed_args(tool: &ToolSpec) -> Vec<&'static str> {
     let mut names = COMMON_ARGS.to_vec();
     match tool.handler {
         ToolHandler::NativeOperation { operation, .. } => {
-            names.extend(native_args_for(operation));
+            if operation == "code-patch" {
+                names.extend(CODE_PATCH_ARGS);
+            } else {
+                names.extend(native_args_for(operation));
+            }
             if operation == "form-edit" {
                 names.push("definition");
             }
@@ -1286,13 +1540,17 @@ fn runtime_required_args(tool: &ToolSpec) -> Vec<&'static str> {
     vec!["operation"]
 }
 
-fn runtime_job_args(action: RuntimeJobAction) -> &'static [&'static str] {
+fn runtime_job_args(action: RuntimeJobAction) -> Vec<&'static str> {
     match action {
-        RuntimeJobAction::Start => RUNTIME_ARGS,
-        RuntimeJobAction::Status | RuntimeJobAction::Cancel => RUNTIME_JOB_STATUS_ARGS,
-        RuntimeJobAction::Wait => RUNTIME_JOB_WAIT_ARGS,
-        RuntimeJobAction::Logs => RUNTIME_JOB_LOGS_ARGS,
-        RuntimeJobAction::List => &[],
+        RuntimeJobAction::Start => RUNTIME_ARGS
+            .iter()
+            .copied()
+            .filter(|name| !matches!(*name, "waitForExit" | "waitTimeoutMs" | "stderrOutput"))
+            .collect(),
+        RuntimeJobAction::Status | RuntimeJobAction::Cancel => RUNTIME_JOB_STATUS_ARGS.to_vec(),
+        RuntimeJobAction::Wait => RUNTIME_JOB_WAIT_ARGS.to_vec(),
+        RuntimeJobAction::Logs => RUNTIME_JOB_LOGS_ARGS.to_vec(),
+        RuntimeJobAction::List => Vec::new(),
     }
 }
 
@@ -1308,6 +1566,14 @@ fn runtime_job_required_args(action: RuntimeJobAction) -> Vec<&'static str> {
 }
 
 fn property_schema(name: &str) -> Value {
+    if name == "waitTimeoutMs" {
+        return json!({
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 86_400_000
+        });
+    }
+
     let value_type = if matches!(
         name,
         "dryRun"
@@ -1360,6 +1626,7 @@ fn property_schema(name: &str) -> Value {
             | "unsupportedFunctional"
             | "unreferenceProcedures"
             | "usePrivilegedMode"
+            | "waitForExit"
             | "webClient"
             | "includeMethods"
             | "ignoreCase"
@@ -1376,6 +1643,7 @@ fn property_schema(name: &str) -> Value {
             | "MaxParams"
             | "maxParams"
             | "mcpPort"
+            | "waitTimeoutMs"
             | "maxOutputTokens"
             | "maxFiles"
             | "rangeStart"
@@ -1418,8 +1686,51 @@ fn property_schema(name: &str) -> Value {
 }
 
 fn property_schema_for_tool(tool: &ToolSpec, name: &str) -> Value {
+    if tool.name == "unica.form.edit" && name == "definition" {
+        return form_edit_definition_schema();
+    }
+    if tool.name == "unica.code.patch" {
+        return match name {
+            "operation" => json!({ "type": "string", "enum": ["insert"] }),
+            "position" => json!({ "type": "string", "enum": ["before", "after"] }),
+            "selector" => json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "method": { "type": "string", "minLength": 1 },
+                    "anchor": { "type": "string", "minLength": 1 }
+                },
+                "oneOf": [
+                    { "required": ["method"] },
+                    { "required": ["anchor"] }
+                ]
+            }),
+            _ => property_schema(name),
+        };
+    }
     if tool.name == "unica.meta.edit" && matches!(name, "Operation" | "operation") {
         return json!({ "type": "string", "enum": META_EDIT_OPERATIONS });
+    }
+    if tool.name == "unica.cfe.patch_method" {
+        return match name {
+            "Context" | "context" => {
+                json!({ "type": "string", "enum": CFE_PATCH_METHOD_CONTEXTS })
+            }
+            "InterceptorType" | "interceptorType" => {
+                json!({ "type": "string", "enum": CFE_PATCH_METHOD_INTERCEPTOR_TYPES })
+            }
+            "MethodName" | "methodName" => json!({
+                "type": "string",
+                "minLength": 1,
+                "pattern": CFE_PATCH_METHOD_IDENTIFIER_PATTERN
+            }),
+            "IsFunction" | "isFunction" => json!({
+                "type": "boolean",
+                "const": false,
+                "description": "cfe.patch_method v1 supports parameterless procedures only; base method signature resolution is not implemented"
+            }),
+            _ => property_schema(name),
+        };
     }
     if matches!(
         tool.handler,
@@ -1557,13 +1868,14 @@ fn expected_scalar_type(key: &str) -> Option<&'static str> {
             | "unsupportedFunctional"
             | "unreferenceProcedures"
             | "usePrivilegedMode"
+            | "waitForExit"
             | "webClient"
             | "includeMethods"
             | "ignoreCase"
             | "regex"
     ) {
         Some("boolean")
-    } else if key == "definition" {
+    } else if matches!(key, "definition" | "selector") {
         Some("object")
     } else if matches!(
         key,
@@ -1573,6 +1885,7 @@ fn expected_scalar_type(key: &str) -> Option<&'static str> {
             | "MaxParams"
             | "maxParams"
             | "mcpPort"
+            | "waitTimeoutMs"
             | "maxOutputTokens"
             | "maxFiles"
             | "rangeStart"
@@ -1629,6 +1942,112 @@ mod tests {
     }
 
     #[test]
+    fn code_patch_contract_is_narrow_and_requires_one_typed_selector() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.code.patch")
+            .unwrap();
+        let mut args = Map::new();
+        args.insert(
+            "path".to_string(),
+            json!("src/CommonModules/X/Ext/Module.bsl"),
+        );
+        args.insert("operation".to_string(), json!("insert"));
+        args.insert("selector".to_string(), json!({"method": "ПриСоздании"}));
+        args.insert("content".to_string(), json!("Сообщить(\"ok\");"));
+        args.insert("position".to_string(), json!("after"));
+        args.insert("sourceDir".to_string(), json!("src"));
+        validate_tool_arguments(tool, &args, false).unwrap();
+
+        args.insert(
+            "selector".to_string(),
+            json!({"method": "A", "anchor": "B"}),
+        );
+        assert!(validate_tool_arguments(tool, &args, false).is_err());
+        args.insert("rawArgs".to_string(), json!(["--unsafe"]));
+        assert!(validate_tool_arguments(tool, &args, false).is_err());
+    }
+
+    #[test]
+    fn code_patch_json_schema_accepts_each_documented_selector_variant() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.code.patch")
+            .unwrap();
+        let schema = input_schema_for_tool(&tool);
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let base = json!({
+            "path": "src/CommonModules/X/Ext/Module.bsl",
+            "operation": "insert",
+            "content": "Сообщить(\"ok\");",
+            "position": "after",
+            "sourceDir": "src",
+        });
+
+        for selector in [
+            json!({"method": "ПриСоздании"}),
+            json!({"anchor": "Сообщить"}),
+        ] {
+            let mut instance = base.clone();
+            instance["selector"] = selector;
+            assert!(validator.is_valid(&instance), "{instance}");
+        }
+
+        let mut invalid = base;
+        invalid["selector"] = json!({"method": "A", "anchor": "B"});
+        assert!(!validator.is_valid(&invalid));
+    }
+
+    #[test]
+    fn cfe_patch_method_contract_exposes_closed_bsl_argument_domains() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.cfe.patch_method")
+            .unwrap();
+        let schema = input_schema_for_tool(&tool);
+        assert_eq!(
+            schema["properties"]["Context"]["enum"],
+            json!(["НаСервере", "НаКлиенте", "НаСервереБезКонтекста"])
+        );
+        assert_eq!(
+            schema["properties"]["InterceptorType"]["enum"],
+            json!(["Before", "After"])
+        );
+        assert_eq!(
+            schema["properties"]["IsFunction"]["const"],
+            json!(false),
+            "v1 exposes procedure-only interception"
+        );
+        assert!(schema["properties"]["MethodName"]["pattern"].is_string());
+
+        let mut args = Map::from_iter([
+            ("ExtensionPath".to_string(), json!("ext")),
+            ("ModulePath".to_string(), json!("CommonModule.Server")),
+            ("MethodName".to_string(), json!("Run")),
+            ("InterceptorType".to_string(), json!("Before")),
+            ("Context".to_string(), json!("AtServer")),
+        ]);
+        let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+        assert!(error.contains("Context"), "{error}");
+        args.insert("Context".to_string(), json!("НаСервере"));
+        args.insert("MethodName".to_string(), json!("Bad-Name"));
+        let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+        assert!(error.contains("MethodName"), "{error}");
+        args.insert("MethodName".to_string(), json!("Run"));
+        args.insert(
+            "InterceptorType".to_string(),
+            json!("ModificationAndControl"),
+        );
+        let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+        assert!(error.contains("InterceptorType"), "{error}");
+        args.insert("InterceptorType".to_string(), json!("Before"));
+        args.insert("IsFunction".to_string(), json!(true));
+        let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+        assert!(error.contains("parameterless procedure"), "{error}");
+        assert!(error.contains("not implemented"), "{error}");
+    }
+
+    #[test]
     fn mutating_dry_run_does_not_require_payload() {
         let tool = tools()
             .into_iter()
@@ -1640,6 +2059,153 @@ mod tests {
     }
 
     #[test]
+    fn native_required_path_aliases_are_honest_json_schema_alternatives() {
+        let cases = [
+            (
+                "unica.cf.info",
+                vec![
+                    json!({"ConfigPath": "src"}),
+                    json!({"configPath": "src"}),
+                    json!({"Path": "src"}),
+                    json!({"path": "src"}),
+                    json!({"ConfigPath": "src", "configPath": "src"}),
+                ],
+            ),
+            (
+                "unica.meta.edit",
+                vec![
+                    json!({"ObjectPath": "Catalogs/Items.xml"}),
+                    json!({"objectPath": "Catalogs/Items.xml"}),
+                    json!({"Path": "Catalogs/Items.xml"}),
+                    json!({"path": "Catalogs/Items.xml"}),
+                ],
+            ),
+            (
+                "unica.form.edit",
+                vec![
+                    json!({"FormPath": "Ext/Form.xml", "definition": {}}),
+                    json!({"formPath": "Ext/Form.xml", "definition": {}}),
+                    json!({"Path": "Ext/Form.xml", "definition": {}}),
+                    json!({"path": "Ext/Form.xml", "definition": {}}),
+                    json!({
+                        "FormPath": "Ext/Form.xml",
+                        "JsonPath": "edit.json",
+                        "jsonPath": "edit.json"
+                    }),
+                ],
+            ),
+            (
+                "unica.interface.edit",
+                vec![
+                    json!({"CIPath": "Ext/CommandInterface.xml"}),
+                    json!({"ciPath": "Ext/CommandInterface.xml"}),
+                    json!({"Path": "Ext/CommandInterface.xml"}),
+                    json!({"path": "Ext/CommandInterface.xml"}),
+                ],
+            ),
+            (
+                "unica.subsystem.edit",
+                vec![
+                    json!({"SubsystemPath": "Subsystems/Sales.xml"}),
+                    json!({"subsystemPath": "Subsystems/Sales.xml"}),
+                    json!({"Path": "Subsystems/Sales.xml"}),
+                    json!({"path": "Subsystems/Sales.xml"}),
+                ],
+            ),
+            (
+                "unica.dcs.edit",
+                vec![
+                    json!({"TemplatePath": "Ext/Template.xml"}),
+                    json!({"templatePath": "Ext/Template.xml"}),
+                    json!({"Path": "Ext/Template.xml"}),
+                    json!({"path": "Ext/Template.xml"}),
+                ],
+            ),
+            (
+                "unica.form.compile",
+                vec![
+                    json!({"OutputPath": "Ext/Form.xml"}),
+                    json!({"outputPath": "Ext/Form.xml"}),
+                    json!({"OutputPath": "Ext/Form.xml", "outputPath": "Ext/Form.xml"}),
+                ],
+            ),
+        ];
+
+        for (tool_name, instances) in cases {
+            let tool = tools()
+                .into_iter()
+                .find(|tool| tool.name == tool_name)
+                .unwrap();
+            let schema = input_schema_for_tool(&tool);
+            let validator = jsonschema::validator_for(&schema).unwrap();
+            for instance in instances {
+                assert!(
+                    validator.is_valid(&instance),
+                    "{tool_name} schema rejected documented path aliases: {instance}; schema={schema}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_native_path_alias_group_normalizes_to_one_canonical_argument() {
+        for tool in tools() {
+            let ToolHandler::NativeOperation { operation, .. } = tool.handler else {
+                continue;
+            };
+            let schema = input_schema_for_tool(&tool);
+            let properties = schema["properties"].as_object().unwrap();
+            let mut seen = BTreeSet::new();
+            for group in native_path_alias_groups(operation) {
+                assert_eq!(
+                    group.aliases.first().copied(),
+                    Some(group.canonical),
+                    "{operation} canonical alias must be first"
+                );
+                for alias in group.aliases {
+                    assert!(
+                        seen.insert(*alias),
+                        "{operation} assigns path alias {alias} to more than one group"
+                    );
+                    assert!(
+                        properties.contains_key(*alias),
+                        "{operation} path alias {alias} is not public in its MCP schema"
+                    );
+                    let raw =
+                        Map::from_iter([(alias.to_string(), json!(format!("{operation}/value")))]);
+                    let normalized = normalize_native_path_aliases(tool, &raw).unwrap();
+                    assert_eq!(
+                        normalized.get(group.canonical),
+                        raw.get(*alias),
+                        "{operation} failed to normalize {alias} to {}",
+                        group.canonical
+                    );
+                    for removed in group.aliases {
+                        if *removed != group.canonical {
+                            assert!(
+                                !normalized.contains_key(*removed),
+                                "{operation} retained path alias {removed}"
+                            );
+                        }
+                    }
+                }
+
+                if group.aliases.len() > 1 {
+                    let raw = Map::from_iter([
+                        (group.aliases[0].to_string(), json!("first")),
+                        (group.aliases[1].to_string(), json!("second")),
+                    ]);
+                    let error = normalize_native_path_aliases(tool, &raw).unwrap_err();
+                    assert!(
+                        error.contains("conflicting path aliases"),
+                        "{operation}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn form_edit_contract_accepts_inline_definition_or_json_path() {
         let tool = tools()
             .into_iter()
@@ -1647,9 +2213,20 @@ mod tests {
             .unwrap();
         let schema = input_schema_for_tool(&tool);
         assert_eq!(schema["properties"]["definition"]["type"], "object");
-        assert_eq!(schema["required"], json!(["FormPath"]));
+        assert_eq!(schema["required"], json!([]));
         assert_eq!(
-            schema["oneOf"],
+            schema["allOf"],
+            json!([{
+                "anyOf": [
+                    {"required": ["FormPath"]},
+                    {"required": ["formPath"]},
+                    {"required": ["Path"]},
+                    {"required": ["path"]}
+                ]
+            }])
+        );
+        assert_eq!(
+            schema["anyOf"],
             json!([
                 {"required": ["JsonPath"]},
                 {"required": ["jsonPath"]},
@@ -1692,6 +2269,65 @@ mod tests {
         assert!(validate_tool_arguments(tool, &wrong_type, false)
             .unwrap_err()
             .contains("must be object"));
+    }
+
+    #[test]
+    fn form_edit_contract_rejects_unknown_sections_and_malformed_removals() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.form.edit")
+            .unwrap();
+        let schema = input_schema_for_tool(&tool);
+        let definition = &schema["properties"]["definition"];
+        assert_eq!(definition["additionalProperties"], false);
+        assert_eq!(definition["properties"]["removeElements"]["type"], "array");
+        assert_eq!(
+            definition["properties"]["removeElements"]["items"],
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {"name": {"type": "string", "minLength": 1, "pattern": r"\S"}},
+                "required": ["name"]
+            })
+        );
+
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(!validator.is_valid(&json!({
+            "FormPath": "Form.xml",
+            "definition": {"removeElements": [{"name": "   "}]}
+        })));
+
+        let cases = [
+            (json!({"typoSection": []}), "FORM_EDIT_UNKNOWN_SECTION"),
+            (
+                json!({"removeElements": [{}]}),
+                "FORM_EDIT_REMOVE_ELEMENT_MISSING_NAME",
+            ),
+            (
+                json!({"removeElements": [{"name": 42}]}),
+                "FORM_EDIT_REMOVE_ELEMENT_MISSING_NAME",
+            ),
+            (
+                json!({"removeElements": [{"name": "Target", "after": "Other"}]}),
+                "FORM_EDIT_REMOVE_ELEMENT_UNKNOWN_FIELD",
+            ),
+            (
+                json!({"removeElements": [{"name": "   "}]}),
+                "FORM_EDIT_REMOVE_ELEMENT_EMPTY_NAME",
+            ),
+            (
+                json!({"removeElements": [{"name": "Target"}, {"name": "Target"}]}),
+                "FORM_EDIT_REMOVE_ELEMENT_DUPLICATE",
+            ),
+        ];
+        for (definition, code) in cases {
+            let args = Map::from_iter([
+                ("FormPath".to_string(), json!("Form.xml")),
+                ("definition".to_string(), definition),
+            ]);
+            let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+            assert!(error.contains(code), "{error}");
+        }
     }
 
     #[test]
@@ -2013,6 +2649,11 @@ mod tests {
         assert!(schema["properties"].get("timeoutMs").is_none());
         assert_eq!(schema["properties"]["fullRebuild"]["type"], "boolean");
         assert_eq!(schema["properties"]["mcpPort"]["type"], "integer");
+        assert_eq!(schema["properties"]["waitForExit"]["type"], "boolean");
+        assert_eq!(schema["properties"]["waitTimeoutMs"]["type"], "integer");
+        assert_eq!(schema["properties"]["waitTimeoutMs"]["minimum"], 1);
+        assert_eq!(schema["properties"]["waitTimeoutMs"]["maximum"], 86_400_000);
+        assert_eq!(schema["properties"]["stderrOutput"]["type"], "string");
         assert!(schema["properties"]["operation"]["enum"]
             .as_array()
             .unwrap()
@@ -2070,6 +2711,77 @@ mod tests {
         let logs_schema = input_schema_for_tool(&job_logs);
         assert_eq!(logs_schema["required"], json!(["jobId"]));
         assert_eq!(logs_schema["properties"]["tailChars"]["type"], "integer");
+    }
+
+    #[test]
+    fn runtime_job_start_excludes_bounded_external_epf_arguments() {
+        let job_start = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.runtime.job.start")
+            .expect("runtime job start is registered");
+        let schema = input_schema_for_tool(&job_start);
+
+        for name in ["waitForExit", "waitTimeoutMs", "stderrOutput"] {
+            assert!(
+                schema["properties"].get(name).is_none(),
+                "{name} must remain exclusive to synchronous runtime.execute"
+            );
+
+            let mut args = json!({
+                "operation": "launch",
+                "clientMode": "thin"
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            args.insert(
+                name.to_string(),
+                match name {
+                    "waitForExit" => json!(true),
+                    "waitTimeoutMs" => json!(30_000),
+                    "stderrOutput" => json!("build/stderr.log"),
+                    _ => unreachable!(),
+                },
+            );
+
+            let error = validate_tool_arguments(job_start, &args, false)
+                .expect_err("bounded execution arguments must be rejected by runtime jobs");
+            assert!(error.contains(&format!("does not accept argument `{name}`")));
+        }
+
+        validate_tool_arguments(
+            job_start,
+            json!({
+                "operation": "launch",
+                "clientMode": "thin",
+                "c": "StartFeaturePlayer"
+            })
+            .as_object()
+            .unwrap(),
+            false,
+        )
+        .expect("ordinary runtime job launch arguments must remain supported");
+    }
+
+    #[test]
+    fn code_patch_schema_accepts_each_documented_selector_variant() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.code.patch")
+            .expect("code patch tool is registered");
+        let schema = input_schema_for_tool(&tool);
+        let selector = &schema["properties"]["selector"];
+
+        assert_eq!(selector["type"], "object");
+        assert_eq!(selector["additionalProperties"], false);
+        assert_eq!(selector["properties"]["method"]["type"], "string");
+        assert_eq!(selector["properties"]["anchor"]["type"], "string");
+        assert_eq!(selector["oneOf"].as_array().map(Vec::len), Some(2));
+        for required in ["path", "operation", "selector", "content", "position"] {
+            assert!(schema["required"]
+                .as_array()
+                .is_some_and(|items| { items.iter().any(|value| value == required) }));
+        }
     }
 
     #[test]
@@ -2214,16 +2926,27 @@ mod tests {
     }
 
     #[test]
-    fn skd_info_contract_exposes_raw_query_export() {
-        let skd_info = tools()
+    fn dcs_info_contract_exposes_raw_query_export() {
+        let dcs_info = tools()
             .into_iter()
-            .find(|tool| tool.name == "unica.skd.info")
-            .expect("unica.skd.info must be registered");
+            .find(|tool| tool.name == "unica.dcs.info")
+            .expect("unica.dcs.info must be registered");
 
-        let schema = input_schema_for_tool(&skd_info);
+        let schema = input_schema_for_tool(&dcs_info);
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["Raw"]["type"], "boolean");
-        assert_eq!(schema["required"], json!(["TemplatePath"]));
+        assert_eq!(schema["required"], json!([]));
+        assert_eq!(
+            schema["allOf"],
+            json!([{
+                "anyOf": [
+                    {"required": ["TemplatePath"]},
+                    {"required": ["templatePath"]},
+                    {"required": ["Path"]},
+                    {"required": ["path"]}
+                ]
+            }])
+        );
 
         let mut args = Map::new();
         args.insert(
@@ -2233,7 +2956,7 @@ mod tests {
         args.insert("Mode".to_string(), json!("query"));
         args.insert("Name".to_string(), json!("Sales"));
         args.insert("Raw".to_string(), json!(true));
-        validate_tool_arguments(skd_info, &args, false).unwrap();
+        validate_tool_arguments(dcs_info, &args, false).unwrap();
     }
 
     #[test]

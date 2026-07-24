@@ -8,12 +8,25 @@ use std::path::PathBuf;
 
 pub(crate) struct HandlerOutcome {
     pub(crate) adapter: AdapterOutcome,
+    pub(crate) data: Option<Value>,
     pub(crate) job: Option<Value>,
 }
 
 impl HandlerOutcome {
     pub(crate) fn plain(adapter: AdapterOutcome) -> Self {
-        Self { adapter, job: None }
+        Self {
+            adapter,
+            data: None,
+            job: None,
+        }
+    }
+
+    pub(crate) fn with_data(adapter: AdapterOutcome, data: Value) -> Self {
+        Self {
+            adapter,
+            data: Some(data),
+            job: None,
+        }
     }
 }
 
@@ -21,6 +34,18 @@ pub(crate) enum SupportGuardCheck {
     Allow,
     Warn(String),
     Block(AdapterOutcome),
+}
+
+pub(crate) enum FormatGuardCheck {
+    Allow,
+    Warn {
+        warning: String,
+        diagnostic: Value,
+    },
+    Block {
+        outcome: AdapterOutcome,
+        diagnostic: Value,
+    },
 }
 
 pub(crate) trait ApplicationPorts: Send + Sync {
@@ -36,6 +61,15 @@ pub(crate) trait ApplicationPorts: Send + Sync {
         dry_run: bool,
         context: &WorkspaceContext,
     ) -> Result<(), String>;
+
+    fn evaluate_format_guard(
+        &self,
+        _spec: ToolSpec,
+        _args: &Map<String, Value>,
+        _context: &WorkspaceContext,
+    ) -> Result<FormatGuardCheck, String> {
+        Ok(FormatGuardCheck::Allow)
+    }
 
     fn evaluate_support_guard(
         &self,
@@ -62,4 +96,29 @@ pub(crate) trait ApplicationPorts: Send + Sync {
     ) -> Result<CacheReport, String>;
 
     fn notify_invalidation(&self, context: &WorkspaceContext, events: &[DomainEvent]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HandlerOutcome;
+    use crate::application::AdapterOutcome;
+    use serde_json::json;
+
+    #[test]
+    fn plain_handler_outcome_has_no_typed_data() {
+        let outcome = HandlerOutcome::plain(AdapterOutcome::ok("plain"));
+
+        assert_eq!(outcome.data, None);
+        assert_eq!(outcome.job, None);
+    }
+
+    #[test]
+    fn handler_outcome_preserves_typed_data_separately_from_stdout() {
+        let data = json!({"path": "src/Module.bsl", "noOp": false});
+        let outcome = HandlerOutcome::with_data(AdapterOutcome::ok("structured"), data.clone());
+
+        assert_eq!(outcome.data, Some(data));
+        assert_eq!(outcome.job, None);
+        assert_eq!(outcome.adapter.stdout, None);
+    }
 }

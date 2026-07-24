@@ -22,6 +22,230 @@ def load_contract_module():
 
 
 class ProductContractTests(unittest.TestCase):
+    def test_native_validators_do_not_expose_internal_local_owner_only_switch(
+        self,
+    ) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        rust_root = repo_root / "crates" / "unica-coder" / "src"
+        offenders = []
+        for path in sorted(rust_root.rglob("*.rs")):
+            text = path.read_text(encoding="utf-8")
+            for marker in ("InternalLocalOwnerOnly", "internalLocalOwnerOnly"):
+                if marker in text:
+                    offenders.append(
+                        f"{path.relative_to(repo_root).as_posix()}: {marker}"
+                    )
+        self.assertEqual(offenders, [])
+
+    def test_v8_runner_partial_load_list_requires_bom_crlf_and_cyrillic_path(self) -> None:
+        module = load_contract_module()
+        expected_path = str(
+            Path("Catalogs.Товары") / "Ext" / "ObjectModule.bsl"
+        )
+        payload = b"\xef\xbb\xbf" + expected_path.encode("utf-8") + b"\r\n"
+
+        self.assertEqual(
+            module.validate_v8_runner_partial_load_list(payload, expected_path),
+            [],
+        )
+        self.assertIn(
+            "UTF-8 BOM",
+            "\n".join(
+                module.validate_v8_runner_partial_load_list(
+                    payload.removeprefix(b"\xef\xbb\xbf"),
+                    expected_path,
+                )
+            ),
+        )
+        self.assertIn(
+            "CRLF",
+            "\n".join(
+                module.validate_v8_runner_partial_load_list(
+                    b"\xef\xbb\xbf" + expected_path.encode("utf-8") + b"\n",
+                    expected_path,
+                )
+            ),
+        )
+
+    def test_v8_runner_partial_load_smoke_rejects_missing_binary(self) -> None:
+        module = load_contract_module()
+
+        errors = module.check_v8_runner_partial_load_contract(
+            Path("/missing/v8-runner"),
+            "linux-x64",
+        )
+
+        self.assertEqual(
+            errors,
+            ["v8-runner partial-load contract: binary not found: /missing/v8-runner"],
+        )
+
+    def test_v8_runner_bounded_external_epf_result_accepts_exit_seven_artifacts(
+        self,
+    ) -> None:
+        module = load_contract_module()
+        validator = getattr(
+            module,
+            "validate_v8_runner_bounded_external_epf_result",
+            None,
+        )
+        self.assertIsNotNone(validator)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            execute = root / "processor.epf"
+            output = root / "platform.log"
+            stderr_output = root / "client.stderr.log"
+            execute.write_bytes(b"epf")
+            output.write_text("bounded-platform-out\n", encoding="utf-8")
+            stderr_output.write_text("bounded-client-stderr\n", encoding="utf-8")
+            envelope = {
+                "data": {
+                    "external_epf_wait": {
+                        "pid": 123,
+                        "execute_path": str(execute),
+                        "exit_code": 7,
+                        "timed_out": False,
+                        "output_path": str(output),
+                        "stderr_path": str(stderr_output),
+                    }
+                }
+            }
+
+            self.assertEqual(
+                validator(
+                    envelope,
+                    execute,
+                    output,
+                    stderr_output,
+                    "bounded-platform-out",
+                    "bounded-client-stderr",
+                ),
+                [],
+            )
+
+    def test_v8_runner_bounded_external_epf_result_rejects_broken_wait_contract(
+        self,
+    ) -> None:
+        module = load_contract_module()
+        validator = getattr(
+            module,
+            "validate_v8_runner_bounded_external_epf_result",
+            None,
+        )
+        self.assertIsNotNone(validator)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            execute = root / "processor.epf"
+            output = root / "platform.log"
+            stderr_output = root / "client.stderr.log"
+            execute.write_bytes(b"epf")
+            output.write_text("bounded-platform-out\n", encoding="utf-8")
+            stderr_output.write_text("bounded-client-stderr\n", encoding="utf-8")
+            envelope = {
+                "data": {
+                    "external_epf_wait": {
+                        "pid": 123,
+                        "execute_path": str(execute),
+                        "exit_code": 7,
+                        "timed_out": False,
+                        "output_path": str(output),
+                        "stderr_path": str(stderr_output),
+                    }
+                }
+            }
+            mutations = [
+                ("pid", 0, "pid"),
+                ("execute_path", str(root / "other.epf"), "execute_path"),
+                ("exit_code", 0, "exit_code"),
+                ("timed_out", True, "timed_out"),
+                ("output_path", str(root / "other.log"), "output_path"),
+                ("stderr_path", str(root / "other.stderr.log"), "stderr_path"),
+            ]
+
+            for field, value, expected_error in mutations:
+                with self.subTest(field=field):
+                    broken = json.loads(json.dumps(envelope))
+                    broken["data"]["external_epf_wait"][field] = value
+                    errors = validator(
+                        broken,
+                        execute,
+                        output,
+                        stderr_output,
+                        "bounded-platform-out",
+                        "bounded-client-stderr",
+                    )
+                    self.assertTrue(
+                        any(expected_error in error for error in errors),
+                        errors,
+                    )
+
+            stderr_output.write_text("unexpected stderr\n", encoding="utf-8")
+            errors = validator(
+                envelope,
+                execute,
+                output,
+                stderr_output,
+                "bounded-platform-out",
+                "bounded-client-stderr",
+            )
+            self.assertTrue(
+                any("stderr artifact" in error for error in errors),
+                errors,
+            )
+
+            output.write_text(
+                "bounded-platform-out\nbounded-client-stderr\n",
+                encoding="utf-8",
+            )
+            stderr_output.write_text(
+                "bounded-client-stderr\nbounded-platform-out\n",
+                encoding="utf-8",
+            )
+            errors = validator(
+                envelope,
+                execute,
+                output,
+                stderr_output,
+                "bounded-platform-out",
+                "bounded-client-stderr",
+            )
+            self.assertTrue(
+                any("platform /Out artifact" in error for error in errors),
+                errors,
+            )
+            self.assertTrue(
+                any("stderr artifact" in error for error in errors),
+                errors,
+            )
+
+    def test_targeted_tool_contracts_run_both_v8_runner_behavioral_smokes(self) -> None:
+        module = load_contract_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tools_dir = Path(tmp)
+            runner = tools_dir / "v8-runner"
+            runner.write_bytes(b"runner")
+            with (
+                patch.object(module, "TOOL_HELP_CHECKS", []),
+                patch.object(
+                    module,
+                    "check_v8_runner_partial_load_contract",
+                    return_value=["behavioral failure"],
+                ) as behavioral_check,
+                patch.object(
+                    module,
+                    "check_v8_runner_bounded_external_epf_contract",
+                    return_value=["bounded failure"],
+                ) as bounded_check,
+            ):
+                errors = module.check_tool_contracts(tools_dir, "linux-x64")
+
+        self.assertEqual(errors, ["behavioral failure", "bounded failure"])
+        behavioral_check.assert_called_once_with(runner.resolve(), "linux-x64")
+        bounded_check.assert_called_once_with(runner.resolve(), "linux-x64")
+
     BSL_ANALYZER_HELP = (
         "#!/usr/bin/env sh\n"
         "case \"$*\" in\n"
@@ -30,6 +254,19 @@ class ProductContractTests(unittest.TestCase):
         "  *) exit 1 ;;\n"
         "esac\n"
     )
+
+    def test_local_1ci_corpus_is_ignored_and_agent_discoverable(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        ignore = (repo_root / ".gitignore").read_text(encoding="utf-8")
+        agents = (repo_root / "AGENTS.md").read_text(encoding="utf-8")
+        package_script = (repo_root / "scripts/ci/package-unica-plugin.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("docs-local/", ignore.splitlines())
+        self.assertIn("docs-local/1ci/8.3.27/en/", agents)
+        self.assertIn("python3.12 scripts/dev/download-1ci-guides.py", agents)
+        self.assertNotIn("docs-local", package_script)
 
     def test_marketplace_card_uses_unica_product_legal_links(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

@@ -38,10 +38,10 @@ IN_SCOPE_TOOLS = {
     "subsystem-validate": "unica.subsystem.validate",
     "template-add": "unica.template.add",
     "template-remove": "unica.template.remove",
-    "skd-compile": "unica.skd.compile",
-    "skd-edit": "unica.skd.edit",
-    "skd-info": "unica.skd.info",
-    "skd-validate": "unica.skd.validate",
+    "dcs-compile": "unica.dcs.compile",
+    "dcs-edit": "unica.dcs.edit",
+    "dcs-info": "unica.dcs.info",
+    "dcs-validate": "unica.dcs.validate",
     "mxl-compile": "unica.mxl.compile",
     "mxl-decompile": "unica.mxl.decompile",
     "mxl-info": "unica.mxl.info",
@@ -96,7 +96,7 @@ SCENARIO_SKILLS = {
         "unica.code.search",
         "unica.code.outline",
         "unica.code.grep",
-        "unica.skd.info",
+        "unica.dcs.info",
         "unica.meta.info",
         "unica.meta.profile",
         "unica.standards.search",
@@ -174,7 +174,7 @@ SCENARIO_SKILLS = {
         "unica.code.grep",
         "unica.meta.info",
         "unica.meta.profile",
-        "unica.skd.info",
+        "unica.dcs.info",
         "unica.code.diagnostics",
         "unica.standards.search",
         "unica.standards.explain",
@@ -295,10 +295,10 @@ TASK_EXAMPLE_ARGUMENT_KEYS = {
     "subsystem-validate": ["SubsystemPath"],
     "template-add": ["ObjectName", "TemplateName", "TemplateType", "SrcDir"],
     "template-remove": ["ObjectName", "TemplateName", "SrcDir"],
-    "skd-compile": ["DefinitionFile", "OutputPath"],
-    "skd-edit": ["TemplatePath", "Operation", "Value"],
-    "skd-info": ["TemplatePath"],
-    "skd-validate": ["TemplatePath"],
+    "dcs-compile": ["DefinitionFile", "OutputPath"],
+    "dcs-edit": ["TemplatePath", "Operation", "Value"],
+    "dcs-info": ["TemplatePath"],
+    "dcs-validate": ["TemplatePath"],
     "mxl-compile": ["JsonPath", "OutputPath"],
     "mxl-decompile": ["TemplatePath", "OutputPath"],
     "mxl-info": ["TemplatePath", "WithText"],
@@ -332,13 +332,13 @@ SCENARIO_PRESERVING_MIN_MCP_CALLS = {
     "subsystem-info": 8,
     "subsystem-validate": 2,
     "template-add": 2,
-    "skd-compile": 5,
-    "skd-info": 12,
-    "skd-validate": 2,
+    "dcs-compile": 5,
+    "dcs-info": 12,
+    "dcs-validate": 2,
     "mxl-info": 6,
     "mxl-validate": 2,
     "role-info": 2,
-    "skd-edit": 4,
+    "dcs-edit": 4,
     "role-compile": 3,
 }
 
@@ -352,8 +352,8 @@ ALLOWED_ADDITIONAL_MCP_TOOL_NAMES = {
     "interface-edit": {"unica.interface.validate"},
     "meta-edit": {"unica.meta.info", "unica.meta.validate"},
     "role-compile": {"unica.role.info", "unica.role.validate"},
-    "skd-compile": {"unica.skd.info", "unica.skd.validate"},
-    "skd-edit": {"unica.skd.info", "unica.skd.validate"},
+    "dcs-compile": {"unica.dcs.info", "unica.dcs.validate"},
+    "dcs-edit": {"unica.dcs.info", "unica.dcs.validate"},
 }
 
 SCENARIO_PRESERVING_TOKENS = {
@@ -376,6 +376,7 @@ SCENARIO_PRESERVING_TOKENS = {
         '"Name": "МояКонфигурация"',
         '"Version": "1.0.0.1"',
         '"Vendor": "Фирма 1С"',
+        "Режим совместимости (default: `Version8_3_27`)",
         '"CompatibilityMode": "Version8_3_27"',
         '"name": "unica.cf.info"',
         '"name": "unica.cf.validate"',
@@ -402,8 +403,7 @@ SCENARIO_PRESERVING_TOKENS = {
         '"InterceptorType": "Before"',
         '"InterceptorType": "After"',
         '"Context": "НаКлиенте"',
-        '"InterceptorType": "ModificationAndControl"',
-        '"IsFunction": true',
+        '"IsFunction": false',
     ],
     "meta-edit": [
         '"Value": "Комментарий: Строка(200) ;; Сумма: Число(15,2) | index"',
@@ -481,20 +481,20 @@ SCENARIO_PRESERVING_TOKENS = {
         '"name": "unica.role.validate"',
         '"name": "unica.role.info"',
     ],
-    "skd-compile": [
+    "dcs-compile": [
         '"DefinitionFile": "<json>"',
         '"Value": "<json-string>"',
-        '"name": "unica.skd.validate"',
-        '"name": "unica.skd.info"',
+        '"name": "unica.dcs.validate"',
+        '"name": "unica.dcs.info"',
         '"Mode": "variant"',
     ],
-    "skd-edit": [
+    "dcs-edit": [
         '"Operation": "add-field"',
         '"Value": "Цена: decimal(15,2) ;; Количество: decimal(15,3) ;; Сумма: decimal(15,2)"',
-        '"name": "unica.skd.validate"',
-        '"name": "unica.skd.info"',
+        '"name": "unica.dcs.validate"',
+        '"name": "unica.dcs.info"',
     ],
-    "skd-info": [
+    "dcs-info": [
         '"Mode": "query"',
         '"Name": "НоменклатураСЦенами"',
         '"Batch": 3',
@@ -529,13 +529,13 @@ class UnicaSkillRoutingTests(unittest.TestCase):
     def reference_root(self) -> Path:
         return self.repo_root() / "plugins" / "unica" / "references"
 
-    def parity_reference_root(self) -> Path:
+    def unica_reference_models_root(self) -> Path:
         return (
             self.repo_root()
             / "tests"
             / "fixtures"
             / "unica_mcp_script_parity"
-            / "reference_skills"
+            / "unica_reference_models"
         )
 
     def test_in_scope_skills_route_to_single_unica_mcp(self) -> None:
@@ -566,7 +566,7 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 for token in SCENARIO_REQUIRED_TOKENS.get(skill, []):
                     self.assertIn(token, text)
 
-    def test_ai_rules_guidance_refresh_is_adapted_to_unica_surface(self) -> None:
+    def test_unica_owned_guidance_contains_required_operational_concepts(self) -> None:
         docs = {
             "code-search": self.skill_root() / "code-search" / "SKILL.md",
             "code-diagnostics": self.skill_root() / "code-diagnostics" / "SKILL.md",
@@ -594,6 +594,47 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         ]:
             with self.subTest(token=token):
                 self.assertIn(token, joined)
+
+    def test_compatibility_guidance_preserves_effective_version_contract(self) -> None:
+        reference_path = self.reference_root() / "platform" / "compatibility-modes.md"
+        self.assertTrue(reference_path.is_file())
+        reference = reference_path.read_text(encoding="utf-8")
+
+        for token in [
+            "runtime platform line",
+            "configured compatibility mode",
+            "effective compatibility version",
+            "`DontUse` -> runtime platform line",
+            "`VersionX` -> `X`",
+            "`CompatibilityMode`",
+            "`ConfigurationExtensionCompatibilityMode`",
+            "`InterfaceCompatibilityMode`",
+            "code location does not select the mode family",
+            "corroborating implementation evidence",
+            "not complete old-platform equivalence",
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, reference)
+
+        for skill in ["platform-help", "release-support", "bsp-patterns"]:
+            skill_text = (self.skill_root() / skill / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            with self.subTest(skill=skill):
+                self.assertIn(
+                    "references/platform/compatibility-modes.md",
+                    skill_text,
+                )
+
+        meta_edit_docs = [
+            self.skill_root() / "meta-edit" / "SKILL.md",
+            self.skill_root() / "meta-edit" / "child-operations.md",
+        ]
+        for doc_path in meta_edit_docs:
+            doc = doc_path.read_text(encoding="utf-8")
+            with self.subTest(path=doc_path.relative_to(self.repo_root())):
+                self.assertRegex(doc, r"не\s+новее `Version8_3_26`")
+                self.assertNotRegex(doc, r"`Version8_3_26`\s+и старше")
 
     def test_all_skills_do_not_expose_internal_mcp_names(self) -> None:
         forbidden = [
@@ -694,6 +735,44 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertIn('"sourceSet": "external-reports"', text)
         self.assertIn('"output": "build/external"', text)
 
+    def test_v8_runner_documents_bounded_vanessa_launch_contract(self) -> None:
+        skill_dir = self.skill_root() / "v8-runner"
+        skill_text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        reference_text = "\n".join(
+            (skill_dir / relative_path).read_text(encoding="utf-8")
+            for relative_path in [
+                "references/command-selection.md",
+                "references/project-workflows.md",
+            ]
+        )
+        all_text = f"{skill_text}\n{reference_text}"
+
+        self.assertIn('"waitForExit": true', skill_text)
+        self.assertIn('"waitTimeoutMs": 30000', skill_text)
+        self.assertIn('"c": "StartFeaturePlayer;', skill_text)
+        self.assertIn("типизированное поле `c`", skill_text)
+        self.assertIn("не через `rawKeys`", skill_text)
+        self.assertIn('"operation": "tools-download"', skill_text)
+        self.assertIn('"tool": "vanessa"', skill_text)
+        self.assertIn(
+            '"execute": "build/tools/vanessa-automation-single.epf"',
+            skill_text,
+        )
+        self.assertIn('"output": "build/va.platform-out.log"', skill_text)
+        self.assertIn(
+            '"stderrOutput": "build/va.client.stderr.log"',
+            skill_text,
+        )
+        self.assertIn("`tools.va.epf_path`", skill_text)
+        self.assertIn("платформенный `/Out`", all_text)
+        self.assertIn("stderr клиентского процесса 1\u0421", all_text)
+        self.assertIn(
+            "`unica.runtime.job.start` не принимает bounded-поля",
+            skill_text,
+        )
+        self.assertIn("`data.external_epf_wait`", skill_text)
+        self.assertIn("`diagnostics.external_epf_wait`", skill_text)
+
     def test_v8_runner_metadata_describes_runtime_trigger_surface(self) -> None:
         skill_doc = self.skill_root() / "v8-runner" / "SKILL.md"
         text = skill_doc.read_text(encoding="utf-8")
@@ -775,23 +854,23 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 with self.subTest(path=doc.relative_to(self.repo_root()), token=token):
                     self.assertNotIn(token, text)
 
-    def test_reference_fixtures_track_upstream_runtime_portability_fixes(self) -> None:
-        skd_scripts = [
-            self.parity_reference_root()
-            / "skd-edit"
+    def test_unica_reference_models_retain_reviewed_runtime_portability_fixes(self) -> None:
+        dcs_scripts = [
+            self.unica_reference_models_root()
+            / "dcs-edit"
             / "scripts"
-            / "skd-edit.py",
+            / "dcs-edit.py",
         ]
-        for path in skd_scripts:
+        for path in dcs_scripts:
             with self.subTest(path=path.relative_to(self.repo_root())):
                 text = path.read_text(encoding="utf-8")
-                self.assertIn("skd-edit v1.28", text)
+                self.assertIn("dcs-edit v1.28", text)
                 self.assertIn("expr_start = esc_xml", text)
                 self.assertIn("expr_end = esc_xml", text)
                 self.assertNotRegex(text, r"<expression>\{esc_xml\('&' \+ param_name")
 
         subsystem_compile = (
-            self.parity_reference_root()
+            self.unica_reference_models_root()
             / "subsystem-compile"
             / "scripts"
             / "subsystem-compile.py"
@@ -803,20 +882,20 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertNotIn("powershell.exe", subsystem_compile)
         self.assertNotIn("subsystem-validate.ps1", subsystem_compile)
 
-    def test_skd_skills_track_upstream_dsl_features_through_unica_boundary(self) -> None:
-        skd_compile = (self.skill_root() / "skd-compile" / "SKILL.md").read_text(
+    def test_dcs_skills_track_upstream_dsl_features_through_unica_boundary(self) -> None:
+        dcs_compile = (self.skill_root() / "dcs-compile" / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        skd_edit = (self.skill_root() / "skd-edit" / "SKILL.md").read_text(encoding="utf-8")
-        skd_info = (self.skill_root() / "skd-info" / "SKILL.md").read_text(encoding="utf-8")
-        skd_dsl = (self.reference_root() / "specs" / "skd-dsl-spec.md").read_text(
+        dcs_edit = (self.skill_root() / "dcs-edit" / "SKILL.md").read_text(encoding="utf-8")
+        dcs_info = (self.skill_root() / "dcs-info" / "SKILL.md").read_text(encoding="utf-8")
+        dcs_dsl = (self.reference_root() / "specs" / "dcs-dsl-spec.md").read_text(
             encoding="utf-8"
         )
         dcs_spec = (self.reference_root() / "specs" / "1c-dcs-spec.md").read_text(
             encoding="utf-8"
         )
 
-        for text in [skd_compile, skd_edit, skd_info]:
+        for text in [dcs_compile, dcs_edit, dcs_info]:
             self.assertIn("MCP `unica`", text)
             self.assertNotIn("CLAUDE_SKILL_DIR", text)
             self.assertNotIn("powershell.exe", text)
@@ -840,17 +919,17 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             "placement",
         ]:
             with self.subTest(token=token):
-                self.assertIn(token, skd_dsl)
+                self.assertIn(token, dcs_dsl)
 
         self.assertIn("Значение-список", dcs_spec)
         self.assertIn("valueListAllowed", dcs_spec)
-        self.assertIn('"Raw": true', skd_info)
-        self.assertIn("сырой текст запроса целиком", skd_info)
-        self.assertIn("unica.skd.edit", skd_info)
-        self.assertIn("patch-query", skd_edit)
-        self.assertIn("@once", skd_edit)
-        self.assertIn("availableValue=", skd_edit)
-        self.assertIn("value=", skd_edit)
+        self.assertIn('"Raw": true', dcs_info)
+        self.assertIn("сырой текст запроса целиком", dcs_info)
+        self.assertIn("unica.dcs.edit", dcs_info)
+        self.assertIn("patch-query", dcs_edit)
+        self.assertIn("@once", dcs_edit)
+        self.assertIn("availableValue=", dcs_edit)
+        self.assertIn("value=", dcs_edit)
 
     def test_form_skills_track_upstream_dsl_features_through_unica_boundary(self) -> None:
         form_compile = (self.skill_root() / "form-compile" / "SKILL.md").read_text(
@@ -895,12 +974,114 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, form_dsl)
 
-        self.assertIn("Выпадающее меню", form_patterns)
+        self.assertIn("Связанные действия командной панели", form_patterns)
         self.assertIn("mobileCommandBarContent", form_compile)
         self.assertIn("choiceParameters", form_compile)
         self.assertIn("availableTypes", form_compile)
         self.assertIn("unica.form.info", form_edit)
         self.assertIn("unica.form.validate", form_edit)
+
+    def test_form_patterns_ux_guidance_is_mirrored_and_uses_supported_dsl(self) -> None:
+        heading = "## UX-правила для элементов и компоновки форм"
+        legacy_heading = "## UX-правила для элементов форм"
+
+        def ux_section(path: Path) -> str:
+            text = path.read_text(encoding="utf-8")
+            start = text.index(heading if heading in text else legacy_heading)
+            end = text.index("\n---", start)
+            return text[start:end]
+
+        reference_path = self.reference_root() / "specs" / "form-patterns.md"
+        skill_path = self.skill_root() / "form-patterns" / "SKILL.md"
+        reference_section = ux_section(reference_path)
+        skill_section = ux_section(skill_path)
+
+        self.assertIn(heading, reference_path.read_text(encoding="utf-8"))
+        self.assertIn(heading, skill_path.read_text(encoding="utf-8"))
+        self.assertEqual(skill_section, reference_section)
+        self.assertIn(
+            "https://github.com/Oxotka/1CDesignGuide/tree/edc05eaf5c191250a184b0e185006bf4b412f7a5",
+            reference_section,
+        )
+        for token in [
+            "Обычная группа",
+            "прижатия элементов и заголовков к краю",
+            "Сильное",
+            "Обычное",
+            "Слабое",
+            "Сворачиваемая группа",
+            "не отображайте отступ слева",
+            '"showLeftMargin": false',
+            "`collapsed` задаёт начальное состояние",
+            "`Группа.Показать()`",
+            "`Группа.Скрыть()`",
+            "только в коде формы",
+            "Всплывающая группа",
+            "DSL пока не может настроить `ControlRepresentation`",
+            "как подсказку",
+            "подобно гиперссылке",
+            "Командная панель",
+            '"commandSource": "Form"',
+            '"commandSource": "FormCommandPanelGlobalCommands"',
+            '"commandName": "CommonCommand.ОткрытьПараметры"',
+            "вручную устраните дубли",
+            "не выдавайте `popup` или `buttonGroup` за исполнимые нативные элементы",
+            "Команды формы",
+            "Шапка формы",
+            "функциональным опциям",
+            "автозаполняются или сохраняют предыдущее значение",
+            "изменяющее форму, ставьте первым",
+            "Подвал формы",
+            "Комментарий и Ответственный последними",
+            "строковых полей с доступным выбором",
+            '"choiceButton": true',
+            "очевидных полей",
+            '"titleLocation": "none"',
+            '"titleLocation": "top"',
+            '"inputHint": "По всем организациям"',
+            '"showInHeader": false',
+            '"readOnly": true',
+            '"horizontalStretch": true',
+            '"headerHorizontalAlign": "Right"',
+            '"horizontalAlign": "Right"',
+            "не используйте много разных стилей и цветов",
+            "достаточно длинное название",
+            "двойное отрицание",
+            "Проводить документ при записи",
+            '"tooltip": "Пояснение"',
+            '"tooltipRepresentation": "Button"',
+            '"checkBoxType": "switcher"',
+            "3–5 значений",
+            "на весь экран",
+            "слева вверху",
+            "модальной",
+            "справа внизу",
+            '"font": { "bold": true }',
+            '"backColor": "#FFFF00"',
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, reference_section)
+
+        self.assertEqual(reference_section.count("defaultButton"), 1)
+        self.assertNotIn("buttonHint", reference_section)
+        self.assertNotIn("RGB(", reference_section)
+        self.assertNotRegex(reference_section, r'"radio"\s*:')
+        self.assertNotRegex(reference_section, r'"(?:popup|buttonGroup)"\s*:')
+        self.assertNotRegex(reference_section, r'"(?:leftIndent|showLeftIndent)"\s*:')
+        self.assertNotIn("нет нативного DSL-ключа для левого отступа", reference_section)
+        self.assertNotIn('"representation": "Picture"', reference_section)
+        self.assertNotIn("Кнопки действий внизу", reference_section)
+
+    def test_form_dsl_keeps_tooltip_and_command_binding_contracts_unambiguous(self) -> None:
+        form_dsl = (self.reference_root() / "specs" / "form-dsl-spec.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Обычный `<Title>` поля и `<ToolTip>`", form_dsl)
+        self.assertRegex(form_dsl, r"передавать им `\{text, formatted\}`\s+нельзя")
+        self.assertIn("приоритетом `command` → `commandName` → `stdCommand`", form_dsl)
+        self.assertIn("`popup` и `buttonGroup` зарезервированы", form_dsl)
+        self.assertNotRegex(form_dsl, r'"(?:popup|buttonGroup)"\s*:')
 
     def test_meta_info_tracks_upstream_type_presentation_through_unica_boundary(self) -> None:
         meta_info = (self.skill_root() / "meta-info" / "SKILL.md").read_text(encoding="utf-8")
@@ -932,7 +1113,7 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             "cf-info",
             "meta-info",
             "form-info",
-            "skd-info",
+            "dcs-info",
             "mxl-info",
             "role-info",
             "subsystem-info",
@@ -1029,7 +1210,40 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertNotRegex(v8project, r"(?m)^connection:")
         self.assertNotIn("mode=load|merge|update", v8project)
 
-    def test_v8_runner_dump_references_keep_unsafe_modes_preview_only(self) -> None:
+    def test_verified_applied_full_dump_documents_windows_fail_closed_policy(
+        self,
+    ) -> None:
+        docs = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in [
+                self.skill_root() / "v8-runner" / "SKILL.md",
+                self.skill_root()
+                / "v8-runner"
+                / "references"
+                / "file-and-artifact-workflows.md",
+                self.reference_root() / "tooling" / "runtime-build.md",
+                self.reference_root() / "tooling" / "v8project.md",
+            ]
+        )
+
+        self.assertRegex(
+            docs,
+            re.compile(
+                r"Windows.{0,240}(?:fail-closed|blocked|unsupported)",
+                re.IGNORECASE | re.DOTALL,
+            ),
+        )
+        self.assertRegex(
+            docs,
+            re.compile(
+                r"(?:ACL|access control).{0,240}(?:implemented|available|support)",
+                re.IGNORECASE | re.DOTALL,
+            ),
+        )
+
+    def test_v8_runner_dump_references_keep_incomplete_and_external_routes_preview_only(
+        self,
+    ) -> None:
         v8_runner_root = self.skill_root() / "v8-runner"
         safety_context = re.compile(
             r"dryRun.{0,8}(?:true|`true`)|preview|read-only|fail-closed|block",
@@ -1048,18 +1262,36 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 ):
                     self.assertRegex(context, safety_context)
 
-        for path in v8_runner_root.rglob("*.md"):
+        for path in paths:
             text = path.read_text(encoding="utf-8")
             for block in re.findall(r"```json\s*(.*?)```", text, re.DOTALL):
-                payload = json.loads(block)
-                arguments = payload.get("params", {}).get("arguments", {})
+                try:
+                    payload = json.loads(block)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                params = payload.get("params", {})
+                if not isinstance(params, dict):
+                    continue
+                arguments = params.get("arguments", {})
+                if not isinstance(arguments, dict):
+                    continue
+                source_set = arguments.get("sourceSet")
                 if (
                     arguments.get("operation") == "dump"
-                    and arguments.get("mode") in {"incremental", "partial"}
+                    and (
+                        arguments.get("mode") in {"incremental", "partial"}
+                        or (
+                            isinstance(source_set, str)
+                            and "external" in source_set.lower()
+                        )
+                    )
                 ):
                     with self.subTest(
                         path=path.relative_to(self.repo_root()),
-                        mode=arguments["mode"],
+                        mode=arguments.get("mode"),
+                        source_set=source_set,
                     ):
                         self.assertIs(arguments.get("dryRun"), True)
 
@@ -1145,19 +1377,19 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             with self.subTest(skill=skill):
                 self.assertFalse((self.skill_root() / skill / "scripts").exists())
 
-    def test_parity_reference_skills_are_test_only_donor_fixtures(self) -> None:
-        reference_root = self.parity_reference_root()
-        referenced_skills = {
-            path.parent.parent.name for path in reference_root.glob("*/scripts/*.py")
+    def test_unica_reference_models_are_test_only_fixtures(self) -> None:
+        models_root = self.unica_reference_models_root()
+        modelled_skills = {
+            path.parent.parent.name for path in models_root.glob("*/scripts/*.py")
         }
         self.assertEqual(
-            referenced_skills,
+            modelled_skills,
             set(IN_SCOPE_TOOLS) - {"epf-init", "erf-init"},
         )
         allowed_suffixes = {".json", ".md", ".ps1", ".py"}
-        for path in reference_root.rglob("*"):
+        for path in models_root.rglob("*"):
             if path.is_file():
-                with self.subTest(path=path.relative_to(reference_root)):
+                with self.subTest(path=path.relative_to(models_root)):
                     self.assertNotIn("__pycache__", path.parts)
                     self.assertIn(path.suffix, allowed_suffixes)
 

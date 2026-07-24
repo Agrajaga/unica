@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 from unittest.mock import patch
@@ -121,7 +122,44 @@ class PackageUnicaPluginTests(unittest.TestCase):
 
         self.assertEqual(mismatches, [])
 
-    def test_bsp_parity_fixtures_preserve_harvested_bytes(self) -> None:
+    def test_bsp_parity_profile_projection_preserves_both_source_and_target_identity(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        manifest_path = (
+            repo_root
+            / "tests"
+            / "fixtures"
+            / "unica_mcp_script_parity"
+            / "bsp"
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["schemaVersion"], 2)
+        self.assertEqual(
+            manifest["derivation"],
+            {
+                "exportFormat": "2.20",
+                "kind": "profile-projection",
+                "platformLine": "8.3.27",
+                "recipe": "bsp-2.21-to-2.20-v1",
+            },
+        )
+        projected = []
+        for entry in manifest["files"]:
+            self.assertIn("harvestedSha256", entry)
+            self.assertIn("harvestedSize", entry)
+            if (
+                entry["harvestedSha256"] != entry["sha256"]
+                or entry["harvestedSize"] != entry["size"]
+            ):
+                projected.append(entry["target"])
+
+        self.assertEqual(len(projected), 17)
+        self.assertIn("cf/Configuration.xml", projected)
+        self.assertIn("meta/Languages/Русский.xml", projected)
+        self.assertTrue(all(target.endswith(".xml") for target in projected))
+
+    def test_bsp_parity_fixture_bytes_are_not_transformed_by_git(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         result = subprocess.run(
             [
@@ -416,6 +454,28 @@ class PackageUnicaPluginTests(unittest.TestCase):
             self.assertFalse((dest / "skills" / "web-test" / "screenshot.png").exists())
             self.assertFalse((dest / "skills" / "web-test" / "trace.mp4").exists())
 
+    def test_attribution_page_and_referenced_local_licenses_are_packaged(self) -> None:
+        module = load_package_module()
+        repo_root = Path(__file__).resolve().parents[2]
+        plugin_src = repo_root / "plugins" / "unica"
+        attribution = plugin_src / "ATTRIBUTIONS.md"
+
+        self.assertTrue(attribution.is_file())
+        local_license_links = {
+            link
+            for link in re.findall(r"\[[^]]+\]\(([^)]+)\)", attribution.read_text(encoding="utf-8"))
+            if not link.startswith("https://") and "LICENSE" in link
+        }
+        self.assertTrue(local_license_links)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "unica"
+            module.copy_tracked_plugin_source(repo_root, plugin_src, destination)
+
+            self.assertTrue((destination / "ATTRIBUTIONS.md").is_file())
+            for link in local_license_links:
+                self.assertTrue((destination / link).is_file(), link)
+
     def test_plugin_source_copy_rejects_tracked_source_bin(self) -> None:
         module = load_package_module()
 
@@ -668,6 +728,15 @@ class PackageUnicaPluginTests(unittest.TestCase):
                 path.relative_to(plugin).as_posix()
                 for path in plugin.rglob("*")
             }
+            self.assertFalse(
+                any(
+                    path == "cc-1c-skills"
+                    or path.startswith("cc-1c-skills/")
+                    or "/cc-1c-skills/" in path
+                    for path in packaged_paths
+                ),
+                "pristine donor scripts and cases must remain test-only",
+            )
             forbidden_script_skills = {
                 path
                 for path in packaged_paths
