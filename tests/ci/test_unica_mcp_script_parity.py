@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "unica"
 SKILLS_ROOT = PLUGIN_ROOT / "skills"
 FIXTURES_ROOT = REPO_ROOT / "tests" / "fixtures" / "unica_mcp_script_parity"
-REFERENCE_SKILLS_ROOT = FIXTURES_ROOT / "reference_skills"
+UNICA_REFERENCE_MODELS_ROOT = FIXTURES_ROOT / "unica_reference_models"
 CC_1C_CASES_ROOT = FIXTURES_ROOT / "cc-1c-skills" / "cases"
 BSP_DCS_QUERY_FIXTURE = (
     "bsp/dcs/Catalogs__ПравилаОбработкиЭлектроннойПочты__"
@@ -4719,7 +4719,7 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
                 self.assertTrue(result["ok"], json.dumps(result, ensure_ascii=False, indent=2))
                 self.assertIn("dry run", result["summary"])
 
-    def test_mcp_calls_match_reference_python_scripts(self) -> None:
+    def test_mcp_calls_match_unica_reference_models(self) -> None:
         for scenario in SCENARIOS:
             with self.subTest(scenario=scenario.name, tool=scenario.tool):
                 self.assert_parity(scenario)
@@ -4740,7 +4740,7 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
             self.prepare_workspace(direct_ws, scenario, setup_mode="reference")
             self.prepare_workspace(mcp_ws, scenario, setup_mode="mcp", cache_dir=mcp_cache)
 
-            direct = run_python_script(scenario.skill, scenario.script, scenario.arguments, direct_ws)
+            direct = run_unica_reference_model(scenario.skill, scenario.script, scenario.arguments, direct_ws)
             mcp = self.call_mcp(scenario, mcp_ws, mcp_cache)
 
             direct_ok = direct.returncode == 0
@@ -4825,7 +4825,7 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
                 if step.tool in NATIVE_PARITY_TOOLS:
                     self.assertIsNone(mcp.get("command"), f"{step.tool} setup must not use script fallback")
             else:
-                result = run_python_script(step.skill, step.script, step.arguments, workspace)
+                result = run_unica_reference_model(step.skill, step.script, step.arguments, workspace)
                 if result.returncode != 0:
                     raise AssertionError(
                         f"setup step {step.skill}/{step.script} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -4863,7 +4863,7 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
                 pre_input.write_text(json.dumps(step["input"], ensure_ascii=False, indent=2), encoding="utf-8")
             args = cc_step_raw_args(step.get("args") or {}, workspace, pre_input)
             try:
-                result = run_reference_skill_raw(script_rel, args, workspace)
+                result = run_unica_reference_model_raw(script_rel, args, workspace)
             finally:
                 if pre_input is not None:
                     pre_input.unlink(missing_ok=True)
@@ -4977,13 +4977,13 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
         return {response["id"]: response for response in responses}
 
 
-def run_python_script(
+def run_unica_reference_model(
     skill: str,
     script: str,
     arguments: dict[str, Any],
     workspace: Path,
     *,
-    skills_root: Path = REFERENCE_SKILLS_ROOT,
+    skills_root: Path = UNICA_REFERENCE_MODELS_ROOT,
 ) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         command_for_script(skill, script, arguments, skills_root=skills_root),
@@ -5001,7 +5001,7 @@ def run_cc_python_script(
     arguments: dict[str, Any],
     workspace: Path,
 ) -> subprocess.CompletedProcess[str]:
-    return run_python_script(skill, script, arguments, workspace)
+    return run_unica_reference_model(skill, script, arguments, workspace)
 
 
 CC_CASE_TOOLS = {
@@ -5246,13 +5246,13 @@ def cc_step_raw_args(args_map: dict[str, Any], workspace: Path, input_file: Path
     return args
 
 
-def run_reference_skill_raw(
+def run_unica_reference_model_raw(
     script_rel: str,
     args: list[str],
     workspace: Path,
 ) -> subprocess.CompletedProcess[str]:
     skill, script = cc_script_skill_and_script(script_rel)
-    script_path = REFERENCE_SKILLS_ROOT / skill / "scripts" / script
+    script_path = UNICA_REFERENCE_MODELS_ROOT / skill / "scripts" / script
     result = subprocess.run(
         ["python3", str(script_path), *args],
         cwd=workspace,
@@ -5367,7 +5367,7 @@ def command_for_script(
     script: str,
     arguments: dict[str, Any],
     *,
-    skills_root: Path = REFERENCE_SKILLS_ROOT,
+    skills_root: Path = UNICA_REFERENCE_MODELS_ROOT,
 ) -> list[str]:
     script_path = skills_root / skill / "scripts" / script
     return ["python3", str(script_path), *script_args(arguments)]
@@ -5475,7 +5475,7 @@ def normalize_text(text: str, workspace: Path) -> str:
             normalized,
         )
     normalized = re.sub(
-        r"<REPO>/tests/fixtures/unica_mcp_script_parity/reference_skills/([^/\s\"']+)/scripts/([^/\s\"']+)",
+        r"<REPO>/tests/fixtures/unica_mcp_script_parity/unica_reference_models/([^/\s\"']+)/scripts/([^/\s\"']+)",
         r"<REPO>/<SKILL_SCRIPT>/\1/\2",
         normalized,
     )

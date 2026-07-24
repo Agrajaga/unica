@@ -43,6 +43,34 @@ class SkillProvenanceTests(unittest.TestCase):
     def load_product_backlog(self) -> dict:
         return json.loads(self.product_backlog_path().read_text(encoding="utf-8"))
 
+    def test_adapted_python_models_are_named_as_unica_owned_test_models(self) -> None:
+        root = (
+            self.repo_root()
+            / "tests"
+            / "fixtures"
+            / "unica_mcp_script_parity"
+            / "unica_reference_models"
+        )
+        self.assertTrue(root.is_dir())
+        self.assertFalse(
+            (
+                self.repo_root()
+                / "tests"
+                / "fixtures"
+                / "unica_mcp_script_parity"
+                / "reference_skills"
+            ).exists()
+        )
+        python_models = sorted(root.glob("*/scripts/*.py"))
+        self.assertGreater(len(python_models), 0)
+        for path in python_models:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            self.assertIn(
+                "Adapted from https://github.com/Nikolay-Shirokov/cc-1c-skills",
+                text,
+                path,
+            )
+
     def test_provenance_index_validates_offline(self) -> None:
         module = load_upstream_module()
 
@@ -452,7 +480,7 @@ class SkillProvenanceTests(unittest.TestCase):
         }
         source_comment_paths = []
         roots = [
-            self.repo_root() / "tests" / "fixtures" / "unica_mcp_script_parity" / "reference_skills",
+            self.repo_root() / "tests" / "fixtures" / "unica_mcp_script_parity" / "unica_reference_models",
             self.repo_root() / "plugins" / "unica" / "skills" / "help-add" / "scripts",
         ]
         for root in roots:

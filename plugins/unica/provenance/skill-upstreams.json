@@ -34,7 +34,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/cf-edit",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/cf-edit"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/cf-edit"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -58,7 +58,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/cf-info",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/cf-info"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/cf-info"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -83,7 +83,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/cf-init",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/cf-init"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/cf-init"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -105,7 +105,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/cf-validate",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/cf-validate"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/cf-validate"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -144,7 +144,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/cfe-borrow",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/cfe-borrow"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/cfe-borrow"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -164,7 +164,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/cfe-diff",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/cfe-diff"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/cfe-diff"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -185,7 +185,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/cfe-init",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/cfe-init"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/cfe-init"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -205,7 +205,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/cfe-patch-method",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/cfe-patch-method"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/cfe-patch-method"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -226,7 +226,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/cfe-validate",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/cfe-validate"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/cfe-validate"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -320,7 +320,7 @@
         {
           "skill": "form-add",
           "status": "ported-to-unica",
-          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; adapted script behavior is kept only as Unica-owned migration-equivalence models under tests/fixtures/unica_mcp_script_parity/unica_reference_models. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-add/**",
             "docs/form-guide.md",
@@ -330,7 +330,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/form-add",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/form-add",
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/form-add",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -348,7 +348,7 @@
         {
           "skill": "form-compile",
           "status": "ported-to-unica",
-          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; adapted script behavior is kept only as Unica-owned migration-equivalence models under tests/fixtures/unica_mcp_script_parity/unica_reference_models. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-compile/**",
             "docs/form-guide.md",
@@ -358,7 +358,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/form-compile",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/form-compile",
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/form-compile",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -376,7 +376,7 @@
         {
           "skill": "form-edit",
           "status": "ported-to-unica",
-          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; adapted script behavior is kept only as Unica-owned migration-equivalence models under tests/fixtures/unica_mcp_script_parity/unica_reference_models. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-edit/**",
             "docs/form-guide.md",
@@ -386,7 +386,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/form-edit",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/form-edit",
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/form-edit",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -404,7 +404,7 @@
         {
           "skill": "form-info",
           "status": "ported-to-unica",
-          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; adapted script behavior is kept only as Unica-owned migration-equivalence models under tests/fixtures/unica_mcp_script_parity/unica_reference_models. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-info/**",
             "docs/form-guide.md",
@@ -414,7 +414,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/form-info",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/form-info",
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/form-info",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -456,7 +456,7 @@
         {
           "skill": "form-remove",
           "status": "ported-to-unica",
-          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; adapted script behavior is kept only as Unica-owned migration-equivalence models under tests/fixtures/unica_mcp_script_parity/unica_reference_models. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-remove/**",
             "docs/form-guide.md",
@@ -466,7 +466,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/form-remove",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/form-remove",
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/form-remove",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -484,7 +484,7 @@
         {
           "skill": "form-validate",
           "status": "ported-to-unica",
-          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/form.rs) behind unica.form.*; adapted script behavior is kept only as Unica-owned migration-equivalence models under tests/fixtures/unica_mcp_script_parity/unica_reference_models. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/form-validate/**",
             "docs/form-guide.md",
@@ -494,7 +494,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/form-validate",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/form-validate",
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/form-validate",
             "plugins/unica/references/specs/form-dsl-spec.md",
             "plugins/unica/references/specs/form-patterns.md"
           ],
@@ -518,7 +518,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/help-add",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/help-add"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/help-add"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -543,7 +543,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/interface-edit",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/interface-edit"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/interface-edit"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -564,7 +564,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/interface-validate",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/interface-validate"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/interface-validate"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -586,7 +586,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/meta-compile",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/meta-compile"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/meta-compile"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -609,7 +609,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/meta-edit",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/meta-edit"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/meta-edit"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -632,7 +632,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/meta-info",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/meta-info"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/meta-info"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -657,7 +657,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/meta-remove",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/meta-remove"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/meta-remove"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -679,7 +679,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/meta-validate",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/meta-validate"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/meta-validate"
           ],
           "contractPaths": [
             "crates/unica-coder/src/application/mod.rs",
@@ -703,7 +703,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/mxl-compile",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/mxl-compile"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/mxl-compile"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -725,7 +725,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/mxl-decompile",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/mxl-decompile"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/mxl-decompile"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -747,7 +747,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/mxl-info",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/mxl-info"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/mxl-info"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -772,7 +772,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/mxl-validate",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/mxl-validate"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/mxl-validate"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -794,7 +794,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/role-compile",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/role-compile"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/role-compile"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -816,7 +816,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/role-info",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/role-info"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/role-info"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -841,7 +841,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/role-validate",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/role-validate"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/role-validate"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -854,7 +854,7 @@
         {
           "skill": "dcs-compile",
           "status": "ported-to-unica",
-          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/dcs.rs) behind unica.dcs.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/dcs.rs) behind unica.dcs.*; adapted script behavior is kept only as Unica-owned migration-equivalence models under tests/fixtures/unica_mcp_script_parity/unica_reference_models. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/skd-compile/**",
             "docs/skd-guide.md",
@@ -863,7 +863,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/dcs-compile",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/dcs-compile",
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/dcs-compile",
             "plugins/unica/references/specs/dcs-dsl-spec.md",
             "plugins/unica/references/specs/1c-dcs-spec.md"
           ],
@@ -881,7 +881,7 @@
         {
           "skill": "dcs-edit",
           "status": "ported-to-unica",
-          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/dcs.rs) behind unica.dcs.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/dcs.rs) behind unica.dcs.*; adapted script behavior is kept only as Unica-owned migration-equivalence models under tests/fixtures/unica_mcp_script_parity/unica_reference_models. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/skd-edit/**",
             "docs/skd-guide.md",
@@ -890,7 +890,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/dcs-edit",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/dcs-edit",
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/dcs-edit",
             "plugins/unica/references/specs/dcs-dsl-spec.md",
             "plugins/unica/references/specs/1c-dcs-spec.md"
           ],
@@ -908,7 +908,7 @@
         {
           "skill": "dcs-info",
           "status": "ported-to-unica",
-          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/dcs.rs) behind unica.dcs.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/dcs.rs) behind unica.dcs.*; adapted script behavior is kept only as Unica-owned migration-equivalence models under tests/fixtures/unica_mcp_script_parity/unica_reference_models. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/skd-info/**",
             "docs/skd-guide.md",
@@ -917,7 +917,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/dcs-info",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/dcs-info",
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/dcs-info",
             "plugins/unica/references/specs/dcs-dsl-spec.md",
             "plugins/unica/references/specs/1c-dcs-spec.md"
           ],
@@ -936,7 +936,7 @@
         {
           "skill": "dcs-validate",
           "status": "ported-to-unica",
-          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/dcs.rs) behind unica.dcs.*; donor script behavior is kept only as fixture parity under tests/fixtures/unica_mcp_script_parity/reference_skills. Packaged legacy operation directories are intentionally absent.",
+          "notes": "Runtime backend is native Rust (crates/unica-coder/src/infrastructure/native_operations/dcs.rs) behind unica.dcs.*; adapted script behavior is kept only as Unica-owned migration-equivalence models under tests/fixtures/unica_mcp_script_parity/unica_reference_models. Packaged legacy operation directories are intentionally absent.",
           "upstreamPaths": [
             ".claude/skills/skd-validate/**",
             "docs/skd-guide.md",
@@ -945,7 +945,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/dcs-validate",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/dcs-validate",
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/dcs-validate",
             "plugins/unica/references/specs/dcs-dsl-spec.md",
             "plugins/unica/references/specs/1c-dcs-spec.md"
           ],
@@ -971,7 +971,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/subsystem-compile",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/subsystem-compile"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/subsystem-compile"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -992,7 +992,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/subsystem-edit",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/subsystem-edit"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/subsystem-edit"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -1013,7 +1013,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/subsystem-info",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/subsystem-info"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/subsystem-info"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -1037,7 +1037,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/subsystem-validate",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/subsystem-validate"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/subsystem-validate"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -1058,7 +1058,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/template-add",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/template-add"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/template-add"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",
@@ -1079,7 +1079,7 @@
           ],
           "localPaths": [
             "plugins/unica/skills/template-remove",
-            "tests/fixtures/unica_mcp_script_parity/reference_skills/template-remove"
+            "tests/fixtures/unica_mcp_script_parity/unica_reference_models/template-remove"
           ],
           "contractPaths": [
             "tests/ci/test_unica_skills.py",

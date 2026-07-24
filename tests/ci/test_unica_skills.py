@@ -529,13 +529,13 @@ class UnicaSkillRoutingTests(unittest.TestCase):
     def reference_root(self) -> Path:
         return self.repo_root() / "plugins" / "unica" / "references"
 
-    def parity_reference_root(self) -> Path:
+    def unica_reference_models_root(self) -> Path:
         return (
             self.repo_root()
             / "tests"
             / "fixtures"
             / "unica_mcp_script_parity"
-            / "reference_skills"
+            / "unica_reference_models"
         )
 
     def test_in_scope_skills_route_to_single_unica_mcp(self) -> None:
@@ -813,9 +813,9 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 with self.subTest(path=doc.relative_to(self.repo_root()), token=token):
                     self.assertNotIn(token, text)
 
-    def test_reference_fixtures_track_upstream_runtime_portability_fixes(self) -> None:
+    def test_unica_reference_models_retain_reviewed_runtime_portability_fixes(self) -> None:
         dcs_scripts = [
-            self.parity_reference_root()
+            self.unica_reference_models_root()
             / "dcs-edit"
             / "scripts"
             / "dcs-edit.py",
@@ -829,7 +829,7 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 self.assertNotRegex(text, r"<expression>\{esc_xml\('&' \+ param_name")
 
         subsystem_compile = (
-            self.parity_reference_root()
+            self.unica_reference_models_root()
             / "subsystem-compile"
             / "scripts"
             / "subsystem-compile.py"
@@ -1336,19 +1336,19 @@ class UnicaSkillRoutingTests(unittest.TestCase):
             with self.subTest(skill=skill):
                 self.assertFalse((self.skill_root() / skill / "scripts").exists())
 
-    def test_parity_reference_skills_are_test_only_donor_fixtures(self) -> None:
-        reference_root = self.parity_reference_root()
-        referenced_skills = {
-            path.parent.parent.name for path in reference_root.glob("*/scripts/*.py")
+    def test_unica_reference_models_are_test_only_fixtures(self) -> None:
+        models_root = self.unica_reference_models_root()
+        modelled_skills = {
+            path.parent.parent.name for path in models_root.glob("*/scripts/*.py")
         }
         self.assertEqual(
-            referenced_skills,
+            modelled_skills,
             set(IN_SCOPE_TOOLS) - {"epf-init", "erf-init"},
         )
         allowed_suffixes = {".json", ".md", ".ps1", ".py"}
-        for path in reference_root.rglob("*"):
+        for path in models_root.rglob("*"):
             if path.is_file():
-                with self.subTest(path=path.relative_to(reference_root)):
+                with self.subTest(path=path.relative_to(models_root)):
                     self.assertNotIn("__pycache__", path.parts)
                     self.assertIn(path.suffix, allowed_suffixes)
 
