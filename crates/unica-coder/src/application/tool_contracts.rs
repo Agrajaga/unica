@@ -1,5 +1,6 @@
 use super::operation_descriptors::{native_operation_descriptor, native_path_alias_groups};
 use super::{RuntimeJobAction, ToolHandler, ToolSpec};
+use crate::domain::form_edit::{form_edit_definition_schema, validate_form_edit_definition};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use uuid::Uuid;
@@ -922,6 +923,10 @@ fn validate_form_edit_arguments(
         }
     }
 
+    if let Some(definition) = args.get("definition") {
+        validate_form_edit_definition(definition)?;
+    }
+
     Ok(())
 }
 
@@ -1681,6 +1686,9 @@ fn property_schema(name: &str) -> Value {
 }
 
 fn property_schema_for_tool(tool: &ToolSpec, name: &str) -> Value {
+    if tool.name == "unica.form.edit" && name == "definition" {
+        return form_edit_definition_schema();
+    }
     if tool.name == "unica.code.patch" {
         return match name {
             "operation" => json!({ "type": "string", "enum": ["insert"] }),
@@ -2261,6 +2269,57 @@ mod tests {
         assert!(validate_tool_arguments(tool, &wrong_type, false)
             .unwrap_err()
             .contains("must be object"));
+    }
+
+    #[test]
+    fn form_edit_contract_rejects_unknown_sections_and_malformed_removals() {
+        let tool = tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.form.edit")
+            .unwrap();
+        let schema = input_schema_for_tool(&tool);
+        let definition = &schema["properties"]["definition"];
+        assert_eq!(definition["additionalProperties"], false);
+        assert_eq!(definition["properties"]["removeElements"]["type"], "array");
+        assert_eq!(
+            definition["properties"]["removeElements"]["items"],
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {"name": {"type": "string", "minLength": 1, "pattern": r"\S"}},
+                "required": ["name"]
+            })
+        );
+
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(!validator.is_valid(&json!({
+            "FormPath": "Form.xml",
+            "definition": {"removeElements": [{"name": "   "}]}
+        })));
+
+        let cases = [
+            (json!({"typoSection": []}), "FORM_EDIT_UNKNOWN_SECTION"),
+            (
+                json!({"removeElements": [{"name": "Target", "after": "Other"}]}),
+                "FORM_EDIT_REMOVE_ELEMENT_UNKNOWN_FIELD",
+            ),
+            (
+                json!({"removeElements": [{"name": "   "}]}),
+                "FORM_EDIT_REMOVE_ELEMENT_EMPTY_NAME",
+            ),
+            (
+                json!({"removeElements": [{"name": "Target"}, {"name": "Target"}]}),
+                "FORM_EDIT_REMOVE_ELEMENT_DUPLICATE",
+            ),
+        ];
+        for (definition, code) in cases {
+            let args = Map::from_iter([
+                ("FormPath".to_string(), json!("Form.xml")),
+                ("definition".to_string(), definition),
+            ]);
+            let error = validate_tool_arguments(tool, &args, false).unwrap_err();
+            assert!(error.contains(code), "{error}");
+        }
     }
 
     #[test]

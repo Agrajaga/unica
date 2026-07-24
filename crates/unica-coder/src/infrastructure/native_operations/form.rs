@@ -2,6 +2,7 @@
 
 use crate::application::operation_descriptors::{FORM_PATH, OBJECT_PATH};
 use crate::application::AdapterOutcome;
+use crate::domain::form_edit::validate_form_edit_definition;
 use crate::domain::format_profile::{classify_root_version, FormatCompatibility};
 use crate::domain::workspace::WorkspaceContext;
 use crate::infrastructure::platform_xml_owner::{root_version_literal, MANAGED_FORM_ROOT};
@@ -4609,9 +4610,7 @@ fn form_edit_resolve_definition_guarded(
             Err("unica.form.edit accepts exactly one of JsonPath or inline definition".to_string())
         }
         (Some(definition), None) => {
-            if !definition.is_object() {
-                return Err("unica.form.edit argument `definition` must be object".to_string());
-            }
+            validate_form_edit_definition(definition)?;
             Ok(definition.clone())
         }
         (None, Some(json_path_raw)) => {
@@ -4623,9 +4622,7 @@ fn form_edit_resolve_definition_guarded(
                 format!("failed to parse form edit JSON: {err}")
             })?
             .bind_to(transaction)?;
-            if !definition.is_object() {
-                return Err("form edit JSON root must be an object".to_string());
-            }
+            validate_form_edit_definition(&definition)?;
             Ok(definition)
         }
         (None, None) => {
@@ -10953,6 +10950,42 @@ mod tests {
             stderr.contains("Attribute 'Object' already exists in form"),
             "{stderr}"
         );
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_contract_rejects_unknown_json_path_section_before_write() {
+        let context = temp_context("edit-strict-json-path");
+        let form_path = context.cwd.join("Form.xml");
+        let json_path = context.cwd.join("edit.json");
+        write_file(&form_path, editable_form_xml(false));
+        let original = fs::read(&form_path).unwrap();
+        write_file(&json_path, r#"{"unexpectedSection": []}"#);
+
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "JsonPath".to_string(),
+                json!(json_path.display().to_string()),
+            ),
+        ]);
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("FORM_EDIT_UNKNOWN_SECTION")),
+            "{:?}",
+            outcome.errors
+        );
+        assert_eq!(fs::read(&form_path).unwrap(), original);
 
         let _ = fs::remove_dir_all(&context.cwd);
     }
