@@ -1848,6 +1848,130 @@ mod tests {
     }
 
     #[test]
+    fn form_edit_preview_rejects_an_invalid_projected_form_at_the_public_boundary() {
+        let root = test_workspace_root("unica-form-edit-project-validation");
+        let workspace = root.join("workspace");
+        let form_path = workspace.join("Form.xml");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            &form_path,
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
+	<AutoCommandBar name="FormCommandBar" id="-1"/>
+	<ChildItems>
+		<InputField name="RemoveMe" id="1">
+			<ContextMenu name="RemoveMeContextMenu" id="2"/>
+			<ExtendedTooltip name="RemoveMeExtendedTooltip" id="3"/>
+		</InputField>
+		<InputField name="AlreadyInvalid" id="4"/>
+	</ChildItems>
+	<Attributes/>
+	<Commands/>
+</Form>
+"#,
+        )
+        .unwrap();
+        let original = std::fs::read(&form_path).unwrap();
+        let args = json!({
+            "cwd": workspace,
+            "FormPath": form_path,
+            "definition": {"removeElements": [{"name": "RemoveMe"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let result = UnicaApplication::new()
+            .call_tool("unica.form.edit", &args)
+            .unwrap();
+
+        assert!(!result.ok, "{result:?}");
+        assert!(result.data.is_none(), "{result:?}");
+        assert!(result.cache.events.is_empty(), "{result:?}");
+        assert!(
+            result.errors.iter().any(
+                |error| error.contains("AlreadyInvalid") && error.contains("missing companion")
+            ),
+            "{result:?}"
+        );
+        assert_eq!(std::fs::read(&form_path).unwrap(), original);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn form_edit_remove_json_path_uses_the_typed_public_contract() {
+        let root = test_workspace_root("unica-form-edit-remove-json-path");
+        let workspace = root.join("workspace");
+        let form_path = workspace.join("Form.xml");
+        let definition_path = workspace.join("remove.json");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            &form_path,
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
+	<AutoCommandBar name="FormCommandBar" id="-1"/>
+	<ChildItems>
+		<InputField name="Target" id="1">
+			<ContextMenu name="TargetContextMenu" id="2"/>
+			<ExtendedTooltip name="TargetExtendedTooltip" id="3"/>
+		</InputField>
+	</ChildItems>
+	<Attributes/>
+	<Commands/>
+</Form>
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &definition_path,
+            r#"{"removeElements":[{"name":"Target"}]}"#,
+        )
+        .unwrap();
+        let original_form = std::fs::read(&form_path).unwrap();
+        let original_definition = std::fs::read(&definition_path).unwrap();
+        let mut args = json!({
+            "cwd": workspace,
+            "FormPath": form_path,
+            "JsonPath": definition_path
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let expected = json!({
+            "changed": true,
+            "removed": [
+                {"name": "Target", "kind": "InputField", "reason": "requested"},
+                {"name": "TargetContextMenu", "kind": "ContextMenu", "reason": "contained"},
+                {"name": "TargetExtendedTooltip", "kind": "ExtendedTooltip", "reason": "contained"}
+            ],
+            "validation": "passed"
+        });
+        let app = UnicaApplication::new();
+
+        let preview = app.call_tool("unica.form.edit", &args).unwrap();
+        assert!(preview.ok, "{preview:?}");
+        assert_eq!(preview.data, Some(expected.clone()));
+        assert!(preview.cache.events.is_empty(), "{preview:?}");
+        assert_eq!(std::fs::read(&form_path).unwrap(), original_form);
+
+        args.insert("dryRun".to_string(), json!(false));
+        let apply = app.call_tool("unica.form.edit", &args).unwrap();
+        assert!(apply.ok, "{apply:?}");
+        assert_eq!(apply.data, Some(expected));
+        assert_eq!(apply.cache.events, vec!["FormChanged"]);
+        assert!(!std::fs::read_to_string(&form_path)
+            .unwrap()
+            .contains("name=\"Target\""));
+        assert_eq!(
+            std::fs::read(&definition_path).unwrap(),
+            original_definition
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn code_patch_apply_is_blocked_for_a_locked_supported_object() {
         let root = test_workspace_root("unica-code-patch-support-guard");
         let workspace = root.join("workspace");
