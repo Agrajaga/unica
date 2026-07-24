@@ -749,7 +749,7 @@ def main():
             '<HomePageWorkArea xmlns="http://v8.1c.ru/8.3/xcf/extrnprops" '
             'xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" '
             'xmlns:xs="http://www.w3.org/2001/XMLSchema" '
-            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.17">\r\n'
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">\r\n'
             f'\t<WorkingAreaTemplate>{tmpl}</WorkingAreaTemplate>\r\n'
             f'{left_xml}\r\n'
             f'{right_xml}\r\n'

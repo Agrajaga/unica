@@ -4,8 +4,10 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import uuid
+from pathlib import Path
 
 from lxml import etree
 
@@ -15,6 +17,28 @@ sys.stderr.reconfigure(encoding="utf-8")
 # Dirty flag — set to True by every successful mutation. If still False at save time,
 # the file is left untouched (NO-OP operations like [WARN] not found don't rewrite).
 dirty = False
+
+
+def run_post_validation(path):
+    validator = Path(__file__).resolve().parents[2] / "dcs-validate/scripts/dcs-validate.py"
+    if not validator.is_file():
+        print(f"DCS validator not found: {validator}", file=sys.stderr)
+        sys.exit(1)
+    result = subprocess.run(
+        [sys.executable, str(validator), "-TemplatePath", path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    print()
+    print("--- Running dcs-validate ---")
+    sys.stdout.write(result.stdout)
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
 
 # ── arg parsing ──────────────────────────────────────────────
 
@@ -1083,7 +1107,7 @@ def build_restriction_xml(restrict, indent):
     return "\n".join(lines)
 
 
-def build_field_fragment(parsed, indent):
+def build_field_fragment(parsed, indent, emit_value_type=True):
     i = indent
     lines = [f'{i}<field xsi:type="DataSetFieldField">']
     lines.append(f"{i}\t<dataPath>{esc_xml(parsed['dataPath'])}</dataPath>")
@@ -1107,11 +1131,11 @@ def build_field_fragment(parsed, indent):
     if role_xml:
         lines.append(role_xml)
 
-    if parsed.get("rawValueType"):
+    if emit_value_type and parsed.get("rawValueType"):
         # Preserve original <valueType> verbatim — keeps qualifiers (StringQualifiers,
         # NumberQualifiers, DateQualifiers, …) that aren't expressible via shorthand.
         lines.append(f"{i}\t" + parsed["rawValueType"])
-    elif parsed.get("type"):
+    elif emit_value_type and parsed.get("type"):
         lines.append(f"{i}\t<valueType>")
         lines.append(build_value_type_xml(parsed["type"], f"{i}\t\t"))
         lines.append(f"{i}\t</valueType>")
@@ -1166,8 +1190,9 @@ def build_param_value_xml(type_str, value, indent, tag_name="value", tag_ns=""):
     if type_str == "StandardPeriod":
         lines.append(f'{indent}<{open_tag} xsi:type="v8:StandardPeriod">')
         lines.append(f'{indent}\t<v8:variant xsi:type="v8:StandardPeriodVariant">{esc_xml(val_str)}</v8:variant>')
-        lines.append(f"{indent}\t<v8:startDate>0001-01-01T00:00:00</v8:startDate>")
-        lines.append(f"{indent}\t<v8:endDate>0001-01-01T00:00:00</v8:endDate>")
+        if val_str == "Custom":
+            lines.append(f"{indent}\t<v8:startDate>0001-01-01T00:00:00</v8:startDate>")
+            lines.append(f"{indent}\t<v8:endDate>0001-01-01T00:00:00</v8:endDate>")
         lines.append(f"{indent}</{open_tag}>")
         return lines
 
@@ -1231,12 +1256,12 @@ def build_param_fragment(parsed, indent):
         lines.append(f"{i}\t<useRestriction>true</useRestriction>")
         lines.append(f"{i}\t<availableAsField>false</availableAsField>")
 
-    if vla:
-        lines.append(f"{i}\t<valueListAllowed>true</valueListAllowed>")
-
     for av in parsed.get("availableValues", []) or []:
         for l in build_available_value_fragment(av, parsed.get("type", ""), f"{i}\t"):
             lines.append(l)
+
+    if vla:
+        lines.append(f"{i}\t<valueListAllowed>true</valueListAllowed>")
 
     if parsed.get("always"):
         lines.append(f"{i}\t<use>Always</use>")
@@ -1358,8 +1383,9 @@ def build_data_param_fragment(parsed, indent):
         if isinstance(val, dict) and val.get("variant"):
             lines.append(f'{i}\t<dcscor:value xsi:type="v8:StandardPeriod">')
             lines.append(f'{i}\t\t<v8:variant xsi:type="v8:StandardPeriodVariant">{esc_xml(val["variant"])}</v8:variant>')
-            lines.append(f"{i}\t\t<v8:startDate>0001-01-01T00:00:00</v8:startDate>")
-            lines.append(f"{i}\t\t<v8:endDate>0001-01-01T00:00:00</v8:endDate>")
+            if val["variant"] == "Custom":
+                lines.append(f"{i}\t\t<v8:startDate>0001-01-01T00:00:00</v8:startDate>")
+                lines.append(f"{i}\t\t<v8:endDate>0001-01-01T00:00:00</v8:endDate>")
             lines.append(f"{i}\t</dcscor:value>")
         elif is_empty_value(val):
             lines.append(f'{i}\t<dcscor:value xsi:nil="true"/>')
@@ -1432,7 +1458,6 @@ def build_variant_fragment(parsed, indent):
         f'{i}\t\t\t<dcsset:item xsi:type="dcsset:SelectedItemAuto"/>',
         f"{i}\t\t</dcsset:selection>",
         f'{i}\t\t<dcsset:item xsi:type="dcsset:StructureItemGroup">',
-        f"{i}\t\t\t<dcsset:groupItems/>",
         f"{i}\t\t\t<dcsset:order>",
         f'{i}\t\t\t\t<dcsset:item xsi:type="dcsset:OrderItemAuto"/>',
         f"{i}\t\t\t</dcsset:order>",
@@ -1521,9 +1546,7 @@ def build_structure_item_fragment(item, indent):
         lines.append(f"{i}\t<dcsset:name>{esc_xml(item['name'])}</dcsset:name>")
 
     group_by = item.get("groupBy", [])
-    if not group_by:
-        lines.append(f"{i}\t<dcsset:groupItems/>")
-    else:
+    if group_by:
         lines.append(f"{i}\t<dcsset:groupItems>")
         for field in group_by:
             lines.append(f'{i}\t\t<dcsset:item xsi:type="dcsset:GroupItemField">')
@@ -1900,7 +1923,52 @@ def resolve_variant_settings():
     sys.exit(1)
 
 
-def ensure_settings_child(settings, child_name, after_siblings):
+SETTINGS_CHILD_SEQUENCE = [
+    "userFields", "selection", "filter", "dataParameters", "order",
+    "conditionalAppearance", "outputParameters", "item", "additionalProperties",
+    "itemsViewMode", "itemsUserSettingID", "itemsUserSettingPresentation",
+]
+
+STRUCTURE_GROUP_CHILD_SEQUENCE = [
+    "use", "name", "groupItems", "filter", "order", "selection",
+    "conditionalAppearance", "outputParameters", "item", "id", "viewMode",
+    "userSettingID", "userSettingPresentation", "itemsViewMode",
+    "itemsUserSettingID", "itemsUserSettingPresentation", "groupState",
+]
+
+PARAMETER_CHILD_SEQUENCE = [
+    "name", "title", "valueType", "value", "useRestriction", "expression",
+    "availableValue", "valueListAllowed", "availableAsField",
+    "functionalOptionsParameter", "inputParameters", "denyIncompleteValues", "use",
+]
+
+
+def canonical_child_ref(container, child_name):
+    sequence = SETTINGS_CHILD_SEQUENCE
+    if (
+        local_name(container) == "item"
+        and "StructureItemGroup" in container.get(XSI_TYPE, "")
+    ):
+        sequence = STRUCTURE_GROUP_CHILD_SEQUENCE
+    elif local_name(container) == "parameter":
+        sequence = PARAMETER_CHILD_SEQUENCE
+    try:
+        target_rank = sequence.index(child_name)
+    except ValueError:
+        return None
+    for child in container:
+        if not isinstance(child.tag, str):
+            continue
+        try:
+            child_rank = sequence.index(local_name(child))
+        except ValueError:
+            continue
+        if child_rank > target_rank:
+            return child
+    return None
+
+
+def ensure_settings_child(settings, child_name, after_siblings=None):
     el = find_first_element(settings, [child_name], SET_NS)
     if el is not None:
         return el
@@ -1909,19 +1977,7 @@ def ensure_settings_child(settings, child_name, after_siblings):
     frag_xml = f"{indent}<dcsset:{child_name}/>"
     nodes = import_fragment(xml_doc, frag_xml)
 
-    ref_node = None
-    for sib_name in after_siblings:
-        sib = find_first_element(settings, [sib_name], SET_NS)
-        if sib is not None:
-            # Get next element sibling
-            found = False
-            for ch in settings:
-                if found and isinstance(ch.tag, str):
-                    ref_node = ch
-                    break
-                if ch is sib:
-                    found = True
-            break
+    ref_node = canonical_child_ref(settings, child_name)
 
     for node in nodes:
         insert_before_element(settings, node, ref_node, indent)
@@ -2004,7 +2060,12 @@ if operation == "add-field":
             print(f'[WARN] Field "{parsed["dataPath"]}" already exists in dataset "{ds_name}" -- skipped')
             continue
 
-        frag_xml = build_field_fragment(parsed, child_indent)
+        data_set_type = ds_node.get(XSI_TYPE, "").rsplit(":", 1)[-1]
+        frag_xml = build_field_fragment(
+            parsed,
+            child_indent,
+            emit_value_type=data_set_type != "DataSetQuery",
+        )
         nodes = import_fragment(xml_doc, frag_xml)
 
         ref_node = find_first_element(ds_node, ["dataSource"], SCH_NS)
@@ -2243,7 +2304,7 @@ elif operation == "modify-parameter":
                         for ve in all_value_els:
                             remove_node_with_whitespace(ve)
                     else:
-                        ref_node = next((ch for ch in param_el if isinstance(ch.tag, str) and local_name(ch) in ("useRestriction", "availableValue", "denyIncompleteValues", "use")), None)
+                        ref_node = canonical_child_ref(param_el, "value")
                     if frag_xml:
                         nodes = import_fragment(xml_doc, frag_xml)
                         for node in nodes:
@@ -2254,10 +2315,7 @@ elif operation == "modify-parameter":
                     existing.text = value
                     dirty = True; print(f'[OK] Parameter "{param_name}": {key} updated to {value}')
                 else:
-                    # Schema order: ...value, useRestriction, availableValue*, denyIncompleteValues, use
-                    ref_node = None
-                    if key == "denyIncompleteValues":
-                        ref_node = next((ch for ch in param_el if isinstance(ch.tag, str) and local_name(ch) == "use"), None)
+                    ref_node = canonical_child_ref(param_el, key)
                     frag_xml = f"{child_indent}<{key}>{esc_xml(value)}</{key}>"
                     nodes = import_fragment(xml_doc, frag_xml)
                     for node in nodes:
@@ -2281,18 +2339,18 @@ elif operation == "modify-parameter":
                 for ve in value_els:
                     remove_node_with_whitespace(ve)
             else:
-                ref_node = next((ch for ch in param_el if isinstance(ch.tag, str) and local_name(ch) in ("useRestriction", "availableValue", "denyIncompleteValues", "use")), None)
+                ref_node = canonical_child_ref(param_el, "value")
             for v in value_list_items:
                 frag_xml = "\n".join(build_param_value_xml(declared_type, v, child_indent))
                 for node in import_fragment(xml_doc, frag_xml):
                     insert_before_element(param_el, node, ref_node, child_indent)
-            # Ensure <valueListAllowed>true</valueListAllowed> (schema order: after useRestriction, before availableValue/use)
+            # Ensure <valueListAllowed>true</valueListAllowed> in the fixed 8.3.27 order.
             vla_el = next((ch for ch in param_el if isinstance(ch.tag, str) and local_name(ch) == "valueListAllowed" and etree.QName(ch.tag).namespace == SCH_NS), None)
             if vla_el is not None:
                 if (vla_el.text or "").strip() != "true":
                     vla_el.text = "true"
             else:
-                ref_vla = next((ch for ch in param_el if isinstance(ch.tag, str) and local_name(ch) in ("availableValue", "denyIncompleteValues", "use")), None)
+                ref_vla = canonical_child_ref(param_el, "valueListAllowed")
                 for node in import_fragment(xml_doc, f"{child_indent}<valueListAllowed>true</valueListAllowed>"):
                     insert_before_element(param_el, node, ref_vla, child_indent)
             dirty = True; print(f'[OK] Parameter "{param_name}": value set to list of {len(value_list_items)} item(s)')
@@ -2320,12 +2378,8 @@ elif operation == "modify-parameter":
             for el in to_remove:
                 remove_node_with_whitespace(el)
 
-            # Insert each new <availableValue> before (denyIncompleteValues, use)
-            ref_node = None
-            for child in param_el:
-                if isinstance(child.tag, str) and local_name(child) in ("denyIncompleteValues", "use"):
-                    ref_node = child
-                    break
+            # Insert each new <availableValue> in the fixed 8.3.27 parameter order.
+            ref_node = canonical_child_ref(param_el, "availableValue")
             for av in av_items:
                 av_lines = build_available_value_fragment(av, declared_type, child_indent)
                 frag_xml = "\n".join(av_lines)
@@ -2671,7 +2725,7 @@ elif operation == "set-structure":
     struct_items = parse_structure_shorthand(value_arg)
     settings_indent = get_child_indent(settings)
 
-    ref_node = find_first_element(settings, ["outputParameters", "dataParameters", "conditionalAppearance", "order", "filter", "selection", "item"], SET_NS)
+    ref_node = canonical_child_ref(settings, "item")
 
     for struct_item in struct_items:
         frag_xml = build_structure_item_fragment(struct_item, settings_indent)
@@ -3006,8 +3060,9 @@ elif operation == "modify-dataParameter":
             if isinstance(pv, dict) and pv.get("variant"):
                 val_lines.append(f'{item_indent}<dcscor:value xsi:type="v8:StandardPeriod">')
                 val_lines.append(f'{item_indent}\t<v8:variant xsi:type="v8:StandardPeriodVariant">{esc_xml(pv["variant"])}</v8:variant>')
-                val_lines.append(f"{item_indent}\t<v8:startDate>0001-01-01T00:00:00</v8:startDate>")
-                val_lines.append(f"{item_indent}\t<v8:endDate>0001-01-01T00:00:00</v8:endDate>")
+                if pv["variant"] == "Custom":
+                    val_lines.append(f"{item_indent}\t<v8:startDate>0001-01-01T00:00:00</v8:startDate>")
+                    val_lines.append(f"{item_indent}\t<v8:endDate>0001-01-01T00:00:00</v8:endDate>")
                 val_lines.append(f"{item_indent}</dcscor:value>")
             elif is_empty_value(pv):
                 val_lines.append(f'{item_indent}<dcscor:value xsi:nil="true"/>')
@@ -3086,7 +3141,12 @@ elif operation == "modify-field":
         child_indent = get_child_indent(ds_node)
         remove_node_with_whitespace(field_el)
 
-        frag_xml = build_field_fragment(merged, child_indent)
+        data_set_type = ds_node.get(XSI_TYPE, "").rsplit(":", 1)[-1]
+        frag_xml = build_field_fragment(
+            merged,
+            child_indent,
+            emit_value_type=data_set_type != "DataSetQuery",
+        )
         nodes = import_fragment(xml_doc, frag_xml)
 
         for node in nodes:
@@ -3400,6 +3460,7 @@ elif operation == "add-drilldown":
         f.write(b'\xef\xbb\xbf')
         f.write(raw_text.encode("utf-8"))
     dirty = True; print(f"[OK] Saved {resolved_path}")
+    run_post_validation(resolved_path)
     sys.exit(0)
 
 # ── 9. Save ─────────────────────────────────────────────────
@@ -3435,3 +3496,4 @@ with open(resolved_path, "wb") as f:
     f.write(xml_bytes)
 
 print(f"[OK] Saved {resolved_path}")
+run_post_validation(resolved_path)

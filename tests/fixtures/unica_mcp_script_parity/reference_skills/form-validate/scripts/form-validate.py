@@ -166,6 +166,36 @@ def main():
         warnings += 1
         output_lines.append(f"[WARN]  {msg}")
 
+    def report_format_compatibility(raw_version):
+        actual = raw_version or "1.0"
+        if re.fullmatch(r"\d+(?:\.\d+)*", actual) is None:
+            report_error(f"invalid export format version {actual!r}")
+            return
+        try:
+            components = tuple(int(part) for part in actual.split("."))
+        except ValueError:
+            report_error(f"invalid export format version {actual!r}")
+            return
+        target = (2, 20)
+        components += (0,) * max(0, len(target) - len(components))
+        target_cmp = target + (0,) * max(0, len(components) - len(target))
+        if components == target_cmp:
+            if actual == "2.20":
+                report_ok("Export format: 2.20")
+            else:
+                report_error(f"invalid export format version {actual!r}")
+        elif components < target_cmp:
+            report_warn(
+                f"Export format {actual} is older than supported 2.20. "
+                "Unica will not migrate it automatically; re-export the source "
+                "explicitly with 1C:Enterprise 8.3.27, then retry."
+            )
+        else:
+            report_warn(
+                f"Export format {actual} is newer than supported 2.20; "
+                "platform 1C 8.5 support is planned in upcoming releases."
+            )
+
     # --- Form name from path ---
     form_name = os.path.splitext(os.path.basename(form_path))[0]
     parent_dir = os.path.dirname(form_path)
@@ -179,20 +209,22 @@ def main():
     output_lines.append(f"=== Validation: Form.{form_name} ===")
     output_lines.append("")
 
+    if localname(root) != "Form":
+        report_error(f"Root element is '{localname(root)}', expected 'Form'")
+        stopped = True
+    else:
+        root_ns = etree.QName(root.tag).namespace or ""
+        if root_ns != F_NS:
+            report_error(f"Root namespace is '{root_ns}', expected '{F_NS}'")
+            stopped = True
+
     # Early BaseForm detection
     has_base_form = root.find(f"{{{F_NS}}}BaseForm") is not None
 
     # --- Check 1: Root element and version ---
-    if localname(root) != "Form":
-        report_error(f"Root element is '{localname(root)}', expected 'Form'")
-    else:
+    if not stopped:
         version = root.get("version", "")
-        if version in ("2.17", "2.20"):
-            report_ok(f"Root element: Form version={version}")
-        elif version:
-            report_warn(f"Form version='{version}' (expected 2.17 or 2.20)")
-        else:
-            report_warn("Form version attribute missing")
+        report_format_compatibility(version)
 
     # --- Check 2: AutoCommandBar ---
     if not stopped:

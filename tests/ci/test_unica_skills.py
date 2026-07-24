@@ -376,6 +376,7 @@ SCENARIO_PRESERVING_TOKENS = {
         '"Name": "МояКонфигурация"',
         '"Version": "1.0.0.1"',
         '"Vendor": "Фирма 1С"',
+        "Режим совместимости (default: `Version8_3_27`)",
         '"CompatibilityMode": "Version8_3_27"',
         '"name": "unica.cf.info"',
         '"name": "unica.cf.validate"',
@@ -402,8 +403,7 @@ SCENARIO_PRESERVING_TOKENS = {
         '"InterceptorType": "Before"',
         '"InterceptorType": "After"',
         '"Context": "НаКлиенте"',
-        '"InterceptorType": "ModificationAndControl"',
-        '"IsFunction": true',
+        '"IsFunction": false',
     ],
     "meta-edit": [
         '"Value": "Комментарий: Строка(200) ;; Сумма: Число(15,2) | index"',
@@ -1169,7 +1169,40 @@ class UnicaSkillRoutingTests(unittest.TestCase):
         self.assertNotRegex(v8project, r"(?m)^connection:")
         self.assertNotIn("mode=load|merge|update", v8project)
 
-    def test_v8_runner_dump_references_keep_unsafe_modes_preview_only(self) -> None:
+    def test_verified_applied_full_dump_documents_windows_fail_closed_policy(
+        self,
+    ) -> None:
+        docs = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in [
+                self.skill_root() / "v8-runner" / "SKILL.md",
+                self.skill_root()
+                / "v8-runner"
+                / "references"
+                / "file-and-artifact-workflows.md",
+                self.reference_root() / "tooling" / "runtime-build.md",
+                self.reference_root() / "tooling" / "v8project.md",
+            ]
+        )
+
+        self.assertRegex(
+            docs,
+            re.compile(
+                r"Windows.{0,240}(?:fail-closed|blocked|unsupported)",
+                re.IGNORECASE | re.DOTALL,
+            ),
+        )
+        self.assertRegex(
+            docs,
+            re.compile(
+                r"(?:ACL|access control).{0,240}(?:implemented|available|support)",
+                re.IGNORECASE | re.DOTALL,
+            ),
+        )
+
+    def test_v8_runner_dump_references_keep_incomplete_and_external_routes_preview_only(
+        self,
+    ) -> None:
         v8_runner_root = self.skill_root() / "v8-runner"
         safety_context = re.compile(
             r"dryRun.{0,8}(?:true|`true`)|preview|read-only|fail-closed|block",
@@ -1188,18 +1221,36 @@ class UnicaSkillRoutingTests(unittest.TestCase):
                 ):
                     self.assertRegex(context, safety_context)
 
-        for path in v8_runner_root.rglob("*.md"):
+        for path in paths:
             text = path.read_text(encoding="utf-8")
             for block in re.findall(r"```json\s*(.*?)```", text, re.DOTALL):
-                payload = json.loads(block)
-                arguments = payload.get("params", {}).get("arguments", {})
+                try:
+                    payload = json.loads(block)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                params = payload.get("params", {})
+                if not isinstance(params, dict):
+                    continue
+                arguments = params.get("arguments", {})
+                if not isinstance(arguments, dict):
+                    continue
+                source_set = arguments.get("sourceSet")
                 if (
                     arguments.get("operation") == "dump"
-                    and arguments.get("mode") in {"incremental", "partial"}
+                    and (
+                        arguments.get("mode") in {"incremental", "partial"}
+                        or (
+                            isinstance(source_set, str)
+                            and "external" in source_set.lower()
+                        )
+                    )
                 ):
                     with self.subTest(
                         path=path.relative_to(self.repo_root()),
-                        mode=arguments["mode"],
+                        mode=arguments.get("mode"),
+                        source_set=source_set,
                     ):
                         self.assertIs(arguments.get("dryRun"), True)
 

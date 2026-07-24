@@ -243,11 +243,7 @@ def main():
         # Return 1-based index
         return format_order.index(key) + 1
 
-    # 6a. Default width format
-    default_format_key = get_format_key(width=default_width)
-    default_format_index = register_format(default_format_key, {'Width': default_width})
-
-    # 6b. Column width formats
+    # 6a. Column width formats
     col_format_map = {}  # 1-based col -> format index
     for col in sorted(col_width_map):
         w = col_width_map[col]
@@ -255,7 +251,7 @@ def main():
         idx = register_format(key, {'Width': w})
         col_format_map[int(col)] = idx
 
-    # 6c. Helper: determine fillType from cell content
+    # 6b. Helper: determine fillType from cell content
     def get_fill_type(cell):
         if cell.get('param'):
             return 'Parameter'
@@ -310,6 +306,11 @@ def main():
                     cell_style = cell.get('style') or row.get('rowStyle') or 'default'
                     ft = get_fill_type(cell)
                     register_cell_format(cell_style, ft)
+
+    # 6c. The 8.3.27 platform palette stores the default width after
+    # explicit column widths and cell formats.
+    default_format_key = get_format_key(width=default_width)
+    default_format_index = register_format(default_format_key, {'Width': default_width})
 
     # --- 7. Generate XML ---
     lines = []
@@ -415,6 +416,7 @@ def main():
 
                     cell_info = {
                         'Col': col_start - 1,  # 0-based
+                        'ColSpan': col_span,
                         'FormatIdx': fmt_idx,
                         'Param': cell.get('param'),
                         'Detail': cell.get('detail'),
@@ -446,6 +448,7 @@ def main():
                         if c not in occupied_cols:
                             row_cells.append({
                                 'Col': c - 1,
+                                'ColSpan': 1,
                                 'FormatIdx': gap_fmt_idx,
                                 'Param': None,
                                 'Detail': None,
@@ -465,6 +468,7 @@ def main():
                         continue
                     row_cells.append({
                         'Col': c - 1,
+                        'ColSpan': 1,
                         'FormatIdx': gap_fmt_idx,
                         'Param': None,
                         'Detail': None,
@@ -483,9 +487,11 @@ def main():
             if not row_has_content:
                 lines.append('\t\t\t<empty>true</empty>')
             else:
+                expected_col = 0
                 for cell_info in row_cells:
                     lines.append('\t\t\t<c>')
-                    lines.append(f'\t\t\t\t<i>{cell_info["Col"]}</i>')
+                    if cell_info['Col'] != expected_col:
+                        lines.append(f'\t\t\t\t<i>{cell_info["Col"]}</i>')
                     lines.append('\t\t\t\t<c>')
                     lines.append(f'\t\t\t\t\t<f>{cell_info["FormatIdx"]}</f>')
 
@@ -512,6 +518,7 @@ def main():
 
                     lines.append('\t\t\t\t</c>')
                     lines.append('\t\t\t</c>')
+                    expected_col = cell_info['Col'] + cell_info['ColSpan']
 
             lines.append('\t\t</row>')
             lines.append('\t</rowsItem>')

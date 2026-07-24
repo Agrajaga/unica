@@ -31,7 +31,7 @@ def detect_format_version(d):
         if parent == d:
             break
         d = parent
-    return "2.17"
+    return "2.20"
 
 
 def save_xml_with_bom(tree, path):
@@ -102,17 +102,14 @@ def main():
     help_html_path = os.path.join(help_dir, f"{lang}.html")
 
     help_html = (
-        '<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN">\n'
-        '<html>\n'
-        '<head>\n'
-        '    <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>\n'
-        '    <link rel="stylesheet" type="text/css" href="v8help://service_book/service_style"/>\n'
-        '</head>\n'
-        '<body>\n'
+        '<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN">'
+        '<html><head>'
+        '<meta http-equiv="Content-Type" content="text/html; charset=utf-8"></meta>'
+        '<link rel="stylesheet" type="text/css" href="v8help://service_book/service_style"></link>'
+        '</head><body>\n'
         f'    <h1>{object_name}</h1>\n'
         '    <p>Описание.</p>\n'
-        '</body>\n'
-        '</html>'
+        '</body></html>'
     )
 
     write_text_with_bom(help_html_path, help_html)

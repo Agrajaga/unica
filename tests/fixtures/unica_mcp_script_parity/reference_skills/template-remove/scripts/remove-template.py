@@ -82,14 +82,19 @@ def main():
             parent = node.getparent()
             prev = node.getprevious()
             if prev is not None:
-                # Whitespace is in prev.tail
-                if prev.tail and prev.tail.strip() == "":
-                    prev.tail = ""
+                # The removed node owns the whitespace leading to the next
+                # sibling or closing tag.
+                if node.tail and node.tail.strip() == "":
+                    prev.tail = node.tail
             else:
-                # First child — whitespace is in parent.text
-                if parent.text and parent.text.strip() == "":
-                    parent.text = ""
+                if node.tail and node.tail.strip() == "":
+                    parent.text = node.tail
             parent.remove(node)
+            # 8.3.27 serializes an empty ChildObjects collection as a
+            # self-closing element. Keeping indentation as text would force
+            # lxml to emit an expanded empty container instead.
+            if not any(isinstance(child.tag, str) for child in parent):
+                parent.text = None
             break
 
     # Clear MainDataCompositionSchema if it pointed to this template

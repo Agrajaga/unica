@@ -7,8 +7,13 @@ Typical empty workspace order:
 1. Create `src/` if there are no source files.
 2. Call `unica.runtime.execute` with `operation=config-init`.
 3. Call `operation=init` only when the runtime state must be materialized.
-4. If the database is the source of truth, call `operation=dump` with `mode=full`.
+4. If the database is the source of truth, call synchronous `operation=dump` with `mode=full`; for a DESIGNER configuration/extension Unica verifies platform 8.3.27 and staged exact 2.20 before publishing.
 5. If Git sources are the source of truth, ask before calling `operation=build`.
+
+Async full dump and external source-set dump remain preview-only. Applied
+`convert` and Designer `rawKeys` containing `DumpConfigToFiles` or
+`LoadConfigFromFiles` are fail-closed until they share the verified publication
+boundary.
 
 `build` also prepares configured client MCP tool extensions when the project has `tools.client_mcp.extension`. Use `fullRebuild=true` if that generated state may be stale.
 

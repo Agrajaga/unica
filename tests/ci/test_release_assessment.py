@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -504,6 +505,221 @@ for raw in sys.stdin:
             self.assertTrue(any(path.startswith("dcs/") and path.endswith("/Template.xml") for path in harvested))
             self.assertTrue(any(path.startswith("roles/") and path.endswith("/Rights.xml") for path in harvested))
             self.assertFalse(any(".build" in path or path.endswith(".db") for path in harvested))
+
+    def test_bsp_parity_harvest_projects_profile_without_changing_byte_envelope(self) -> None:
+        module = load_bsp_harvest_module()
+
+        source_payload = (
+            b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-8"?>\r\n'
+            b'<MetaDataObject version="2.21">\r\n'
+            b"\t<ConfigurationExtensionCompatibilityMode>"
+            b"Version8_5_1"
+            b"</ConfigurationExtensionCompatibilityMode>\r\n"
+            b"\t<InterfaceCompatibilityMode>"
+            b"Version8_5EnableTaxi"
+            b"</InterfaceCompatibilityMode>\r\n"
+            b"\t<CompatibilityMode>"
+            b"Version8_5_1"
+            b"</CompatibilityMode>\r\n"
+            b'\t<Nested version="2.21"/>\r\n'
+            b"</MetaDataObject>"
+        )
+        expected_payload = (
+            b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-8"?>\r\n'
+            b'<MetaDataObject version="2.20">\r\n'
+            b"\t<ConfigurationExtensionCompatibilityMode>"
+            b"Version8_3_24"
+            b"</ConfigurationExtensionCompatibilityMode>\r\n"
+            b"\t<InterfaceCompatibilityMode>"
+            b"Taxi"
+            b"</InterfaceCompatibilityMode>\r\n"
+            b"\t<CompatibilityMode>"
+            b"Version8_3_24"
+            b"</CompatibilityMode>\r\n"
+            b'\t<Nested version="2.21"/>\r\n'
+            b"</MetaDataObject>"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bsp = root / "bsp"
+            src = bsp / "src" / "cf"
+            src.mkdir(parents=True)
+            (src / "Configuration.xml").write_bytes(source_payload)
+            out = root / "fixtures"
+
+            manifest = module.harvest(
+                bsp_root=bsp,
+                out_root=out,
+                bsp_ref="test-ref",
+                bsp_commit="abc123",
+                recipe="bsp-2.21-to-2.20-v1",
+            )
+            repeated = module.harvest(
+                bsp_root=bsp,
+                out_root=out,
+                bsp_ref="test-ref",
+                bsp_commit="abc123",
+                recipe="bsp-2.21-to-2.20-v1",
+            )
+            target_payload = (out / "cf" / "Configuration.xml").read_bytes()
+
+        self.assertEqual(manifest, repeated)
+        self.assertEqual(manifest["schemaVersion"], 2)
+        self.assertEqual(
+            manifest["derivation"],
+            {
+                "exportFormat": "2.20",
+                "kind": "profile-projection",
+                "platformLine": "8.3.27",
+                "recipe": "bsp-2.21-to-2.20-v1",
+            },
+        )
+        self.assertEqual(target_payload, expected_payload)
+        self.assertTrue(target_payload.startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(target_payload.count(b"\r\n"), source_payload.count(b"\r\n"))
+        self.assertFalse(target_payload.endswith((b"\r", b"\n")))
+        self.assertIn(b'<Nested version="2.21"/>', target_payload)
+
+        entry = manifest["files"][0]
+        self.assertEqual(
+            set(entry),
+            {
+                "category",
+                "harvestedSha256",
+                "harvestedSize",
+                "sha256",
+                "size",
+                "source",
+                "target",
+            },
+        )
+        self.assertEqual(entry["harvestedSize"], len(source_payload))
+        self.assertEqual(entry["harvestedSha256"], hashlib.sha256(source_payload).hexdigest())
+        self.assertEqual(entry["size"], len(expected_payload))
+        self.assertEqual(entry["sha256"], hashlib.sha256(expected_payload).hexdigest())
+
+    def test_bsp_parity_harvest_keeps_selected_report_template_pair_outside_dcs_limit(self) -> None:
+        module = load_bsp_harvest_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bsp = root / "bsp"
+            src = bsp / "src" / "cf"
+            report_templates = src / "Reports" / "Анализ" / "Templates"
+            report_content = report_templates / "Основная" / "Ext"
+            report_content.mkdir(parents=True)
+            (src / "Reports" / "Анализ.xml").write_text("<MetaDataObject/>", encoding="utf-8")
+            (report_templates / "Основная.xml").write_text("<MetaDataObject/>", encoding="utf-8")
+            (report_content / "Template.xml").write_text(
+                "<DataCompositionSchema/>",
+                encoding="utf-8",
+            )
+            for index in range(3):
+                dcs_content = (
+                    src
+                    / "Catalogs"
+                    / f"Источник{index}"
+                    / "Templates"
+                    / f"Схема{index}"
+                    / "Ext"
+                )
+                dcs_content.mkdir(parents=True)
+                (dcs_content / "Template.xml").write_text(
+                    "<DataCompositionSchema/>",
+                    encoding="utf-8",
+                )
+
+            out = root / "fixtures"
+            manifest = module.harvest(
+                bsp_root=bsp,
+                out_root=out,
+                bsp_ref="test-ref",
+                bsp_commit="abc123",
+            )
+
+        by_target = {entry["target"]: entry for entry in manifest["files"]}
+        report_descriptor = "meta/Reports/Анализ.xml"
+        template_descriptor = "meta/Reports/Анализ/Templates/Основная.xml"
+        template_content = "meta/Reports/Анализ/Templates/Основная/Ext/Template.xml"
+        self.assertIn(report_descriptor, by_target)
+        self.assertIn(template_descriptor, by_target)
+        self.assertIn(template_content, by_target)
+        self.assertEqual(by_target[template_descriptor]["category"], "meta")
+        self.assertEqual(by_target[template_content]["category"], "meta")
+        self.assertEqual(
+            sum(entry["category"] == "dcs" for entry in manifest["files"]),
+            3,
+        )
+
+    def test_bsp_parity_harvest_profile_recipe_rejects_unknown_source_version(self) -> None:
+        module = load_bsp_harvest_module()
+
+        source_payload = (
+            b'<MetaDataObject version="2.22">'
+            b"<ConfigurationExtensionCompatibilityMode>"
+            b"Version8_5_1"
+            b"</ConfigurationExtensionCompatibilityMode>"
+            b"<InterfaceCompatibilityMode>"
+            b"Version8_5EnableTaxi"
+            b"</InterfaceCompatibilityMode>"
+            b"<CompatibilityMode>"
+            b"Version8_5_1"
+            b"</CompatibilityMode>"
+            b"</MetaDataObject>"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bsp = root / "bsp"
+            src = bsp / "src" / "cf"
+            src.mkdir(parents=True)
+            (src / "Configuration.xml").write_bytes(source_payload)
+            out = root / "fixtures"
+
+            with self.assertRaisesRegex(ValueError, "unsupported root export version"):
+                module.harvest(
+                    bsp_root=bsp,
+                    out_root=out,
+                    bsp_ref="test-ref",
+                    bsp_commit="abc123",
+                    recipe="bsp-2.21-to-2.20-v1",
+                )
+
+            self.assertFalse(out.exists())
+
+    def test_bsp_parity_harvest_profile_recipe_requires_each_configuration_token(self) -> None:
+        module = load_bsp_harvest_module()
+
+        source_payload = (
+            b'<MetaDataObject version="2.21">'
+            b"<ConfigurationExtensionCompatibilityMode>"
+            b"Version8_5_1"
+            b"</ConfigurationExtensionCompatibilityMode>"
+            b"<CompatibilityMode>"
+            b"Version8_5_1"
+            b"</CompatibilityMode>"
+            b"</MetaDataObject>"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bsp = root / "bsp"
+            src = bsp / "src" / "cf"
+            src.mkdir(parents=True)
+            (src / "Configuration.xml").write_bytes(source_payload)
+            out = root / "fixtures"
+
+            with self.assertRaisesRegex(ValueError, "InterfaceCompatibilityMode"):
+                module.harvest(
+                    bsp_root=bsp,
+                    out_root=out,
+                    bsp_ref="test-ref",
+                    bsp_commit="abc123",
+                    recipe="bsp-2.21-to-2.20-v1",
+                )
+
+            self.assertFalse(out.exists())
 
     def test_bsp_parity_harvest_rejects_dangerous_out_root_and_leaves_sentinel(self) -> None:
         module = load_bsp_harvest_module()

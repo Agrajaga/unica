@@ -192,14 +192,14 @@ SUCCESS_SCENARIOS = [
         expect_ok=True,
     ),
     ParityScenario(
-        name="cfe-patch-method-before",
+        name="cfe-patch-method-before-borrowed-common-module",
         tool="unica.cfe.patch_method",
         skill="cfe-patch-method",
         script="cfe-patch-method.py",
         arguments={
             "ExtensionPath": "src-cfe",
-            "ModulePath": "CommonModule.Server",
-            "MethodName": "BeforeWrite",
+            "ModulePath": "CommonModule.GoogleПереводчик",
+            "MethodName": "ОбновитьДанные",
             "InterceptorType": "Before",
             "Context": "НаСервере",
         },
@@ -211,24 +211,49 @@ SUCCESS_SCENARIOS = [
                     "Name": "ParityExtension",
                     "NamePrefix": "PE_",
                     "OutputDir": "src-cfe",
+                    "Purpose": "Customization",
+                    "Version": "1.0.0.1",
+                    "Vendor": "Unica",
+                    "CompatibilityMode": "Version8_3_24",
                     "NoRole": True,
                 },
+            ),
+            SetupStep(
+                skill="cfe-borrow",
+                script="cfe-borrow.py",
+                tool="unica.cfe.borrow",
+                arguments={
+                    "ExtensionPath": "src-cfe",
+                    "ConfigPath": "src",
+                    "Object": "CommonModule.GoogleПереводчик",
+                },
+            ),
+        ),
+        fixtures=(
+            FileFixture(BSP_CF_CONFIGURATION_FIXTURE, "src/Configuration.xml"),
+            FileFixture(
+                BSP_META_COMMON_MODULE_FIXTURE,
+                "src/CommonModules/GoogleПереводчик.xml",
+            ),
+            FileFixture(
+                "cfe-patch-method/base-common-module.bsl",
+                "src/CommonModules/GoogleПереводчик/Ext/Module.bsl",
             ),
         ),
         expect_ok=True,
         compare_files=True,
     ),
     ParityScenario(
-        name="cfe-patch-method-after-form",
+        name="cfe-patch-method-after-borrowed-common-module",
         tool="unica.cfe.patch_method",
         skill="cfe-patch-method",
         script="cfe-patch-method.py",
         arguments={
             "ExtensionPath": "src-cfe",
-            "ModulePath": "Document.Заказ.Form.ФормаДокумента",
-            "MethodName": "ПослеЗаписиНаСервере",
+            "ModulePath": "CommonModule.GoogleПереводчик",
+            "MethodName": "ОбновитьДанные",
             "InterceptorType": "After",
-            "Context": "НаКлиенте",
+            "Context": "НаСервере",
         },
         setup_steps=(
             SetupStep(
@@ -238,35 +263,33 @@ SUCCESS_SCENARIOS = [
                     "Name": "ParityExtension",
                     "NamePrefix": "PE_",
                     "OutputDir": "src-cfe",
+                    "Purpose": "Customization",
+                    "Version": "1.0.0.1",
+                    "Vendor": "Unica",
+                    "CompatibilityMode": "Version8_3_24",
                     "NoRole": True,
                 },
             ),
-        ),
-        expect_ok=True,
-        compare_files=True,
-    ),
-    ParityScenario(
-        name="cfe-patch-method-modification-function",
-        tool="unica.cfe.patch_method",
-        skill="cfe-patch-method",
-        script="cfe-patch-method.py",
-        arguments={
-            "ExtensionPath": "src-cfe",
-            "ModulePath": "CommonModule.ОбщийМодуль",
-            "MethodName": "ПолучитьДанные",
-            "InterceptorType": "ModificationAndControl",
-            "IsFunction": True,
-        },
-        setup_steps=(
             SetupStep(
-                skill="cfe-init",
-                script="cfe-init.py",
+                skill="cfe-borrow",
+                script="cfe-borrow.py",
+                tool="unica.cfe.borrow",
                 arguments={
-                    "Name": "ParityExtension",
-                    "NamePrefix": "PE_",
-                    "OutputDir": "src-cfe",
-                    "NoRole": True,
+                    "ExtensionPath": "src-cfe",
+                    "ConfigPath": "src",
+                    "Object": "CommonModule.GoogleПереводчик",
                 },
+            ),
+        ),
+        fixtures=(
+            FileFixture(BSP_CF_CONFIGURATION_FIXTURE, "src/Configuration.xml"),
+            FileFixture(
+                BSP_META_COMMON_MODULE_FIXTURE,
+                "src/CommonModules/GoogleПереводчик.xml",
+            ),
+            FileFixture(
+                "cfe-patch-method/base-common-module.bsl",
+                "src/CommonModules/GoogleПереводчик/Ext/Module.bsl",
             ),
         ),
         expect_ok=True,
@@ -702,6 +725,24 @@ SUCCESS_SCENARIOS = [
                 script="meta-compile.py",
                 arguments={"JsonPath": "fixtures/meta-catalog.json", "OutputDir": "src"},
             ),
+            SetupStep(
+                skill="form-add",
+                script="form-add.py",
+                arguments={
+                    "ObjectPath": "src/Catalogs/ParityCatalog.xml",
+                    "FormName": "ListForm",
+                    "Purpose": "List",
+                },
+            ),
+            SetupStep(
+                skill="form-add",
+                script="form-add.py",
+                arguments={
+                    "ObjectPath": "src/Catalogs/ParityCatalog.xml",
+                    "FormName": "ObjectForm",
+                    "Purpose": "Object",
+                },
+            ),
         ),
         fixtures=(
             FileFixture("meta-catalog.json", "fixtures/meta-catalog.json"),
@@ -748,17 +789,35 @@ SUCCESS_SCENARIOS = [
         skill="meta-remove",
         script="meta-remove.py",
         arguments={"ConfigDir": "src", "Object": "Catalog.ParityCatalog"},
-        fixtures=(
-            FileFixture("meta-remove/Configuration.xml", "src/Configuration.xml"),
-            FileFixture("meta-remove/Catalogs/ParityCatalog.xml", "src/Catalogs/ParityCatalog.xml"),
-            FileFixture(
-                "meta-remove/Catalogs/ParityCatalog/Ext/ObjectModule.bsl",
-                "src/Catalogs/ParityCatalog/Ext/ObjectModule.bsl",
+        setup_steps=(
+            SetupStep(
+                skill="meta-compile",
+                script="meta-compile.py",
+                arguments={"JsonPath": "fixtures/meta-catalog.json", "OutputDir": "src"},
             ),
-            FileFixture("meta-remove/Subsystems/Sales.xml", "src/Subsystems/Sales.xml"),
+            SetupStep(
+                skill="subsystem-compile",
+                script="subsystem-compile.py",
+                arguments={
+                    "Value": {
+                        "name": "Sales",
+                        "synonym": "Sales",
+                        "content": [
+                            "Catalog.ParityCatalog",
+                            "Catalog.KeepCatalog",
+                        ],
+                    },
+                    "OutputDir": "src",
+                    "NoValidate": True,
+                },
+            ),
+        ),
+        fixtures=(
+            FileFixture("meta-catalog.json", "fixtures/meta-catalog.json"),
+            FileFixture("meta-remove/Configuration.xml", "src/Configuration.xml"),
             FileFixture(
-                "meta-remove/Subsystems/Sales/Ext/CommandInterface.xml",
-                "src/Subsystems/Sales/Ext/CommandInterface.xml",
+                "cf-validate/Languages/Русский.xml",
+                "src/Languages/Русский.xml",
             ),
         ),
         expect_ok=True,
@@ -1457,16 +1516,26 @@ SUCCESS_SCENARIOS = [
             "FormName": "MainForm",
             "SrcDir": "src/Reports",
         },
+        setup_steps=(
+            SetupStep(
+                skill="meta-compile",
+                script="meta-compile.py",
+                arguments={"JsonPath": "fixtures/meta-report.json", "OutputDir": "src"},
+            ),
+            SetupStep(
+                skill="form-add",
+                script="form-add.py",
+                arguments={
+                    "ObjectPath": "src/Reports/ParityReport.xml",
+                    "FormName": "MainForm",
+                    "Purpose": "Object",
+                    "Synonym": "Main form",
+                    "SetDefault": True,
+                },
+            ),
+        ),
         fixtures=(
-            FileFixture("form-remove/ParityReport.xml", "src/Reports/ParityReport.xml"),
-            FileFixture(
-                "form-remove/ParityReport/Forms/MainForm.xml",
-                "src/Reports/ParityReport/Forms/MainForm.xml",
-            ),
-            FileFixture(
-                "form-remove/ParityReport/Forms/MainForm/Ext/Form.xml",
-                "src/Reports/ParityReport/Forms/MainForm/Ext/Form.xml",
-            ),
+            FileFixture("meta-report.json", "fixtures/meta-report.json"),
         ),
         expect_ok=True,
         compare_files=True,
@@ -1507,7 +1576,14 @@ SUCCESS_SCENARIOS = [
             "SrcDir": "src/Reports",
             "SetMainSKD": True,
         },
-        fixtures=(FileFixture("template-remove/ParityReport.xml", "src/Reports/ParityReport.xml"),),
+        setup_steps=(
+            SetupStep(
+                skill="meta-compile",
+                script="meta-compile.py",
+                arguments={"JsonPath": "fixtures/meta-report.json", "OutputDir": "src"},
+            ),
+        ),
+        fixtures=(FileFixture("meta-report.json", "fixtures/meta-report.json"),),
         expect_ok=True,
         compare_files=True,
     ),
@@ -1583,6 +1659,10 @@ SUCCESS_SCENARIOS = [
         },
         fixtures=(
             FileFixture(
+                BSP_SUBSYSTEM_FIXTURE,
+                "src/Subsystems/Администрирование.xml",
+            ),
+            FileFixture(
                 BSP_SUBSYSTEM_COMMAND_INTERFACE_FIXTURE,
                 "src/Subsystems/Администрирование/Ext/CommandInterface.xml",
             ),
@@ -1602,6 +1682,10 @@ SUCCESS_SCENARIOS = [
         },
         fixtures=(
             FileFixture(
+                BSP_SUBSYSTEM_FIXTURE,
+                "src/Subsystems/Администрирование.xml",
+            ),
+            FileFixture(
                 BSP_SUBSYSTEM_COMMAND_INTERFACE_FIXTURE,
                 "src/Subsystems/Администрирование/Ext/CommandInterface.xml",
             ),
@@ -1619,6 +1703,17 @@ SUCCESS_SCENARIOS = [
             "DefinitionFile": "fixtures/interface-edit-ops.json",
             "NoValidate": True,
         },
+        setup_steps=(
+            SetupStep(
+                skill="subsystem-compile",
+                script="subsystem-compile.py",
+                arguments={
+                    "Value": {"name": "Sales", "synonym": "Sales"},
+                    "OutputDir": "src",
+                    "NoValidate": True,
+                },
+            ),
+        ),
         fixtures=(
             FileFixture(
                 "interface-validate/Sales/Ext/CommandInterface.xml",
@@ -1641,6 +1736,17 @@ SUCCESS_SCENARIOS = [
             "CreateIfMissing": True,
             "NoValidate": True,
         },
+        setup_steps=(
+            SetupStep(
+                skill="subsystem-compile",
+                script="subsystem-compile.py",
+                arguments={
+                    "Value": {"name": "NewSales", "synonym": "New sales"},
+                    "OutputDir": "src",
+                    "NoValidate": True,
+                },
+            ),
+        ),
         expect_ok=True,
         compare_files=True,
     ),
@@ -1656,6 +1762,20 @@ SUCCESS_SCENARIOS = [
             "CreateIfMissing": True,
             "NoValidate": True,
         },
+        setup_steps=(
+            SetupStep(
+                skill="subsystem-compile",
+                script="subsystem-compile.py",
+                arguments={
+                    "Value": {
+                        "name": "NewVisibility",
+                        "synonym": "New visibility",
+                    },
+                    "OutputDir": "src",
+                    "NoValidate": True,
+                },
+            ),
+        ),
         expect_ok=True,
         compare_files=True,
     ),
@@ -1671,6 +1791,17 @@ SUCCESS_SCENARIOS = [
             "CreateIfMissing": True,
             "NoValidate": True,
         },
+        setup_steps=(
+            SetupStep(
+                skill="subsystem-compile",
+                script="subsystem-compile.py",
+                arguments={
+                    "Value": {"name": "NewVisible", "synonym": "New visible"},
+                    "OutputDir": "src",
+                    "NoValidate": True,
+                },
+            ),
+        ),
         expect_ok=True,
         compare_files=True,
     ),
@@ -1684,16 +1815,27 @@ SUCCESS_SCENARIOS = [
             "TemplateName": "MainSchema",
             "SrcDir": "src/Reports",
         },
+        setup_steps=(
+            SetupStep(
+                skill="meta-compile",
+                script="meta-compile.py",
+                arguments={"JsonPath": "fixtures/meta-report.json", "OutputDir": "src"},
+            ),
+            SetupStep(
+                skill="template-add",
+                script="add-template.py",
+                arguments={
+                    "ObjectName": "ParityReport",
+                    "TemplateName": "MainSchema",
+                    "TemplateType": "DataCompositionSchema",
+                    "Synonym": "Main schema",
+                    "SrcDir": "src/Reports",
+                    "SetMainSKD": True,
+                },
+            ),
+        ),
         fixtures=(
-            FileFixture("template-remove/ParityReport.xml", "src/Reports/ParityReport.xml"),
-            FileFixture(
-                "template-remove/ParityReport/Templates/MainSchema.xml",
-                "src/Reports/ParityReport/Templates/MainSchema.xml",
-            ),
-            FileFixture(
-                "template-remove/ParityReport/Templates/MainSchema/Ext/Template.xml",
-                "src/Reports/ParityReport/Templates/MainSchema/Ext/Template.xml",
-            ),
+            FileFixture("meta-report.json", "fixtures/meta-report.json"),
         ),
         expect_ok=True,
         compare_files=True,
@@ -2286,6 +2428,18 @@ SUCCESS_SCENARIOS = [
             "Operation": "add-dataSetLink",
             "Value": "МестаИспользования > ParityDataSetFinal on КоличествоДанных = КоличествоДанных [param ParityLinkFinal]",
         },
+        setup_steps=(
+            SetupStep(
+                skill="dcs-edit",
+                script="dcs-edit.py",
+                tool="unica.dcs.edit",
+                arguments={
+                    "TemplatePath": "src/Template.xml",
+                    "Operation": "add-dataSet",
+                    "Value": "ParityDataSetFinal: ВЫБРАТЬ 1 КАК КоличествоДанных",
+                },
+            ),
+        ),
         fixtures=(FileFixture(BSP_DCS_OBJECT_FIXTURE, "src/Template.xml"),),
         expect_ok=True,
         compare_files=True,
@@ -4037,6 +4191,38 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
         self.assertGreaterEqual(coverage, MIN_NATIVE_PARITY_COVERAGE)
         self.assertEqual(NATIVE_PARITY_TOOLS - covered, set())
 
+    def test_cfe_patch_method_parity_uses_only_the_supported_v1_contract(self) -> None:
+        scenarios = [
+            scenario
+            for scenario in SUCCESS_SCENARIOS
+            if scenario.tool == "unica.cfe.patch_method"
+        ]
+        self.assertGreater(len(scenarios), 0)
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario.name):
+                self.assertIn(
+                    scenario.arguments.get("InterceptorType"),
+                    {"Before", "After"},
+                )
+                self.assertFalse(scenario.arguments.get("IsFunction", False))
+                self.assertEqual(
+                    scenario.arguments.get("MethodName"),
+                    "ОбновитьДанные",
+                    "the fixture exposes this caller-verified zero-parameter procedure",
+                )
+                self.assertTrue(
+                    any(step.tool == "unica.cfe.borrow" for step in scenario.setup_steps),
+                    "the target must be registered and adopted through the public borrow tool",
+                )
+                self.assertTrue(
+                    any(
+                        fixture.source
+                        == "cfe-patch-method/base-common-module.bsl"
+                        for fixture in scenario.fixtures
+                    ),
+                    "the base source must prove the documented procedure signature",
+                )
+
     def test_rust_registry_parity_list_matches_python_parity_harness(self) -> None:
         app_mod = (REPO_ROOT / "crates" / "unica-coder" / "src" / "application" / "mod.rs").read_text(
             encoding="utf-8"
@@ -4238,6 +4424,15 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
             workspace = temp_root / "workspace"
             cache = temp_root / "cache"
             workspace.mkdir()
+            (workspace / "src" / "cf").mkdir(parents=True)
+            (workspace / "v8project.yaml").write_text(
+                "format: DESIGNER\nsource-set:\n  main:\n    type: CONFIGURATION\n    path: src/cf\n",
+                encoding="utf-8",
+            )
+            shutil.copyfile(
+                FIXTURES_ROOT / "meta-remove" / "Configuration.xml",
+                workspace / "src" / "cf" / "Configuration.xml",
+            )
             invalid_definition = workspace / "invalid.json"
             valid_definition = workspace / "valid.json"
             invalid_definition.write_text(
@@ -4248,10 +4443,13 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
                 json.dumps({"events": {"OnCreateAtServer": "OnCreateAtServer"}}),
                 encoding="utf-8",
             )
-            invalid_output = workspace / "InvalidForm.xml"
-            valid_output = workspace / "ValidForm.xml"
-            invalid_before = b"invalid-preview-sentinel"
-            valid_before = b"valid-preview-sentinel"
+            invalid_output = workspace / "src" / "cf" / "InvalidForm.xml"
+            valid_output = workspace / "src" / "cf" / "ValidForm.xml"
+            invalid_before = (
+                b'<?xml version="1.0" encoding="UTF-8"?>\n'
+                b'<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20"/>\n'
+            )
+            valid_before = invalid_before
             invalid_output.write_bytes(invalid_before)
             valid_output.write_bytes(valid_before)
             messages = [
@@ -4264,7 +4462,7 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
                         "arguments": {
                             "cwd": str(workspace),
                             "JsonPath": "invalid.json",
-                            "OutputPath": "InvalidForm.xml",
+                            "OutputPath": "src/cf/InvalidForm.xml",
                             "dryRun": True,
                         },
                     },
@@ -4278,7 +4476,7 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
                         "arguments": {
                             "cwd": str(workspace),
                             "JsonPath": "valid.json",
-                            "OutputPath": "ValidForm.xml",
+                            "OutputPath": "src/cf/ValidForm.xml",
                             "dryRun": True,
                         },
                     },
@@ -4325,6 +4523,10 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
             (workspace / "v8project.yaml").write_text(
                 "format: DESIGNER\nsource-set:\n  main:\n    type: CONFIGURATION\n    path: src/cf\n",
                 encoding="utf-8",
+            )
+            shutil.copyfile(
+                FIXTURES_ROOT / "meta-remove" / "Configuration.xml",
+                workspace / "src" / "cf" / "Configuration.xml",
             )
             for example in examples:
                 arguments = example.payload["params"]["arguments"]
@@ -4383,9 +4585,6 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
                         owner_directory.parent / f"{owner_directory.name}.xml"
                     )
                     descriptor_path.write_text(
-                        "<MetaDataObject/>\n", encoding="utf-8"
-                    )
-                    (workspace / "src" / "cf" / "Configuration.xml").write_text(
                         "<MetaDataObject/>\n", encoding="utf-8"
                     )
             messages = [
@@ -4745,8 +4944,8 @@ CC_1C_EXPECTED_GAPS = {
     "form-compile/input-fields": "stderr_mismatch",
     "form-compile/table": "stdout_mismatch_snapshot_diff",
     "meta-compile/error-unknown-type": "stderr_mismatch",
-    "cfe-borrow/form-bindings": "stdout_mismatch_snapshot_diff",
-    "form-compile/attributes-types": "stdout_mismatch_snapshot_diff",
+    "cfe-borrow/form-bindings": "snapshot_diff",
+    "form-compile/attributes-types": "snapshot_diff",
     "form-compile/auto-cmd-bar": "stdout_mismatch_snapshot_diff",
     "form-compile/column-group": "stdout_mismatch_snapshot_diff",
     "form-compile/file-dialog": "stdout_mismatch_snapshot_diff",
@@ -4756,7 +4955,6 @@ CC_1C_EXPECTED_GAPS = {
     "dcs-compile/available-values-and-folders": "stdout_mismatch_snapshot_diff",
     "dcs-compile/calc-object-name-restrict-string": "stdout_mismatch_snapshot_diff",
     "dcs-compile/calc-shorthand-extended": "stdout_mismatch_snapshot_diff",
-    "dcs-compile/decimal-qualifier-defaults": "stdout_mismatch_snapshot_diff",
     "dcs-compile/empty-param-values": "stdout_mismatch_snapshot_diff",
     "dcs-compile/field-appearance-and-presentation": "stdout_mismatch_snapshot_diff",
     "dcs-compile/field-restrictions": "stdout_mismatch_snapshot_diff",

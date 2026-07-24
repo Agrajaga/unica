@@ -122,7 +122,43 @@ class PackageUnicaPluginTests(unittest.TestCase):
 
         self.assertEqual(mismatches, [])
 
-    def test_bsp_parity_fixtures_preserve_harvested_bytes(self) -> None:
+    def test_bsp_parity_profile_projection_preserves_both_source_and_target_identity(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        manifest_path = (
+            repo_root
+            / "tests"
+            / "fixtures"
+            / "unica_mcp_script_parity"
+            / "bsp"
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["schemaVersion"], 2)
+        self.assertEqual(
+            manifest["derivation"],
+            {
+                "exportFormat": "2.20",
+                "kind": "profile-projection",
+                "platformLine": "8.3.27",
+                "recipe": "bsp-2.21-to-2.20-v1",
+            },
+        )
+        projected = []
+        for entry in manifest["files"]:
+            self.assertIn("harvestedSha256", entry)
+            self.assertIn("harvestedSize", entry)
+            if (
+                entry["harvestedSha256"] != entry["sha256"]
+                or entry["harvestedSize"] != entry["size"]
+            ):
+                projected.append(entry["target"])
+
+        self.assertEqual(len(projected), 16)
+        self.assertIn("cf/Configuration.xml", projected)
+        self.assertTrue(all(target.endswith(".xml") for target in projected))
+
+    def test_bsp_parity_fixture_bytes_are_not_transformed_by_git(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         result = subprocess.run(
             [

@@ -115,6 +115,42 @@ VALID_ENUM_VALUES = {
 }
 
 EXPECTED_NS = 'http://v8.1c.ru/8.3/MDClasses'
+BOOLEAN_PROPERTIES = (
+    'IncludeHelpInContents',
+    'UseManagedFormInOrdinaryApplication',
+    'UseOrdinaryFormInManagedApplication',
+)
+
+
+def report_format_compatibility(reporter, raw_version):
+    actual = raw_version or '1.0'
+    if re.fullmatch(r'\d+(?:\.\d+)*', actual) is None:
+        reporter.error(f"invalid export format version {actual!r}")
+        return
+    try:
+        components = tuple(int(part) for part in actual.split('.'))
+    except ValueError:
+        reporter.error(f"invalid export format version {actual!r}")
+        return
+    target = (2, 20)
+    components += (0,) * max(0, len(target) - len(components))
+    target_cmp = target + (0,) * max(0, len(components) - len(target))
+    if components == target_cmp:
+        if actual == '2.20':
+            reporter.ok('Export format: 2.20')
+        else:
+            reporter.error(f"invalid export format version {actual!r}")
+    elif components < target_cmp:
+        reporter.warn(
+            f'Export format {actual} is older than supported 2.20. '
+            'Unica will not migrate it automatically; re-export the source '
+            'explicitly with 1C:Enterprise 8.3.27, then retry.'
+        )
+    else:
+        reporter.warn(
+            f'Export format {actual} is newer than supported 2.20; '
+            'platform 1C 8.5 support is planned in upcoming releases.'
+        )
 
 
 class Reporter:
@@ -236,10 +272,7 @@ def main():
         check1_ok = False
 
     version = root.get('version', '')
-    if not version:
-        r.warn('1. Missing version attribute on MetaDataObject')
-    elif version not in ('2.17', '2.20', '2.21'):
-        r.warn(f"1. Unusual version '{version}' (expected 2.17, 2.20 or 2.21)")
+    report_format_compatibility(r, version)
 
     # Must have Configuration child
     cfg_node = None
@@ -391,8 +424,21 @@ def main():
                     check4_ok = False
                 enum_checked += 1
 
+        boolean_checked = 0
+        for prop_name in BOOLEAN_PROPERTIES:
+            prop_node = props_node.find(f'md:{prop_name}', NS)
+            if prop_node is not None and prop_node.text:
+                val = prop_node.text
+                if val not in ('true', 'false'):
+                    r.error(f"4. Property '{prop_name}' has invalid boolean value '{val}'")
+                    check4_ok = False
+                boolean_checked += 1
+
         if check4_ok:
-            r.ok(f'4. Property values: {enum_checked} enum properties checked')
+            r.ok(
+                f'4. Property values: {enum_checked} enum and '
+                f'{boolean_checked} boolean properties checked'
+            )
     else:
         r.warn('4. No Properties block to check')
 
