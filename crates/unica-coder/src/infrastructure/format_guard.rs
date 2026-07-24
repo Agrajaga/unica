@@ -2724,7 +2724,12 @@ mod tests {
                 catalog_dir.clone(),
                 catalog_xml.clone(),
             ),
-            ("meta-validate", "Path", catalog_dir, catalog_xml),
+            (
+                "meta-validate",
+                "Path",
+                catalog_dir,
+                normalized_path(&catalog_xml),
+            ),
             ("form-info", "path", form_dir.clone(), form_xml.clone()),
             ("form-validate", "Path", form_dir, form_xml),
             ("dcs-validate", "path", dcs_dir, dcs_xml),
