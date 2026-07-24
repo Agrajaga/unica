@@ -14,14 +14,14 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
-REFERENCE_SKILLS = ROOT / "tests/fixtures/unica_mcp_script_parity/reference_skills"
-SUBSYSTEM_EDIT = REFERENCE_SKILLS / "subsystem-edit/scripts/subsystem-edit.py"
-TEMPLATE_ADD = REFERENCE_SKILLS / "template-add/scripts/add-template.py"
-META_VALIDATE = REFERENCE_SKILLS / "meta-validate/scripts/meta-validate.py"
-MXL_COMPILE = REFERENCE_SKILLS / "mxl-compile/scripts/mxl-compile.py"
-DCS_COMPILE = REFERENCE_SKILLS / "dcs-compile/scripts/dcs-compile.py"
+UNICA_REFERENCE_MODELS = ROOT / "tests/fixtures/unica_mcp_script_parity/unica_reference_models"
+SUBSYSTEM_EDIT = UNICA_REFERENCE_MODELS / "subsystem-edit/scripts/subsystem-edit.py"
+TEMPLATE_ADD = UNICA_REFERENCE_MODELS / "template-add/scripts/add-template.py"
+META_VALIDATE = UNICA_REFERENCE_MODELS / "meta-validate/scripts/meta-validate.py"
+MXL_COMPILE = UNICA_REFERENCE_MODELS / "mxl-compile/scripts/mxl-compile.py"
+DCS_COMPILE = UNICA_REFERENCE_MODELS / "dcs-compile/scripts/dcs-compile.py"
 VALIDATOR_SCRIPTS = tuple(
-    REFERENCE_SKILLS / relative
+    UNICA_REFERENCE_MODELS / relative
     for relative in (
         "cf-validate/scripts/cf-validate.py",
         "cfe-validate/scripts/cfe-validate.py",

@@ -43,6 +43,34 @@ class SkillProvenanceTests(unittest.TestCase):
     def load_product_backlog(self) -> dict:
         return json.loads(self.product_backlog_path().read_text(encoding="utf-8"))
 
+    def test_adapted_python_models_are_named_as_unica_owned_test_models(self) -> None:
+        root = (
+            self.repo_root()
+            / "tests"
+            / "fixtures"
+            / "unica_mcp_script_parity"
+            / "unica_reference_models"
+        )
+        self.assertTrue(root.is_dir())
+        self.assertFalse(
+            (
+                self.repo_root()
+                / "tests"
+                / "fixtures"
+                / "unica_mcp_script_parity"
+                / "reference_skills"
+            ).exists()
+        )
+        python_models = sorted(root.glob("*/scripts/*.py"))
+        self.assertGreater(len(python_models), 0)
+        for path in python_models:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            self.assertIn(
+                "Adapted from https://github.com/Nikolay-Shirokov/cc-1c-skills",
+                text,
+                path,
+            )
+
     def test_provenance_index_validates_offline(self) -> None:
         module = load_upstream_module()
 
@@ -156,18 +184,40 @@ class SkillProvenanceTests(unittest.TestCase):
             self.assertIn("общие проектные соглашения Unica", text)
             self.assertIn("не требования платформы", text)
 
-    def test_historical_donor_baselines_track_last_local_review_not_current_head(self) -> None:
+    def test_general_and_parity_baselines_are_independent_concrete_commits(self) -> None:
         data = self.load_provenance()
         upstreams = {item["id"]: item for item in data["upstreams"]}
+        cc = upstreams["cc-1c-skills"]
+        self.assertRegex(cc["baselineCommit"], r"^[0-9a-f]{40}$")
+        self.assertRegex(
+            cc["lastAdaptedLocalCommit"], r"^[0-9a-f]{40}$"
+        )
+        baseline = json.loads(
+            (
+                self.repo_root()
+                / "tests"
+                / "fixtures"
+                / "unica_mcp_script_parity"
+                / "donor-baseline.json"
+            ).read_text(encoding="utf-8")
+        )
+        entries = {entry["skill"]: entry for entry in cc["entries"]}
+        for scope, scope_data in baseline["scopes"].items():
+            with self.subTest(scope=scope):
+                commit = scope_data["acceptedCommit"]
+                self.assertRegex(commit, r"^[0-9a-f]{40}$")
+                self.assertEqual(entries[scope]["parityBaselineCommit"], commit)
+                self.assertNotEqual(entries[scope]["baselineCommit"], commit)
+                review = json.loads(
+                    (
+                        self.reviews_dir()
+                        / f"{scope_data['reviewId']}.json"
+                    ).read_text(encoding="utf-8")
+                )
+                self.assertEqual(review["reviewStatus"], "reviewed")
+                self.assertTrue(review["applied"])
+                self.assertEqual(review["targetCommit"], commit)
 
-        self.assertEqual(
-            upstreams["cc-1c-skills"]["baselineCommit"],
-            "f3466e19fdc37954c030e48daabcc192f0098fe7",
-        )
-        self.assertEqual(
-            upstreams["cc-1c-skills"]["lastAdaptedLocalCommit"],
-            "795505f2243cf3c93a95918467f99135af758e1b",
-        )
         self.assertEqual(
             upstreams["ai-rules-1c"]["baselineCommit"],
             "484e550043a4cb749d59d0671329f3112e3ae668",
@@ -452,7 +502,7 @@ class SkillProvenanceTests(unittest.TestCase):
         }
         source_comment_paths = []
         roots = [
-            self.repo_root() / "tests" / "fixtures" / "unica_mcp_script_parity" / "reference_skills",
+            self.repo_root() / "tests" / "fixtures" / "unica_mcp_script_parity" / "unica_reference_models",
             self.repo_root() / "plugins" / "unica" / "skills" / "help-add" / "scripts",
         ]
         for root in roots:
@@ -469,6 +519,26 @@ class SkillProvenanceTests(unittest.TestCase):
             if not any(path == covered or path.startswith(covered.rstrip("/") + "/") for covered in covered_paths)
         ]
         self.assertEqual(sorted(uncovered), [])
+
+    def test_donor_case_scopes_are_watched_by_provenance(self) -> None:
+        data = self.load_provenance()
+        cc = next(
+            item for item in data["upstreams"] if item["id"] == "cc-1c-skills"
+        )
+        entries = {entry["skill"]: entry for entry in cc["entries"]}
+        expected = {
+            "cfe-borrow": ["tests/skills/cases/cfe-borrow/**"],
+            "dcs-compile": ["tests/skills/cases/skd-compile/**"],
+            "form-compile": [
+                "tests/skills/cases/form-compile/**",
+                "tests/skills/cases/form-compile-from-object/**",
+            ],
+            "meta-compile": ["tests/skills/cases/meta-compile/**"],
+        }
+        for skill, paths in expected.items():
+            with self.subTest(skill=skill):
+                for path in paths:
+                    self.assertIn(path, entries[skill]["upstreamPaths"])
 
     def test_donor_urls_do_not_enter_prompt_visible_skills_or_references(self) -> None:
         forbidden = [
