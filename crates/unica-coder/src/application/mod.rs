@@ -7109,6 +7109,7 @@ mod tests {
             support_test_configuration_xml("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
         )
         .unwrap();
+        write_support_test_language(&src);
         let items_json = fixtures.join("items.json");
         let other_json = fixtures.join("other.json");
         std::fs::write(&items_json, support_test_catalog_definition("Items")).unwrap();
@@ -8420,6 +8421,7 @@ mod tests {
             support_test_configuration_xml("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
         )
         .unwrap();
+        write_support_test_language(&src);
         let definition_path = fixtures.join("items.json");
         std::fs::write(
             &definition_path,
@@ -8610,6 +8612,7 @@ mod tests {
             support_test_configuration_xml("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
         )
         .unwrap();
+        write_support_test_language(&src);
         root
     }
 
@@ -8954,6 +8957,26 @@ mod tests {
   </Configuration>
 </MetaDataObject>"#
         )
+    }
+
+    fn write_support_test_language(src: &std::path::Path) {
+        let languages = src.join("Languages");
+        std::fs::create_dir_all(&languages).unwrap();
+        std::fs::write(
+            languages.join("Russian.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+  <Language uuid="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee">
+    <Properties>
+      <Name>Russian</Name>
+      <Synonym/>
+      <Comment/>
+      <LanguageCode>ru</LanguageCode>
+    </Properties>
+  </Language>
+</MetaDataObject>"#,
+        )
+        .unwrap();
     }
 
     fn support_test_catalog_xml(uuid: &str) -> String {

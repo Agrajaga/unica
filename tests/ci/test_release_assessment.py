@@ -463,10 +463,15 @@ for raw in sys.stdin:
                 / "Ext"
             ).mkdir(parents=True)
             (src / "Roles" / "ПолныеПрава" / "Ext").mkdir(parents=True)
+            (src / "Languages").mkdir(parents=True)
             (src / ".build").mkdir(parents=True)
             (src / ".build" / "bsl-search.db").write_bytes(b"cache")
             (src / "Configuration.xml").write_text("<MetaDataObject/>", encoding="utf-8")
             (src / "Catalogs" / "Партнеры.xml").write_text("<MetaDataObject/>", encoding="utf-8")
+            (src / "Languages" / "Русский.xml").write_text(
+                "<MetaDataObject/>",
+                encoding="utf-8",
+            )
             (src / "Catalogs" / "Партнеры" / "Forms" / "ФормаЭлемента" / "Ext" / "Form.xml").write_text(
                 "<Form/>", encoding="utf-8"
             )
@@ -501,6 +506,7 @@ for raw in sys.stdin:
             harvested = sorted(path.relative_to(out).as_posix() for path in out.rglob("*") if path.is_file())
             self.assertIn("manifest.json", harvested)
             self.assertIn("cf/Configuration.xml", harvested)
+            self.assertIn("meta/Languages/Русский.xml", harvested)
             self.assertTrue(any(path.startswith("forms/") and path.endswith("/Form.xml") for path in harvested))
             self.assertTrue(any(path.startswith("dcs/") and path.endswith("/Template.xml") for path in harvested))
             self.assertTrue(any(path.startswith("roles/") and path.endswith("/Rights.xml") for path in harvested))

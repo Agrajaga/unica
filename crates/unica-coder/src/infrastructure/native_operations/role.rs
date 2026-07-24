@@ -1421,29 +1421,13 @@ fn require_role_configuration_owner_validation(
     config_path: &Path,
     context: &WorkspaceContext,
 ) -> Result<(), String> {
-    let args = Map::from_iter([
-        (
-            "ConfigPath".to_string(),
-            Value::String(config_path.display().to_string()),
-        ),
-        ("InternalLocalOwnerOnly".to_string(), Value::Bool(true)),
-    ]);
-    let outcome = validate_cf(&args, context);
-    if outcome.ok {
-        return Ok(());
-    }
-    let detail = if outcome.errors.is_empty() {
-        outcome
-            .stdout
-            .unwrap_or_else(|| "validation returned no diagnostics".to_string())
-    } else {
-        outcome.errors.join("; ")
-    };
-    Err(format!(
-        "role.compile Configuration owner validation failed for {}: {}",
-        config_path.display(),
-        detail.trim()
-    ))
+    validate_cf_owner_path(config_path, context).map_err(|detail| {
+        format!(
+            "role.compile Configuration owner validation failed for {}: {}",
+            config_path.display(),
+            detail.trim()
+        )
+    })
 }
 
 pub(crate) fn compile_role(

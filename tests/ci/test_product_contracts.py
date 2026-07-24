@@ -22,6 +22,21 @@ def load_contract_module():
 
 
 class ProductContractTests(unittest.TestCase):
+    def test_native_validators_do_not_expose_internal_local_owner_only_switch(
+        self,
+    ) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        rust_root = repo_root / "crates" / "unica-coder" / "src"
+        offenders = []
+        for path in sorted(rust_root.rglob("*.rs")):
+            text = path.read_text(encoding="utf-8")
+            for marker in ("InternalLocalOwnerOnly", "internalLocalOwnerOnly"):
+                if marker in text:
+                    offenders.append(
+                        f"{path.relative_to(repo_root).as_posix()}: {marker}"
+                    )
+        self.assertEqual(offenders, [])
+
     def test_v8_runner_partial_load_list_requires_bom_crlf_and_cyrillic_path(self) -> None:
         module = load_contract_module()
         expected_path = str(

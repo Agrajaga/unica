@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::common::*;
 use super::compile_transaction::CompileTransaction;
-use super::meta::require_metadata_8_3_27_validation;
+use super::meta::validate_metadata_owner_shape_8_3_27;
 use super::template::template_add_object_type_folders;
 
 struct HelpAddRun {
@@ -110,14 +110,14 @@ pub(crate) fn add_help(args: &Map<String, Value>, context: &WorkspaceContext) ->
         let mut format_dependencies = vec![object_path.as_path()];
         format_dependencies.extend(form_snapshots.iter().map(|(path, _, _)| path.as_path()));
         guard_active_format_dependencies(&mut transaction, &format_dependencies, context)?;
-        require_metadata_8_3_27_validation(&object_path, context, "help.add")?;
+        validate_metadata_owner_shape_8_3_27(&object_path, context, "help.add")?;
         for (path, _, text) in &form_snapshots {
             validate_help_form_owner_8_3_27(path, text)?;
             validate_help_xml(path, text)?;
         }
 
         let report = transaction.commit_with_post_validation(|| {
-            require_metadata_8_3_27_validation(&object_path, context, "help.add")?;
+            validate_metadata_owner_shape_8_3_27(&object_path, context, "help.add")?;
             for (path, _, _) in &form_snapshots {
                 let snapshot = read_utf8_sig_snapshot(path)?;
                 validate_help_form_owner_8_3_27(path, &snapshot.text)?;

@@ -114,7 +114,39 @@ impl CfValidationReporter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CfValidationScope {
+    Full,
+    OwnerShape,
+}
+
 pub(crate) fn validate_cf(args: &Map<String, Value>, context: &WorkspaceContext) -> AdapterOutcome {
+    validate_cf_with_scope(args, context, CfValidationScope::Full)
+}
+
+pub(crate) fn validate_cf_owner_path(
+    path: &Path,
+    context: &WorkspaceContext,
+) -> Result<(), String> {
+    let args = Map::from_iter([(
+        "ConfigPath".to_string(),
+        Value::String(path.display().to_string()),
+    )]);
+    let outcome = validate_cf_with_scope(&args, context, CfValidationScope::OwnerShape);
+    if outcome.ok {
+        Ok(())
+    } else if outcome.errors.is_empty() {
+        Err(outcome.summary)
+    } else {
+        Err(outcome.errors.join("; "))
+    }
+}
+
+fn validate_cf_with_scope(
+    args: &Map<String, Value>,
+    context: &WorkspaceContext,
+    scope: CfValidationScope,
+) -> AdapterOutcome {
     const MD_NS: &str = "http://v8.1c.ru/8.3/MDClasses";
     const XR_NS: &str = "http://v8.1c.ru/8.3/xcf/readable";
     const HP_NS: &str = "http://v8.1c.ru/8.3/xcf/extrnprops";
@@ -125,8 +157,7 @@ pub(crate) fn validate_cf(args: &Map<String, Value>, context: &WorkspaceContext)
         let out_file =
             path_arg(args, &["outFile", "OutFile"]).map(|path| absolutize(path, &context.cwd));
         let detailed = bool_arg(args, &["detailed", "Detailed"]);
-        let local_owner_only =
-            bool_arg(args, &["internalLocalOwnerOnly", "InternalLocalOwnerOnly"]);
+        let owner_shape_only = scope == CfValidationScope::OwnerShape;
         let max_errors = int_arg(args, &["maxErrors", "MaxErrors"])
             .and_then(|value| usize::try_from(value).ok())
             .filter(|value| *value > 0)
@@ -554,7 +585,7 @@ pub(crate) fn validate_cf(args: &Map<String, Value>, context: &WorkspaceContext)
         let mut form_refs_checked = 0usize;
         let mut form_ref_errors = Vec::new();
         let home_page = config_dir.join("Ext").join("HomePageWorkArea.xml");
-        if !local_owner_only && home_page.is_file() {
+        if !owner_shape_only && home_page.is_file() {
             match read_utf8_sig(&home_page) {
                 Ok(home_page_text) => {
                     match Document::parse(home_page_text.trim_start_matches('\u{feff}')) {

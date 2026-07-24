@@ -138,6 +138,15 @@
     },
     {
       "category": "meta",
+      "harvestedSha256": "915f7d2eb9b62ca431e1a35e11f75420581edf1729a74cbd22a43adb5edd10ab",
+      "harvestedSize": 1306,
+      "sha256": "f5df362df7adf0aaeb671da5a31530460ec814abd37799d7b9bf3610d775f873",
+      "size": 1306,
+      "source": "src/cf/Languages/Русский.xml",
+      "target": "meta/Languages/Русский.xml"
+    },
+    {
+      "category": "meta",
       "harvestedSha256": "54d682926ce59b62680f632c9a023c9f1b7399699f44a78de4258f803e3c9309",
       "harvestedSize": 2606,
       "sha256": "689b47b5070c249f1d70f9310d0ab14f4348c99a1c45d60f425d0ef85a330b1a",

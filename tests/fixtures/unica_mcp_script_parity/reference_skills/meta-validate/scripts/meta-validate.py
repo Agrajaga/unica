@@ -93,17 +93,7 @@ if not os.path.exists(object_path):
 
 resolved_path = os.path.abspath(object_path)
 
-# ── detect config directory (for cross-object checks) ────────
-
 config_dir = None
-probe = os.path.dirname(resolved_path)
-for _ in range(4):
-    if not probe:
-        break
-    if os.path.exists(os.path.join(probe, "Configuration.xml")):
-        config_dir = probe
-        break
-    probe = os.path.dirname(probe)
 
 # ── output infrastructure ────────────────────────────────────
 
@@ -195,9 +185,16 @@ valid_types = (
     "InformationRegister", "AccumulationRegister", "AccountingRegister", "CalculationRegister",
     "ChartOfAccounts", "ChartOfCharacteristicTypes", "ChartOfCalculationTypes",
     "BusinessProcess", "Task", "ExchangePlan", "DocumentJournal",
-    "Report", "DataProcessor",
+    "Report", "DataProcessor", "ExternalReport", "ExternalDataProcessor",
     "CommonModule", "ScheduledJob", "EventSubscription",
     "HTTPService", "WebService", "DefinedType",
+)
+
+LIST_PRESENTATION_TYPES = (
+    "ExchangePlan", "Catalog", "Document", "DocumentJournal", "Enum",
+    "ChartOfCharacteristicTypes", "ChartOfAccounts", "ChartOfCalculationTypes",
+    "InformationRegister", "AccumulationRegister", "AccountingRegister",
+    "CalculationRegister", "BusinessProcess", "Task",
 )
 
 # GeneratedType categories by type
@@ -366,6 +363,171 @@ def text_of(node):
     return (node.text or "").strip()
 
 
+def localized_values(node):
+    values = []
+    if node is None:
+        return values
+    for item in find_all(node, "v8:item"):
+        language = inner_text(find(item, "v8:lang")).strip() or None
+        text = inner_text(find(item, "v8:content"))
+        if text.strip():
+            values.append((language, text))
+    return values
+
+
+def find_configuration_owner(path):
+    workspace_root = os.path.abspath(os.getcwd())
+    directory = os.path.dirname(path)
+    while True:
+        try:
+            inside_workspace = os.path.commonpath((workspace_root, directory)) == workspace_root
+        except ValueError:
+            inside_workspace = False
+        if not inside_workspace:
+            break
+        candidate = os.path.join(directory, "Configuration.xml")
+        if os.path.isfile(candidate):
+            return candidate
+        if directory == workspace_root:
+            break
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    return None
+
+
+def required_configuration_descriptor(path):
+    try:
+        configuration_tree = etree.parse(path, etree.XMLParser(remove_blank_text=False))
+    except OSError as error:
+        raise ValueError(f"failed to read {path}: {error}") from error
+    except etree.XMLSyntaxError as error:
+        raise ValueError(f"failed to parse {path}: {error}") from error
+
+    configuration_root = configuration_tree.getroot()
+    if (
+        etree.QName(configuration_root.tag).namespace != MD_NS
+        or local_name(configuration_root) != "MetaDataObject"
+    ):
+        raise ValueError(f"{path} is not an MDClasses MetaDataObject")
+    descriptors = [
+        child
+        for child in configuration_root
+        if isinstance(child.tag, str) and etree.QName(child.tag).namespace == MD_NS
+    ]
+    if len(descriptors) != 1:
+        raise ValueError(f"{path} must contain exactly one Configuration descriptor")
+    configuration = descriptors[0]
+    if local_name(configuration) != "Configuration":
+        raise ValueError(f"{path} does not contain Configuration")
+    return configuration
+
+
+def configuration_registrations(configuration):
+    child_objects = find(configuration, "md:ChildObjects")
+    if child_objects is None:
+        return [], []
+    registrations = []
+    language_names = []
+    for child in child_objects:
+        if not isinstance(child.tag, str) or etree.QName(child.tag).namespace != MD_NS:
+            continue
+        object_type = local_name(child)
+        object_name = inner_text(child).strip()
+        if not object_name:
+            continue
+        if object_type == "Language":
+            language_names.append(object_name)
+        else:
+            registrations.append((object_type, object_name))
+    return registrations, language_names
+
+
+def required_configuration_language_codes(directory, language_names):
+    codes = []
+    seen = set()
+    for language_name in language_names:
+        language_path = os.path.join(directory, "Languages", f"{language_name}.xml")
+        if not os.path.isfile(language_path):
+            raise ValueError(f"registered language file not found: {language_path}")
+        try:
+            language_tree = etree.parse(
+                language_path,
+                etree.XMLParser(remove_blank_text=False),
+            )
+        except OSError as error:
+            raise ValueError(f"failed to read {language_path}: {error}") from error
+        except etree.XMLSyntaxError as error:
+            raise ValueError(f"failed to parse {language_path}: {error}") from error
+
+        language_root = language_tree.getroot()
+        descriptors = [
+            child
+            for child in language_root
+            if isinstance(child.tag, str) and etree.QName(child.tag).namespace == MD_NS
+        ]
+        if (
+            etree.QName(language_root.tag).namespace != MD_NS
+            or local_name(language_root) != "MetaDataObject"
+            or len(descriptors) != 1
+            or local_name(descriptors[0]) != "Language"
+        ):
+            raise ValueError(
+                f"registered language descriptor is not Language: {language_path}"
+            )
+        properties = find(descriptors[0], "md:Properties")
+        language_code = (
+            inner_text(find(properties, "md:LanguageCode")).strip()
+            if properties is not None
+            else ""
+        )
+        if not language_code:
+            raise ValueError(f"empty LanguageCode in {language_path}")
+        if language_code not in seen:
+            seen.add(language_code)
+            codes.append(language_code)
+    return codes
+
+
+def resolve_owner_context(path, object_type, object_name):
+    if object_type in ("ExternalReport", "ExternalDataProcessor"):
+        return path, []
+
+    owner_path = find_configuration_owner(path)
+    if owner_path is None:
+        raise ValueError(
+            f"Configuration.xml owner not found for {object_type}.{object_name}"
+        )
+    configuration = required_configuration_descriptor(owner_path)
+    registrations, language_names = configuration_registrations(configuration)
+    if (object_type, object_name) not in registrations:
+        raise ValueError(
+            f"{object_type}.{object_name} is not registered in {owner_path}"
+        )
+
+    language_codes = []
+    if object_type in LIST_PRESENTATION_TYPES:
+        language_codes = required_configuration_language_codes(
+            os.path.dirname(owner_path),
+            language_names,
+        )
+        if not language_codes:
+            raise ValueError(f"{owner_path} has no registered language profile")
+    return owner_path, language_codes
+
+
+def warn_long_command_text(source, text, language=None):
+    length = len(text)
+    if length <= 38:
+        return
+    language_suffix = f", language '{language}'" if language else ""
+    report_warn(
+        f"3. Properties: {source} '{text}' is longer than 38 characters ({length}) "
+        f"for the command interface{language_suffix}"
+    )
+
+
 # ── 1. Parse XML ─────────────────────────────────────────────
 
 out_line("")
@@ -443,6 +605,20 @@ obj_name = inner_text(name_node) if name_node is not None and inner_text(name_no
 
 # Now emit header — insert at beginning
 output_lines.insert(0, f"=== Validation: {md_type}.{obj_name} ===")
+
+try:
+    owner_path, language_codes = resolve_owner_context(
+        resolved_path,
+        md_type,
+        obj_name,
+    )
+except ValueError as error:
+    report_error(f"1. Owner context: {error}")
+    finalize()
+    sys.exit(1)
+
+if md_type not in ("ExternalReport", "ExternalDataProcessor"):
+    config_dir = os.path.dirname(owner_path)
 
 if check1_ok:
     report_ok(f"1. Root structure: MetaDataObject/{md_type}, version {version}")
@@ -539,15 +715,27 @@ else:
         if len(name_val) > 80:
             report_warn(f"3. Properties: Name '{name_val}' is longer than 80 characters ({len(name_val)})")
 
-    # Synonym
+    # Effective command-interface presentation by configuration language
     syn_node = find(props_node, "md:Synonym")
-    syn_present = False
-    if syn_node is not None:
-        syn_item = find(syn_node, "v8:item")
-        if syn_item is not None:
-            syn_content = find(syn_item, "v8:content")
-            if syn_content is not None and inner_text(syn_content):
-                syn_present = True
+    list_presentation_node = find(props_node, "md:ListPresentation")
+    synonym_values = localized_values(syn_node)
+    list_presentation_values = localized_values(list_presentation_node)
+    syn_present = bool(synonym_values)
+
+    if md_type in LIST_PRESENTATION_TYPES:
+        for language_code in language_codes:
+            list_values = [
+                text
+                for language, text in list_presentation_values
+                if language == language_code
+            ]
+            if list_values:
+                for text in list_values:
+                    warn_long_command_text("ListPresentation", text, language_code)
+            else:
+                for language, text in synonym_values:
+                    if language == language_code:
+                        warn_long_command_text("Synonym", text, language_code)
 
     if check3_ok:
         syn_info = "Synonym present" if syn_present else "no Synonym"

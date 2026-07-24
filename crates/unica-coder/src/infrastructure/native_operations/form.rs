@@ -2215,7 +2215,7 @@ pub(crate) fn add_form(args: &Map<String, Value>, context: &WorkspaceContext) ->
 
         let object_xml_full =
             resolve_form_add_object_path(absolutize(object_path_raw, &context.cwd))?;
-        require_metadata_8_3_27_validation(&object_xml_full, context, "form.add")?;
+        validate_metadata_owner_shape_8_3_27(&object_xml_full, context, "form.add")?;
         let object_source = read_utf8_sig_snapshot(&object_xml_full)?;
         let object_source_text = object_source.text;
         let mut object_text = object_source_text.clone();
@@ -2291,7 +2291,7 @@ pub(crate) fn add_form(args: &Map<String, Value>, context: &WorkspaceContext) ->
         guard_active_format_owner(&mut transaction, &object_xml_full, context)?;
         let validation_path = object_xml_full.clone();
         let report = transaction.commit_with_post_validation(|| {
-            require_metadata_8_3_27_validation(&validation_path, context, "form.add")
+            validate_metadata_owner_shape_8_3_27(&validation_path, context, "form.add")
         })?;
 
         let obj_dir_name = object_xml_full
@@ -2383,7 +2383,7 @@ pub(crate) fn remove_form(args: &Map<String, Value>, context: &WorkspaceContext)
                 root_xml_display.display()
             ));
         }
-        require_metadata_8_3_27_validation(&root_xml_path, context, "form.remove")?;
+        validate_metadata_owner_shape_8_3_27(&root_xml_path, context, "form.remove")?;
 
         let processor_dir_display = src_dir_display.join(object_name);
         let processor_dir_abs = src_dir_abs.join(object_name);
@@ -2476,7 +2476,7 @@ pub(crate) fn remove_form(args: &Map<String, Value>, context: &WorkspaceContext)
         let validation_form_meta = form_meta_path.clone();
         let validation_form_dir = form_dir_path.clone();
         let report = transaction.commit_with_post_validation(move || {
-            require_metadata_8_3_27_validation(&validation_path, context, "form.remove")?;
+            validate_metadata_owner_shape_8_3_27(&validation_path, context, "form.remove")?;
             for path in [&validation_form_meta, &validation_form_dir] {
                 match fs::symlink_metadata(path) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -3850,7 +3850,7 @@ pub(crate) fn compile_form(
             owner_candidate.as_deref(),
             owner_validation_snapshot.as_ref(),
         ) {
-            require_metadata_8_3_27_validation(owner_path, context, "form.compile")?;
+            validate_metadata_owner_shape_8_3_27(owner_path, context, "form.compile")?;
         }
         let registration = match (
             owner_candidate.as_deref(),
@@ -3910,7 +3910,7 @@ pub(crate) fn compile_form(
                 owner_candidate.as_deref(),
                 owner_validation_snapshot.as_ref(),
             ) {
-                require_metadata_8_3_27_validation(owner_path, context, "form.compile")
+                validate_metadata_owner_shape_8_3_27(owner_path, context, "form.compile")
             } else {
                 Ok(())
             }
