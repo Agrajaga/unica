@@ -80,6 +80,20 @@ class FileFixture:
     target: str
 
 
+META_VALIDATE_COMPILED_OWNER_FIXTURES = (
+    FileFixture("meta-validate-parity-owner/Configuration.xml", "src/Configuration.xml"),
+    FileFixture(
+        "meta-validate-parity-owner/Languages/Русский.xml",
+        "src/Languages/Русский.xml",
+    ),
+)
+
+BSP_META_VALIDATE_OWNER_FIXTURES = (
+    FileFixture(BSP_CF_CONFIGURATION_FIXTURE, "src/Configuration.xml"),
+    FileFixture("bsp/meta/Languages/Русский.xml", "src/Languages/Русский.xml"),
+)
+
+
 @dataclasses.dataclass(frozen=True)
 class ParityScenario:
     name: str
@@ -861,7 +875,8 @@ SUCCESS_SCENARIOS = [
                 arguments={"JsonPath": "fixtures/meta-catalog.json", "OutputDir": "src"},
             ),
         ),
-        fixtures=(FileFixture("meta-catalog.json", "fixtures/meta-catalog.json"),),
+        fixtures=META_VALIDATE_COMPILED_OWNER_FIXTURES
+        + (FileFixture("meta-catalog.json", "fixtures/meta-catalog.json"),),
         expect_ok=True,
         compare_files=True,
     ),
@@ -871,7 +886,7 @@ SUCCESS_SCENARIOS = [
         skill="meta-validate",
         script="meta-validate.py",
         arguments={
-            "ObjectPath": "src/CommonModules/LanguageAware.xml",
+            "ObjectPath": "src/Enums/LanguageAware.xml",
             "Detailed": True,
         },
         fixtures=(
@@ -888,8 +903,8 @@ SUCCESS_SCENARIOS = [
                 "src/Languages/English.xml",
             ),
             FileFixture(
-                "meta-validate-language-aware/CommonModules/LanguageAware.xml",
-                "src/CommonModules/LanguageAware.xml",
+                "meta-validate-language-aware/Enums/LanguageAware.xml",
+                "src/Enums/LanguageAware.xml",
             ),
         ),
         expect_ok=True,
@@ -938,7 +953,8 @@ SUCCESS_SCENARIOS = [
             "Detailed": True,
             "MaxErrors": 80,
         },
-        fixtures=(FileFixture(BSP_META_CATALOG_FIXTURE, "src/Catalogs/Валюты.xml"),),
+        fixtures=BSP_META_VALIDATE_OWNER_FIXTURES
+        + (FileFixture(BSP_META_CATALOG_FIXTURE, "src/Catalogs/Валюты.xml"),),
         expect_ok=True,
     ),
     ParityScenario(
@@ -969,7 +985,8 @@ SUCCESS_SCENARIOS = [
             "Detailed": True,
             "MaxErrors": 80,
         },
-        fixtures=(
+        fixtures=BSP_META_VALIDATE_OWNER_FIXTURES
+        + (
             FileFixture(
                 BSP_META_DOCUMENT_FIXTURE,
                 "src/Documents/АктОбУничтоженииПерсональныхДанных.xml",
@@ -1000,7 +1017,8 @@ SUCCESS_SCENARIOS = [
             "Detailed": True,
             "MaxErrors": 80,
         },
-        fixtures=(FileFixture(BSP_META_REPORT_FIXTURE, "src/Reports/АнализВерсийОбъектов.xml"),),
+        fixtures=BSP_META_VALIDATE_OWNER_FIXTURES
+        + (FileFixture(BSP_META_REPORT_FIXTURE, "src/Reports/АнализВерсийОбъектов.xml"),),
         expect_ok=True,
     ),
     ParityScenario(
@@ -1032,7 +1050,8 @@ SUCCESS_SCENARIOS = [
             "Detailed": True,
             "MaxErrors": 80,
         },
-        fixtures=(
+        fixtures=BSP_META_VALIDATE_OWNER_FIXTURES
+        + (
             FileFixture(BSP_META_COMMON_MODULE_FIXTURE, "src/CommonModules/GoogleПереводчик.xml"),
             FileFixture(
                 BSP_META_COMMON_MODULE_BSL_FIXTURE,
@@ -1064,7 +1083,8 @@ SUCCESS_SCENARIOS = [
             "Detailed": True,
             "MaxErrors": 80,
         },
-        fixtures=(FileFixture(BSP_META_ENUM_FIXTURE, "src/Enums/ВажностьПроблемыУчета.xml"),),
+        fixtures=BSP_META_VALIDATE_OWNER_FIXTURES
+        + (FileFixture(BSP_META_ENUM_FIXTURE, "src/Enums/ВажностьПроблемыУчета.xml"),),
         expect_ok=True,
     ),
     ParityScenario(
@@ -1095,7 +1115,8 @@ SUCCESS_SCENARIOS = [
             "Detailed": True,
             "MaxErrors": 80,
         },
-        fixtures=(
+        fixtures=BSP_META_VALIDATE_OWNER_FIXTURES
+        + (
             FileFixture(
                 BSP_META_INFORMATION_REGISTER_FIXTURE,
                 "src/InformationRegisters/АдминистративнаяИерархия.xml",
@@ -3615,6 +3636,48 @@ SUCCESS_SCENARIOS = [
 
 
 VALIDATION_FAILURE_SCENARIOS = [
+    ParityScenario(
+        name="meta-validate-missing-owner",
+        tool="unica.meta.validate",
+        skill="meta-validate",
+        script="meta-validate.py",
+        arguments={
+            "ObjectPath": "src/Enums/LanguageAware.xml",
+            "Detailed": True,
+        },
+        expect_ok=False,
+        fixtures=(
+            FileFixture(
+                "meta-validate-language-aware/Enums/LanguageAware.xml",
+                "src/Enums/LanguageAware.xml",
+            ),
+        ),
+    ),
+    ParityScenario(
+        name="meta-validate-missing-registered-language",
+        tool="unica.meta.validate",
+        skill="meta-validate",
+        script="meta-validate.py",
+        arguments={
+            "ObjectPath": "src/Enums/LanguageAware.xml",
+            "Detailed": True,
+        },
+        expect_ok=False,
+        fixtures=(
+            FileFixture(
+                "meta-validate-language-aware/Configuration.xml",
+                "src/Configuration.xml",
+            ),
+            FileFixture(
+                "meta-validate-language-aware/Languages/Русский.xml",
+                "src/Languages/Русский.xml",
+            ),
+            FileFixture(
+                "meta-validate-language-aware/Enums/LanguageAware.xml",
+                "src/Enums/LanguageAware.xml",
+            ),
+        ),
+    ),
     ParityScenario(
         name="form-validate-bare-type-is-error",
         tool="unica.form.validate",

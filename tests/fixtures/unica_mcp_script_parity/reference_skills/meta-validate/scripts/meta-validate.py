@@ -93,18 +93,7 @@ if not os.path.exists(object_path):
 
 resolved_path = os.path.abspath(object_path)
 
-# ── detect config directory (for cross-object checks) ────────
-
 config_dir = None
-probe = os.path.dirname(resolved_path)
-while probe:
-    if os.path.exists(os.path.join(probe, "Configuration.xml")):
-        config_dir = probe
-        break
-    parent = os.path.dirname(probe)
-    if parent == probe:
-        break
-    probe = parent
 
 # ── output infrastructure ────────────────────────────────────
 
@@ -196,9 +185,16 @@ valid_types = (
     "InformationRegister", "AccumulationRegister", "AccountingRegister", "CalculationRegister",
     "ChartOfAccounts", "ChartOfCharacteristicTypes", "ChartOfCalculationTypes",
     "BusinessProcess", "Task", "ExchangePlan", "DocumentJournal",
-    "Report", "DataProcessor",
+    "Report", "DataProcessor", "ExternalReport", "ExternalDataProcessor",
     "CommonModule", "ScheduledJob", "EventSubscription",
     "HTTPService", "WebService", "DefinedType",
+)
+
+LIST_PRESENTATION_TYPES = (
+    "ExchangePlan", "Catalog", "Document", "DocumentJournal", "Enum",
+    "ChartOfCharacteristicTypes", "ChartOfAccounts", "ChartOfCalculationTypes",
+    "InformationRegister", "AccumulationRegister", "AccountingRegister",
+    "CalculationRegister", "BusinessProcess", "Task",
 )
 
 # GeneratedType categories by type
@@ -379,48 +375,146 @@ def localized_values(node):
     return values
 
 
-def configuration_language_codes(directory):
-    if not directory:
-        return []
-    try:
-        configuration_tree = etree.parse(
-            os.path.join(directory, "Configuration.xml"),
-            etree.XMLParser(remove_blank_text=False),
-        )
-        configuration = find(configuration_tree.getroot(), "md:Configuration")
-        child_objects = find(configuration, "md:ChildObjects") if configuration is not None else None
-        language_names = (
-            [inner_text(node) for node in find_all(child_objects, "md:Language")]
-            if child_objects is not None
-            else []
-        )
-    except Exception:
-        return []
+def find_configuration_owner(path):
+    workspace_root = os.path.abspath(os.getcwd())
+    directory = os.path.dirname(path)
+    while True:
+        try:
+            inside_workspace = os.path.commonpath((workspace_root, directory)) == workspace_root
+        except ValueError:
+            inside_workspace = False
+        if not inside_workspace:
+            break
+        candidate = os.path.join(directory, "Configuration.xml")
+        if os.path.isfile(candidate):
+            return candidate
+        if directory == workspace_root:
+            break
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    return None
 
+
+def required_configuration_descriptor(path):
+    try:
+        configuration_tree = etree.parse(path, etree.XMLParser(remove_blank_text=False))
+    except OSError as error:
+        raise ValueError(f"failed to read {path}: {error}") from error
+    except etree.XMLSyntaxError as error:
+        raise ValueError(f"failed to parse {path}: {error}") from error
+
+    configuration_root = configuration_tree.getroot()
+    if (
+        etree.QName(configuration_root.tag).namespace != MD_NS
+        or local_name(configuration_root) != "MetaDataObject"
+    ):
+        raise ValueError(f"{path} is not an MDClasses MetaDataObject")
+    descriptors = [
+        child
+        for child in configuration_root
+        if isinstance(child.tag, str) and etree.QName(child.tag).namespace == MD_NS
+    ]
+    if len(descriptors) != 1:
+        raise ValueError(f"{path} must contain exactly one Configuration descriptor")
+    configuration = descriptors[0]
+    if local_name(configuration) != "Configuration":
+        raise ValueError(f"{path} does not contain Configuration")
+    return configuration
+
+
+def configuration_registrations(configuration):
+    child_objects = find(configuration, "md:ChildObjects")
+    if child_objects is None:
+        return [], []
+    registrations = []
+    language_names = []
+    for child in child_objects:
+        if not isinstance(child.tag, str) or etree.QName(child.tag).namespace != MD_NS:
+            continue
+        object_type = local_name(child)
+        object_name = inner_text(child).strip()
+        if not object_name:
+            continue
+        if object_type == "Language":
+            language_names.append(object_name)
+        else:
+            registrations.append((object_type, object_name))
+    return registrations, language_names
+
+
+def required_configuration_language_codes(directory, language_names):
     codes = []
     seen = set()
     for language_name in language_names:
-        language_name = language_name.strip()
-        if not language_name:
-            continue
+        language_path = os.path.join(directory, "Languages", f"{language_name}.xml")
+        if not os.path.isfile(language_path):
+            raise ValueError(f"registered language file not found: {language_path}")
         try:
             language_tree = etree.parse(
-                os.path.join(directory, "Languages", f"{language_name}.xml"),
+                language_path,
                 etree.XMLParser(remove_blank_text=False),
             )
-            language = find(language_tree.getroot(), "md:Language")
-            properties = find(language, "md:Properties") if language is not None else None
-            language_code = (
-                inner_text(find(properties, "md:LanguageCode")).strip()
-                if properties is not None
-                else ""
+        except OSError as error:
+            raise ValueError(f"failed to read {language_path}: {error}") from error
+        except etree.XMLSyntaxError as error:
+            raise ValueError(f"failed to parse {language_path}: {error}") from error
+
+        language_root = language_tree.getroot()
+        descriptors = [
+            child
+            for child in language_root
+            if isinstance(child.tag, str) and etree.QName(child.tag).namespace == MD_NS
+        ]
+        if (
+            etree.QName(language_root.tag).namespace != MD_NS
+            or local_name(language_root) != "MetaDataObject"
+            or len(descriptors) != 1
+            or local_name(descriptors[0]) != "Language"
+        ):
+            raise ValueError(
+                f"registered language descriptor is not Language: {language_path}"
             )
-        except Exception:
-            continue
-        if language_code and language_code not in seen:
+        properties = find(descriptors[0], "md:Properties")
+        language_code = (
+            inner_text(find(properties, "md:LanguageCode")).strip()
+            if properties is not None
+            else ""
+        )
+        if not language_code:
+            raise ValueError(f"empty LanguageCode in {language_path}")
+        if language_code not in seen:
             seen.add(language_code)
             codes.append(language_code)
     return codes
+
+
+def resolve_owner_context(path, object_type, object_name):
+    if object_type in ("ExternalReport", "ExternalDataProcessor"):
+        return path, []
+
+    owner_path = find_configuration_owner(path)
+    if owner_path is None:
+        raise ValueError(
+            f"Configuration.xml owner not found for {object_type}.{object_name}"
+        )
+    configuration = required_configuration_descriptor(owner_path)
+    registrations, language_names = configuration_registrations(configuration)
+    if (object_type, object_name) not in registrations:
+        raise ValueError(
+            f"{object_type}.{object_name} is not registered in {owner_path}"
+        )
+
+    language_codes = []
+    if object_type in LIST_PRESENTATION_TYPES:
+        language_codes = required_configuration_language_codes(
+            os.path.dirname(owner_path),
+            language_names,
+        )
+        if not language_codes:
+            raise ValueError(f"{owner_path} has no registered language profile")
+    return owner_path, language_codes
 
 
 def warn_long_command_text(source, text, language=None):
@@ -511,6 +605,20 @@ obj_name = inner_text(name_node) if name_node is not None and inner_text(name_no
 
 # Now emit header — insert at beginning
 output_lines.insert(0, f"=== Validation: {md_type}.{obj_name} ===")
+
+try:
+    owner_path, language_codes = resolve_owner_context(
+        resolved_path,
+        md_type,
+        obj_name,
+    )
+except ValueError as error:
+    report_error(f"1. Owner context: {error}")
+    finalize()
+    sys.exit(1)
+
+if md_type not in ("ExternalReport", "ExternalDataProcessor"):
+    config_dir = os.path.dirname(owner_path)
 
 if check1_ok:
     report_ok(f"1. Root structure: MetaDataObject/{md_type}, version {version}")
@@ -614,21 +722,7 @@ else:
     list_presentation_values = localized_values(list_presentation_node)
     syn_present = bool(synonym_values)
 
-    language_codes = configuration_language_codes(config_dir)
-    if not language_codes:
-        seen_languages = set()
-        for language_node in find_all(props_node, ".//v8:lang"):
-            language = inner_text(language_node).strip()
-            if language and language not in seen_languages:
-                seen_languages.add(language)
-                language_codes.append(language)
-
-    if not language_codes:
-        for _, text in list_presentation_values:
-            warn_long_command_text("ListPresentation", text)
-        for _, text in synonym_values:
-            warn_long_command_text("Synonym", text)
-    else:
+    if md_type in LIST_PRESENTATION_TYPES:
         for language_code in language_codes:
             list_values = [
                 text
