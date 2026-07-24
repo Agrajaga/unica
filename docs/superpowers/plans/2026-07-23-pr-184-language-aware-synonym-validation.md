@@ -1830,10 +1830,17 @@ Create the meta-compile owner fixture as an exact copy of
 known-valid `2.17` owner and already registers `Language.Русский`; the existing
 meta-compile setup adds `Catalog.ParityCatalog` to its `ChildObjects`.
 
-Create both new Russian language descriptors with this shape, using
-`version="2.17"` and UUID `77777777-7777-4777-8777-777777777777` for the
-meta-compile owner, and `version="2.21"` plus UUID
-`88888888-8888-4888-8888-888888888888` for BSP:
+Create the new Russian language descriptor for the meta-compile owner with
+`version="2.17"` and UUID `77777777-7777-4777-8777-777777777777`, using the
+shape below.
+
+Do not synthesize the BSP language descriptor. Harvest
+`src/cf/Languages/Русский.xml` from the pinned BSP baseline. Its source format
+is `2.21` and its UUID is `db4a9ccb-9ef5-4b3c-8577-b6fe5db1b62e`; the
+`bsp-2.21-to-2.20-v1` recipe projects the committed
+`bsp/meta/Languages/Русский.xml` root to format `2.20` while preserving that
+UUID and the remaining payload. Keep `derivation.exportFormat` in
+`bsp/manifest.json` at `2.20`.
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1931,7 +1938,7 @@ The rewritten key sections are:
     <Synonym>
       <v8:item>
         <v8:lang>ru</v8:lang>
-        <v8:content>Языковое перечисление</v8:content>
+        <v8:content>Очень длинное наименование перечисления для интерфейса команд</v8:content>
       </v8:item>
       <v8:item>
         <v8:lang>en</v8:lang>

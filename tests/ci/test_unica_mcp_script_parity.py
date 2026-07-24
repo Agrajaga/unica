@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -4333,6 +4334,30 @@ class UnicaMcpScriptParityTests(unittest.TestCase):
         manifest_sources = {f"bsp/{entry['target']}" for entry in manifest["files"]}
         used_sources = {fixture.source for scenario in SCENARIOS for fixture in scenario.fixtures}
         self.assertEqual(manifest_sources - used_sources, set())
+
+    def test_language_aware_fixture_proves_list_presentation_precedence(self) -> None:
+        fixture = (
+            FIXTURES_ROOT
+            / "meta-validate-language-aware"
+            / "Enums"
+            / "LanguageAware.xml"
+        )
+        root = ET.parse(fixture).getroot()
+        namespaces = {
+            "md": "http://v8.1c.ru/8.3/MDClasses",
+            "v8": "http://v8.1c.ru/8.1/data/core",
+        }
+
+        def russian_text(property_name: str) -> str:
+            item = root.find(
+                f".//md:{property_name}/v8:item[v8:lang='ru']/v8:content",
+                namespaces,
+            )
+            self.assertIsNotNone(item, f"missing Russian {property_name}")
+            return item.text or ""
+
+        self.assertGreater(len(russian_text("Synonym")), 38)
+        self.assertLessEqual(len(russian_text("ListPresentation")), 38)
 
     def test_bsp_fixture_parity_covers_real_world_read_and_edit_tools(self) -> None:
         for tool in sorted(BSP_PARITY_REQUIRED_TOOLS):
