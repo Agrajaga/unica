@@ -1756,16 +1756,16 @@ fn prepare_target(case: &ExecutableCase, workspace: &Path) -> Result<Map<String,
             workspace,
             "mxl",
             &json!({
-                "columns": 4,
+                "columns": 5,
                 "defaultWidth": 10,
-                "columnWidths": {"2": 20},
+                "columnWidths": {"3": 20},
                 "styles": {"right": {"align": "right"}},
                 "areas": [{
                     "name": "A",
                     "rows": [{"cells": [
-                        {"col": 1, "text": "left"},
-                        {"col": 2, "text": "right", "style": "right"},
-                        {"col": 4, "text": "gap"}
+                        {"col": 1, "span": 2, "text": "spanned"},
+                        {"col": 3, "text": "adjacent", "style": "right"},
+                        {"col": 5, "text": "after gap"}
                     ]}]
                 }]
             }),

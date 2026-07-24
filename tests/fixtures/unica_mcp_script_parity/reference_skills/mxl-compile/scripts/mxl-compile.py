@@ -416,6 +416,7 @@ def main():
 
                     cell_info = {
                         'Col': col_start - 1,  # 0-based
+                        'ColSpan': col_span,
                         'FormatIdx': fmt_idx,
                         'Param': cell.get('param'),
                         'Detail': cell.get('detail'),
@@ -447,6 +448,7 @@ def main():
                         if c not in occupied_cols:
                             row_cells.append({
                                 'Col': c - 1,
+                                'ColSpan': 1,
                                 'FormatIdx': gap_fmt_idx,
                                 'Param': None,
                                 'Detail': None,
@@ -466,6 +468,7 @@ def main():
                         continue
                     row_cells.append({
                         'Col': c - 1,
+                        'ColSpan': 1,
                         'FormatIdx': gap_fmt_idx,
                         'Param': None,
                         'Detail': None,
@@ -515,7 +518,7 @@ def main():
 
                     lines.append('\t\t\t\t</c>')
                     lines.append('\t\t\t</c>')
-                    expected_col = cell_info['Col'] + 1
+                    expected_col = cell_info['Col'] + cell_info['ColSpan']
 
             lines.append('\t\t</row>')
             lines.append('\t</rowsItem>')

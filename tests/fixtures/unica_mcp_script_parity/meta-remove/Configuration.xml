@@ -50,6 +50,7 @@
 			<Language>Русский</Language>
 			<Subsystem>Sales</Subsystem>
 			<Catalog>ParityCatalog</Catalog>
+			<Catalog>KeepCatalog</Catalog>
 		</ChildObjects>
 	</Configuration>
 </MetaDataObject>

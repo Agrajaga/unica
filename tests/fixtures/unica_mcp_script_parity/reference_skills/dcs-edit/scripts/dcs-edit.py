@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import uuid
+from pathlib import Path
 
 from lxml import etree
 
@@ -19,12 +20,12 @@ dirty = False
 
 
 def run_post_validation(path):
-    validator = (
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        + "/dcs-validate/scripts/dcs-validate.py"
-    )
+    validator = Path(__file__).resolve().parents[2] / "dcs-validate/scripts/dcs-validate.py"
+    if not validator.is_file():
+        print(f"DCS validator not found: {validator}", file=sys.stderr)
+        sys.exit(1)
     result = subprocess.run(
-        [sys.executable, validator, "-TemplatePath", path],
+        [sys.executable, str(validator), "-TemplatePath", path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

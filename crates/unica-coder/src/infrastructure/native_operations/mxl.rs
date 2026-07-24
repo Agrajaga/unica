@@ -2679,6 +2679,7 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
 
                                 row_cells.push(MxlCellInfo {
                                     col: col_start - 1,
+                                    col_span,
                                     format_idx: fmt_idx,
                                     param: json_string_field(cell, "param"),
                                     detail: json_string_field(cell, "detail"),
@@ -2718,6 +2719,7 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
                                     if !occupied_cols.contains_key(&column) {
                                         row_cells.push(MxlCellInfo {
                                             col: column - 1,
+                                            col_span: 1,
                                             format_idx: gap_fmt_idx,
                                             param: None,
                                             detail: None,
@@ -2744,6 +2746,7 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
                             if !rowspan_occupied.contains_key(&column) {
                                 row_cells.push(MxlCellInfo {
                                     col: column - 1,
+                                    col_span: 1,
                                     format_idx: gap_fmt_idx,
                                     param: None,
                                     detail: None,
@@ -2766,7 +2769,7 @@ pub(crate) fn compile_mxl(args: &Map<String, Value>, context: &WorkspaceContext)
                         let mut expected_col = 0;
                         for cell in &row_cells {
                             emit_mxl_cell(&mut lines, cell, expected_col);
-                            expected_col = cell.col + 1;
+                            expected_col = cell.col + cell.col_span;
                         }
                     }
                     lines.push("\t\t</row>".to_string());
@@ -3101,6 +3104,7 @@ pub(crate) fn mxl_resolve_style(
 
 pub(crate) struct MxlCellInfo {
     pub(crate) col: i64,
+    pub(crate) col_span: i64,
     pub(crate) format_idx: usize,
     pub(crate) param: Option<String>,
     pub(crate) detail: Option<String>,
@@ -4004,6 +4008,42 @@ mod tests {
         assert_eq!(direct_child_names(cells[1]), ["c"]);
         assert_eq!(direct_child_names(cells[2]), ["i", "c"]);
         assert_eq!(direct_child_text(cells[2], "i"), "3");
+    }
+
+    #[test]
+    fn mxl_compile_advances_implicit_cell_index_by_column_span() {
+        let xml = compile_test_mxl(
+            "compile-platform-spanned-cell-indices",
+            &json!({
+                "columns": 5,
+                "areas": [{
+                    "name": "A",
+                    "rows": [{
+                        "cells": [
+                            {"col": 1, "span": 2, "text": "spanned"},
+                            {"col": 3, "text": "adjacent"},
+                            {"col": 5, "text": "after gap"}
+                        ]
+                    }]
+                }]
+            }),
+        );
+        let document = Document::parse(&xml).unwrap();
+        let row = document
+            .root_element()
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "row")
+            .unwrap();
+        let cells = row
+            .children()
+            .filter(|node| node.is_element() && node.tag_name().name() == "c")
+            .collect::<Vec<_>>();
+
+        assert_eq!(cells.len(), 3);
+        assert_eq!(direct_child_names(cells[0]), ["c"]);
+        assert_eq!(direct_child_names(cells[1]), ["c"]);
+        assert_eq!(direct_child_names(cells[2]), ["i", "c"]);
+        assert_eq!(direct_child_text(cells[2], "i"), "4");
     }
 
     #[test]

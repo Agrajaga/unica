@@ -86,9 +86,7 @@ change set:
   platform-install bytes and topology (4337 files and 96 directories);
 - every public XML-writing route is covered by the native profile guard and
   corpus inventory, or uses the separately verified synchronous staged full
-  dump boundary; and
-- the implementation and documentation review completed without unresolved
-  findings.
+  dump boundary.
 
 This baseline is the prerequisite writer/profile phase of issue #126. The
 optional capability-driven XDTO/XSD service proposed by the issue is a later

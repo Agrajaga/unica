@@ -4597,42 +4597,6 @@ impl FormEditPlannedEvent {
     }
 }
 
-pub(crate) fn form_edit_resolve_definition(
-    args: &Map<String, Value>,
-    context: &WorkspaceContext,
-) -> Result<Value, String> {
-    let inline = args.get("definition");
-    let json_path_raw = path_arg(args, &["jsonPath", "JsonPath"]);
-    match (inline, json_path_raw) {
-        (Some(_), Some(_)) => {
-            Err("unica.form.edit accepts exactly one of JsonPath or inline definition".to_string())
-        }
-        (Some(definition), None) => {
-            if !definition.is_object() {
-                return Err("unica.form.edit argument `definition` must be object".to_string());
-            }
-            Ok(definition.clone())
-        }
-        (None, Some(json_path_raw)) => {
-            let json_path = absolutize(json_path_raw.clone(), &context.cwd);
-            if !json_path.exists() {
-                return Err(format!("File not found: {}", json_path_raw.display()));
-            }
-            let json_text = fs::read_to_string(&json_path)
-                .map_err(|err| format!("failed to read {}: {err}", json_path.display()))?;
-            let definition: Value = serde_json::from_str(json_text.trim_start_matches('\u{feff}'))
-                .map_err(|err| format!("failed to parse form edit JSON: {err}"))?;
-            if !definition.is_object() {
-                return Err("form edit JSON root must be an object".to_string());
-            }
-            Ok(definition)
-        }
-        (None, None) => {
-            Err("unica.form.edit requires exactly one of JsonPath or definition".to_string())
-        }
-    }
-}
-
 fn form_edit_resolve_definition_guarded(
     args: &Map<String, Value>,
     context: &WorkspaceContext,

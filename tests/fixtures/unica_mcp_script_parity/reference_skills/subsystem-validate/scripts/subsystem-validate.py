@@ -74,10 +74,11 @@ class Reporter:
 
 def report_format_compatibility(reporter, raw_version):
     actual = raw_version or '1.0'
+    if re.fullmatch(r'\d+(?:\.\d+)*', actual) is None:
+        reporter.error(f"invalid export format version {actual!r}")
+        return
     try:
         components = tuple(int(part) for part in actual.split('.'))
-        if not components or any(part == '' for part in actual.split('.')):
-            raise ValueError
     except ValueError:
         reporter.error(f"invalid export format version {actual!r}")
         return
@@ -85,7 +86,10 @@ def report_format_compatibility(reporter, raw_version):
     components += (0,) * max(0, len(target) - len(components))
     target_cmp = target + (0,) * max(0, len(components) - len(target))
     if components == target_cmp:
-        reporter.ok('Export format: 2.20')
+        if actual == '2.20':
+            reporter.ok('Export format: 2.20')
+        else:
+            reporter.error(f"invalid export format version {actual!r}")
     elif components < target_cmp:
         reporter.warn(
             f'Export format {actual} is older than supported 2.20. '
@@ -227,7 +231,7 @@ def main():
         r.lines.insert(0, header_line)
 
         if sub_name and IDENT_PATTERN.match(sub_name):
-            r.ok(f'3. Name: "{sub_name}" - valid Unicode XML NCName')
+            r.ok(f'3. Name: "{sub_name}" - valid metadata identifier')
         elif not sub_name:
             r.error('3. Name: empty')
         else:

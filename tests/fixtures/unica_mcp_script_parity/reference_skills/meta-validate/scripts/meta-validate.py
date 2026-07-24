@@ -141,10 +141,11 @@ def report_warn(msg):
 
 def report_format_compatibility(raw_version):
     actual = raw_version or "1.0"
+    if re.fullmatch(r"\d+(?:\.\d+)*", actual) is None:
+        report_error(f"invalid export format version {actual!r}")
+        return
     try:
         components = tuple(int(part) for part in actual.split("."))
-        if not components or any(part == "" for part in actual.split(".")):
-            raise ValueError
     except ValueError:
         report_error(f"invalid export format version {actual!r}")
         return
@@ -152,7 +153,10 @@ def report_format_compatibility(raw_version):
     components += (0,) * max(0, len(target) - len(components))
     target_cmp = target + (0,) * max(0, len(components) - len(target))
     if components == target_cmp:
-        report_ok("Export format: 2.20")
+        if actual == "2.20":
+            report_ok("Export format: 2.20")
+        else:
+            report_error(f"invalid export format version {actual!r}")
     elif components < target_cmp:
         report_warn(
             f"Export format {actual} is older than supported 2.20. "

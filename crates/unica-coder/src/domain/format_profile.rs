@@ -12,7 +12,7 @@ pub const ACTIVE_FORMAT_PROFILE: FormatProfile = FormatProfile {
     export_format: "2.20",
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ExportFormatVersion {
     components: Vec<u32>,
 }
@@ -36,6 +36,14 @@ impl ExportFormatVersion {
         Ok(Self { components })
     }
 }
+
+impl PartialEq for ExportFormatVersion {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for ExportFormatVersion {}
 
 impl Ord for ExportFormatVersion {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -136,7 +144,9 @@ pub fn classify_root_version(raw: Option<&str>) -> Result<FormatCompatibility, F
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_root_version, FormatCompatibility, ACTIVE_FORMAT_PROFILE};
+    use super::{
+        classify_root_version, ExportFormatVersion, FormatCompatibility, ACTIVE_FORMAT_PROFILE,
+    };
 
     #[test]
     fn active_profile_is_platform_8_3_27_format_2_20() {
@@ -175,6 +185,17 @@ mod tests {
                 .expect_err("only the exact raw literal 2.20 is supported");
             assert_eq!(error.code(), "formatVersionInvalid", "{raw}");
         }
+    }
+
+    #[test]
+    fn equality_and_ordering_use_the_same_numeric_components() {
+        let short = ExportFormatVersion::parse("2.20").unwrap();
+        let trailing_zero = ExportFormatVersion::parse("2.20.0").unwrap();
+
+        assert_eq!(short.cmp(&trailing_zero), std::cmp::Ordering::Equal);
+        assert_eq!(short, trailing_zero);
+        assert_eq!(short.to_string(), "2.20");
+        assert_eq!(trailing_zero.to_string(), "2.20.0");
     }
 
     #[test]

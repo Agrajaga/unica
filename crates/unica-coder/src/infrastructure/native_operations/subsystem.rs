@@ -1049,7 +1049,7 @@ pub(crate) fn validate_subsystem(
 
         match validate_subsystem_metadata_name("Name", &sub_name) {
             Ok(()) => report.ok(format!(
-                "3. Name: \"{sub_name}\" - valid Unicode XML NCName"
+                "3. Name: \"{sub_name}\" - valid metadata identifier"
             )),
             Err(error) => report.error(format!("3. Name: {error}")),
         }
