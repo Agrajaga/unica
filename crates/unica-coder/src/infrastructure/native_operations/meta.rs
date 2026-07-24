@@ -17,6 +17,9 @@ use super::common::*;
 use super::compile_transaction::{
     CompileTransaction, DirectoryTopologyEntry, DirectoryTopologyEntryKind, RegistrationStatus,
 };
+use super::meta_validation_context::{
+    inspect_meta_validation_reads, meta_validate_registrar_document_scan, MetaValidationOwnerKind,
+};
 use super::{
     cf::*, cfe::*, dcs::*, form::*, interface::*, mxl::*, role::*, subsystem::*, template::*,
 };
@@ -1973,9 +1976,9 @@ mod edit_tests {
         with_commit_failpoint, CommitFailpoint,
     };
     use crate::infrastructure::native_operations::single_file_publisher::with_before_commit_hook;
-    use serde_json::{json, Map};
+    use serde_json::{json, Map, Value};
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_context(name: &str) -> WorkspaceContext {
@@ -1998,6 +2001,48 @@ mod edit_tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, content).unwrap();
+    }
+
+    fn canonical_path(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap()
+    }
+
+    const TEST_MD_NS: &str = "http://v8.1c.ru/8.3/MDClasses";
+
+    fn write_owner(
+        source_dir: &Path,
+        object_type: &str,
+        object_name: &str,
+        languages: &[&str],
+    ) -> PathBuf {
+        fs::create_dir_all(source_dir.join("Languages")).unwrap();
+        let language_nodes = languages
+            .iter()
+            .map(|name| format!("<Language>{name}</Language>"))
+            .collect::<String>();
+        let configuration = format!(
+            r#"<MetaDataObject xmlns="{TEST_MD_NS}" version="2.20">
+<Configuration uuid="11111111-1111-4111-8111-111111111111">
+<Properties><Name>Owner</Name></Properties>
+<ChildObjects>{language_nodes}<{object_type}>{object_name}</{object_type}></ChildObjects>
+</Configuration></MetaDataObject>"#
+        );
+        fs::write(source_dir.join("Configuration.xml"), configuration).unwrap();
+        source_dir.to_path_buf()
+    }
+
+    fn meta_validate_args(path: &Path) -> Map<String, Value> {
+        Map::from_iter([
+            (
+                "ObjectPath".to_string(),
+                Value::String(path.display().to_string()),
+            ),
+            ("Detailed".to_string(), Value::Bool(true)),
+        ])
+    }
+
+    fn sample_meta_named(object_type: &str, object_name: &str) -> String {
+        sample_meta_object_xml(object_type, object_name, "", "\t\t<ChildObjects/>")
     }
 
     fn sample_document_xml(register_records: &str) -> String {
@@ -4182,9 +4227,14 @@ mod edit_tests {
     fn write_language_fixture(context: &WorkspaceContext, name: &str, code: &str) {
         write_file(
             &context.cwd.join("Languages").join(format!("{name}.xml")),
-            &format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
-<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+            &sample_language_named(name, code),
+        );
+    }
+
+    fn sample_language_named(name: &str, code: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
   <Language uuid="22222222-2222-4222-8222-222222222222">
     <Properties>
       <Name>{name}</Name>
@@ -4195,8 +4245,7 @@ mod edit_tests {
   </Language>
 </MetaDataObject>
 "#
-            ),
-        );
+        )
     }
 
     fn validate_stdout_with_presentations(
@@ -4255,6 +4304,263 @@ mod edit_tests {
     fn validate_meta_allows_self_closing_synonym() {
         let stdout = validate_stdout_with_synonym("validate-empty-synonym", "<Synonym/>");
         assert!(!stdout.contains("Synonym is empty"), "{stdout}");
+    }
+
+    #[test]
+    fn validate_meta_rejects_non_external_object_without_owner() {
+        let context = temp_context("missing-owner");
+        let object = context.cwd.join("Enums/Detached.xml");
+        write_file(&object, &sample_meta_named("Enum", "Detached"));
+
+        let outcome = validate_meta(&meta_validate_args(&object), &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome.errors.join("\n").contains("Configuration.xml"),
+            "{outcome:?}"
+        );
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn validate_meta_rejects_object_missing_from_owner_registration() {
+        let context = temp_context("missing-registration");
+        let src = write_owner(&context.cwd.join("src"), "Enum", "Other", &["Русский"]);
+        let object = src.join("Enums/Detached.xml");
+        write_file(&object, &sample_meta_named("Enum", "Detached"));
+
+        let outcome = validate_meta(&meta_validate_args(&object), &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome.errors.join("\n").contains("not registered"),
+            "{outcome:?}"
+        );
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn validate_meta_external_descriptor_ignores_neighbor_configuration() {
+        let context = temp_context("external-owner");
+        write_file(
+            &context.cwd.join("Configuration.xml"),
+            r#"<broken-neighbor version="2.21">"#,
+        );
+        let object = context.cwd.join("tools/Standalone.xml");
+        write_file(
+            &object,
+            &sample_meta_named("ExternalDataProcessor", "Standalone"),
+        );
+
+        let inspection = inspect_meta_validation_reads(&object, &context);
+        let owner = inspection.context.expect("external descriptor owns itself");
+
+        assert_eq!(owner.owner_kind, MetaValidationOwnerKind::External);
+        assert_eq!(inspection.paths, vec![canonical_path(&object)]);
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn meta_validation_context_classifies_registered_extension_owner() {
+        let context = temp_context("extension-owner");
+        write_file(
+            &context.cwd.join("v8project.yaml"),
+            "format: DESIGNER\nsource-set:\n  - name: extension\n    type: EXTENSION\n    path: extension\n",
+        );
+        let source_dir = write_owner(
+            &context.cwd.join("extension"),
+            "CommonModule",
+            "ExtensionModule",
+            &[],
+        );
+        let object = source_dir.join("CommonModules/ExtensionModule.xml");
+        write_file(
+            &object,
+            &sample_meta_named("CommonModule", "ExtensionModule"),
+        );
+
+        let inspection = inspect_meta_validation_reads(&object, &context);
+        let owner = inspection.context.expect("registered extension owner");
+
+        assert_eq!(owner.owner_kind, MetaValidationOwnerKind::Extension);
+        assert_eq!(
+            inspection.paths,
+            vec![
+                canonical_path(&object),
+                canonical_path(&source_dir.join("Configuration.xml"))
+            ]
+        );
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn validate_meta_rejects_list_type_without_registered_languages() {
+        let context = temp_context("missing-language-profile");
+        let src = write_owner(&context.cwd.join("src"), "Enum", "Statuses", &[]);
+        let object = src.join("Enums/Statuses.xml");
+        write_file(&object, &sample_meta_named("Enum", "Statuses"));
+
+        let outcome = validate_meta(&meta_validate_args(&object), &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .join("\n")
+                .contains("has no registered language profile"),
+            "{outcome:?}"
+        );
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn meta_validation_reads_missing_registered_language_before_reporting_error() {
+        let context = temp_context("missing-language-file");
+        let src = write_owner(&context.cwd.join("src"), "Enum", "Statuses", &["Russian"]);
+        let object = src.join("Enums/Statuses.xml");
+        write_file(&object, &sample_meta_named("Enum", "Statuses"));
+
+        let inspection = inspect_meta_validation_reads(&object, &context);
+
+        assert_eq!(
+            inspection.paths,
+            vec![
+                canonical_path(&object),
+                canonical_path(&src.join("Configuration.xml")),
+                canonical_path(&src).join("Languages/Russian.xml")
+            ]
+        );
+        assert!(inspection
+            .context
+            .expect_err("missing registered language must fail")
+            .contains(
+                &canonical_path(&src)
+                    .join("Languages/Russian.xml")
+                    .display()
+                    .to_string()
+            ));
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn validate_meta_rejects_malformed_registered_language() {
+        let context = temp_context("malformed-language");
+        let src = write_owner(&context.cwd.join("src"), "Enum", "Statuses", &["Russian"]);
+        let object = src.join("Enums/Statuses.xml");
+        let language = src.join("Languages/Russian.xml");
+        write_file(&object, &sample_meta_named("Enum", "Statuses"));
+        write_file(&language, "<broken-language");
+
+        let outcome = validate_meta(&meta_validate_args(&object), &context);
+        let errors = outcome.errors.join("\n");
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(errors.contains("failed to parse"), "{outcome:?}");
+        assert!(
+            errors.contains(&canonical_path(&language).display().to_string()),
+            "{outcome:?}"
+        );
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn validate_meta_rejects_empty_registered_language_code() {
+        let context = temp_context("empty-language-code");
+        let src = write_owner(&context.cwd.join("src"), "Enum", "Statuses", &["Russian"]);
+        let object = src.join("Enums/Statuses.xml");
+        let language = src.join("Languages/Russian.xml");
+        write_file(&object, &sample_meta_named("Enum", "Statuses"));
+        write_file(&language, &sample_language_named("Russian", ""));
+
+        let outcome = validate_meta(&meta_validate_args(&object), &context);
+        let errors = outcome.errors.join("\n");
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(errors.contains("empty LanguageCode"), "{outcome:?}");
+        assert!(
+            errors.contains(&canonical_path(&language).display().to_string()),
+            "{outcome:?}"
+        );
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn meta_validation_deduplicates_language_codes_in_registration_order() {
+        let context = temp_context("language-code-order");
+        let src = write_owner(
+            &context.cwd.join("src"),
+            "Enum",
+            "Statuses",
+            &["RussianOne", "English", "RussianTwo"],
+        );
+        let object = src.join("Enums/Statuses.xml");
+        write_file(&object, &sample_meta_named("Enum", "Statuses"));
+        for (name, code) in [
+            ("RussianOne", "ru"),
+            ("English", "en"),
+            ("RussianTwo", "ru"),
+        ] {
+            write_file(
+                &src.join("Languages").join(format!("{name}.xml")),
+                &sample_language_named(name, code),
+            );
+        }
+
+        let inspection = inspect_meta_validation_reads(&object, &context);
+        let owner = inspection.context.expect("complete language profile");
+
+        assert_eq!(owner.language_codes, vec!["ru", "en"]);
+        assert_eq!(
+            inspection.paths,
+            vec![
+                canonical_path(&object),
+                canonical_path(&src.join("Configuration.xml")),
+                canonical_path(&src.join("Languages/RussianOne.xml")),
+                canonical_path(&src.join("Languages/English.xml")),
+                canonical_path(&src.join("Languages/RussianTwo.xml")),
+            ]
+        );
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn meta_validate_batch_read_set_stably_deduplicates_shared_owner() {
+        let context = temp_context("batch-read-set");
+        let src = context.cwd.join("src");
+        let configuration = src.join("Configuration.xml");
+        let language = src.join("Languages/Russian.xml");
+        let first = src.join("Enums/First.xml");
+        let second = src.join("Enums/Second.xml");
+        write_file(
+            &configuration,
+            &format!(
+                r#"<MetaDataObject xmlns="{TEST_MD_NS}" version="2.20">
+<Configuration uuid="11111111-1111-4111-8111-111111111111">
+<Properties><Name>Owner</Name></Properties>
+<ChildObjects><Language>Russian</Language><Enum>First</Enum><Enum>Second</Enum></ChildObjects>
+</Configuration></MetaDataObject>"#
+            ),
+        );
+        write_file(&language, &sample_language_named("Russian", "ru"));
+        write_file(&first, &sample_meta_named("Enum", "First"));
+        write_file(&second, &sample_meta_named("Enum", "Second"));
+        let args = Map::from_iter([(
+            "ObjectPath".to_string(),
+            Value::String(format!("{}|{}", first.display(), second.display())),
+        )]);
+
+        let dependencies = meta_validate_format_dependency_paths(&args, &context).unwrap();
+
+        assert_eq!(
+            dependencies,
+            vec![
+                canonical_path(&first),
+                canonical_path(&configuration),
+                canonical_path(&language),
+                canonical_path(&second)
+            ]
+        );
+        let _ = fs::remove_dir_all(&context.cwd);
     }
 
     #[test]
@@ -4734,66 +5040,6 @@ pub(crate) fn meta_validation_options(
     }
 }
 
-fn meta_validate_registered_document_dependency_paths(
-    resolved_path: &Path,
-) -> Result<Vec<PathBuf>, String> {
-    let text = read_utf8_sig(resolved_path)?;
-    let document = Document::parse(text.trim_start_matches('\u{feff}'))
-        .map_err(|error| format!("XML parse error in {}: {error}", resolved_path.display()))?;
-    let root_object = meta_edit_object_node(&document)?;
-    let metadata_type = root_object.tag_name().name();
-    let Some(properties) = meta_info_child(root_object, "Properties") else {
-        return Ok(Vec::new());
-    };
-    let object_name = meta_info_child_text(properties, "Name").unwrap_or_default();
-    let reads_registrar_documents = matches!(
-        metadata_type,
-        "AccumulationRegister" | "AccountingRegister" | "CalculationRegister"
-    ) || (metadata_type == "InformationRegister"
-        && meta_info_child_text(properties, "WriteMode").as_deref() == Some("RecorderSubordinate"));
-    if !reads_registrar_documents || object_name.is_empty() {
-        return Ok(Vec::new());
-    }
-    let Some(config_dir) = meta_validate_config_dir(resolved_path) else {
-        return Ok(Vec::new());
-    };
-    let documents_dir = config_dir.join("Documents");
-    if !documents_dir.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let register_reference = format!("{metadata_type}.{object_name}");
-    meta_validate_registrar_document_scan(&documents_dir, &register_reference)
-        .map(|(dependencies, _)| dependencies)
-}
-
-fn meta_validate_registrar_document_scan(
-    documents_dir: &Path,
-    register_reference: &str,
-) -> Result<(Vec<PathBuf>, bool), String> {
-    let mut entries = fs::read_dir(documents_dir)
-        .map_err(|error| format!("failed to read {}: {error}", documents_dir.display()))?;
-    let mut entries = entries.by_ref().filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.file_name());
-    let mut dependencies = Vec::new();
-    for entry in entries {
-        let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("xml")
-            || !path.is_file()
-        {
-            continue;
-        }
-        dependencies.push(path.clone());
-        if read_utf8_sig(&path)
-            .map(|content| content.contains(register_reference))
-            .unwrap_or(false)
-        {
-            return Ok((dependencies, true));
-        }
-    }
-    Ok((dependencies, false))
-}
-
 /// Return the platform XML documents whose contents `meta.validate` reads,
 /// including each member of a batch and the registrar documents inspected for
 /// register cross-reference diagnostics.
@@ -4814,17 +5060,14 @@ pub(crate) fn meta_validate_format_dependency_paths(
         .filter(|path| !path.is_empty())
     {
         let candidate = absolutize(PathBuf::from(raw), &context.cwd);
-        let resolved =
-            resolve_meta_info_path(candidate.clone()).unwrap_or_else(|_| candidate.clone());
-        dependencies.push(resolved.clone());
-        if let Ok(registered_documents) =
-            meta_validate_registered_document_dependency_paths(&resolved)
-        {
-            dependencies.extend(registered_documents);
+        let object_path = resolve_meta_info_path(candidate.clone()).unwrap_or(candidate);
+        let inspection = inspect_meta_validation_reads(&object_path, context);
+        for path in inspection.paths {
+            if !dependencies.contains(&path) {
+                dependencies.push(path);
+            }
         }
     }
-    dependencies.sort();
-    dependencies.dedup();
     Ok(dependencies)
 }
 
@@ -4940,19 +5183,11 @@ fn meta_validate_one_with_scope(
     let resolved_path = object_path
         .canonicalize()
         .unwrap_or_else(|_| object_path.clone());
-    let reference_inputs = match scope {
+    let owner_inspection = match scope {
         MetaValidationScope::PublicOwnerAware => {
-            let config_dir = meta_validate_config_dir(&resolved_path);
-            let language_codes = meta_validate_language_codes(config_dir.as_deref());
-            MetaValidationReferenceInputs {
-                config_dir,
-                language_codes,
-            }
+            Some(inspect_meta_validation_reads(&resolved_path, context))
         }
-        MetaValidationScope::PostWriteLocal => MetaValidationReferenceInputs {
-            config_dir: None,
-            language_codes: Vec::new(),
-        },
+        MetaValidationScope::PostWriteLocal => None,
     };
 
     let text = read_utf8_sig(&resolved_path)?;
@@ -5060,6 +5295,40 @@ fn meta_validate_one_with_scope(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "(unknown)".to_string());
     report.obj_name = obj_name.clone();
+
+    let reference_inputs = match scope {
+        MetaValidationScope::PublicOwnerAware => {
+            let owner_context = match owner_inspection
+                .expect("public validation always creates owner inspection")
+                .context
+            {
+                Ok(owner_context) => owner_context,
+                Err(error) => {
+                    report.error(format!("1. Owner context: {error}"));
+                    return meta_validate_finish(
+                        report,
+                        options.out_file.clone(),
+                        options.out_file_label.clone(),
+                        resolved_path,
+                    );
+                }
+            };
+            let config_dir = match owner_context.owner_kind {
+                MetaValidationOwnerKind::Configuration | MetaValidationOwnerKind::Extension => {
+                    owner_context.owner_path.parent().map(Path::to_path_buf)
+                }
+                MetaValidationOwnerKind::External => None,
+            };
+            MetaValidationReferenceInputs {
+                config_dir,
+                language_codes: owner_context.language_codes,
+            }
+        }
+        MetaValidationScope::PostWriteLocal => MetaValidationReferenceInputs {
+            config_dir: None,
+            language_codes: Vec::new(),
+        },
+    };
 
     if check1_ok {
         report.ok(format!(
@@ -5245,68 +5514,6 @@ pub(crate) fn meta_validate_finish(
         artifacts: vec![artifact],
         errors,
     })
-}
-
-pub(crate) fn meta_validate_config_dir(resolved_path: &Path) -> Option<PathBuf> {
-    let mut probe = resolved_path.parent();
-    while let Some(dir) = probe {
-        if dir.join("Configuration.xml").exists() {
-            return Some(dir.to_path_buf());
-        }
-        probe = dir.parent();
-    }
-    None
-}
-
-pub(crate) fn meta_validate_language_codes(config_dir: Option<&Path>) -> Vec<String> {
-    let Some(config_dir) = config_dir else {
-        return Vec::new();
-    };
-    let Ok(configuration_text) = fs::read_to_string(config_dir.join("Configuration.xml")) else {
-        return Vec::new();
-    };
-    let Ok(configuration_doc) = Document::parse(configuration_text.trim_start_matches('\u{feff}'))
-    else {
-        return Vec::new();
-    };
-    let configuration_root = configuration_doc.root_element();
-    let Some(configuration) = meta_info_child(configuration_root, "Configuration") else {
-        return Vec::new();
-    };
-    let Some(child_objects) = meta_info_child(configuration, "ChildObjects") else {
-        return Vec::new();
-    };
-
-    let mut seen = HashSet::new();
-    let mut language_codes = Vec::new();
-    for language_name in meta_info_children(child_objects, "Language")
-        .into_iter()
-        .map(meta_info_inner_text)
-        .filter(|name| !name.trim().is_empty())
-    {
-        let language_name = language_name.trim();
-        let language_path = config_dir
-            .join("Languages")
-            .join(format!("{language_name}.xml"));
-        let Ok(language_text) = fs::read_to_string(language_path) else {
-            continue;
-        };
-        let Ok(language_doc) = Document::parse(language_text.trim_start_matches('\u{feff}')) else {
-            continue;
-        };
-        let language_root = language_doc.root_element();
-        let Some(language) = meta_info_child(language_root, "Language") else {
-            continue;
-        };
-        let language_code = meta_info_child(language, "Properties")
-            .and_then(|properties| meta_info_child_text(properties, "LanguageCode"))
-            .unwrap_or_default();
-        let language_code = language_code.trim();
-        if !language_code.is_empty() && seen.insert(language_code.to_string()) {
-            language_codes.push(language_code.to_string());
-        }
-    }
-    language_codes
 }
 
 pub(crate) fn meta_validate_localized_values(

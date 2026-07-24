@@ -261,7 +261,7 @@ fn effective_format_paths_with_planned_outputs(
 ) -> Result<Vec<PathBuf>, String> {
     let mut paths = if matches!(
         descriptor.operation,
-        "cf-init" | "epf-init" | "erf-init" | "support-edit"
+        "cf-init" | "epf-init" | "erf-init" | "support-edit" | "meta-validate"
     ) {
         Vec::new()
     } else {
@@ -1120,6 +1120,42 @@ mod tests {
         )
         .unwrap();
         src.join("Configuration.xml")
+    }
+
+    fn meta_validate_owner(
+        root: &std::path::Path,
+        object_type: &str,
+        object_name: &str,
+        owner_version: &str,
+        languages: &[(&str, &str, &str)],
+    ) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
+        let src = root.join("src");
+        let language_children = languages
+            .iter()
+            .map(|(name, _, _)| format!("<Language>{name}</Language>"))
+            .collect::<String>();
+        let configuration = src.join("Configuration.xml");
+        std::fs::create_dir_all(src.join("Languages")).unwrap();
+        std::fs::write(
+            &configuration,
+            format!(
+                r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="{owner_version}"><Configuration uuid="11111111-1111-4111-8111-111111111111"><Properties><Name>Owner</Name></Properties><ChildObjects>{language_children}<{object_type}>{object_name}</{object_type}></ChildObjects></Configuration></MetaDataObject>"#
+            ),
+        )
+        .unwrap();
+        let mut language_paths = Vec::new();
+        for (name, code, version) in languages {
+            let path = src.join("Languages").join(format!("{name}.xml"));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="{version}"><Language uuid="22222222-2222-4222-8222-222222222222"><Properties><Name>{name}</Name><LanguageCode>{code}</LanguageCode></Properties></Language></MetaDataObject>"#
+                ),
+            )
+            .unwrap();
+            language_paths.push(path);
+        }
+        (configuration, language_paths)
     }
 
     struct CfeReadGraph {
@@ -3565,12 +3601,139 @@ mod tests {
     }
 
     #[test]
+    fn meta_validate_dependencies_include_owner_and_registered_languages() {
+        let root = test_root("meta-validate-owner-languages");
+        let (configuration, languages) = meta_validate_owner(
+            &root,
+            "Enum",
+            "Statuses",
+            "2.20",
+            &[("Russian", "ru", "2.20"), ("English", "en", "2.20")],
+        );
+        let russian = languages[0].clone();
+        let english = languages[1].clone();
+        let object = root.join("src/Enums/Statuses.xml");
+        let unused = root.join("src/Languages/Unused.xml");
+        std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+        std::fs::write(
+            &object,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Enum uuid="33333333-3333-4333-8333-333333333333"><Properties><Name>Statuses</Name></Properties><ChildObjects/></Enum></MetaDataObject>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &unused,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.21"><Language/></MetaDataObject>"#,
+        )
+        .unwrap();
+        let args = Map::from_iter([(
+            "ObjectPath".to_string(),
+            Value::String(object.display().to_string()),
+        )]);
+        let descriptor = native_operation_descriptor("meta-validate").unwrap();
+
+        let dependencies = effective_format_paths(descriptor, &args, &context(&root)).unwrap();
+
+        assert_eq!(
+            dependencies
+                .iter()
+                .map(|path| normalized_path(path))
+                .collect::<Vec<_>>(),
+            [&object, &configuration, &russian, &english]
+                .into_iter()
+                .map(|path| normalized_path(path))
+                .collect::<Vec<_>>()
+        );
+        assert!(!dependencies.contains(&unused), "{dependencies:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn meta_validate_warns_for_newer_owner_it_reads() {
+        let root = test_root("meta-validate-newer-owner");
+        let (configuration, _) = meta_validate_owner(
+            &root,
+            "Enum",
+            "Statuses",
+            "2.21",
+            &[("Russian", "ru", "2.20")],
+        );
+        let object = root.join("src/Enums/Statuses.xml");
+        std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+        std::fs::write(
+            &object,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Enum><Properties><Name>Statuses</Name></Properties><ChildObjects/></Enum></MetaDataObject>"#,
+        )
+        .unwrap();
+        let args = Map::from_iter([(
+            "ObjectPath".to_string(),
+            Value::String(object.display().to_string()),
+        )]);
+
+        let check =
+            evaluate_format_guard(spec("unica.meta.validate"), &args, &context(&root)).unwrap();
+        let FormatGuardCheck::Warn { diagnostic, .. } = check else {
+            panic!("metadata owner must participate in format preflight");
+        };
+
+        assert_eq!(diagnostic["actualFormat"], "2.21");
+        assert_eq!(
+            normalized_path(std::path::Path::new(diagnostic["root"].as_str().unwrap())),
+            normalized_path(&configuration)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn meta_validate_warns_for_newer_registered_language_it_reads() {
+        let root = test_root("meta-validate-newer-language");
+        let (_, languages) = meta_validate_owner(
+            &root,
+            "Enum",
+            "Statuses",
+            "2.20",
+            &[("English", "en", "2.21")],
+        );
+        let english = languages[0].clone();
+        let object = root.join("src/Enums/Statuses.xml");
+        std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+        std::fs::write(
+            &object,
+            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><Enum><Properties><Name>Statuses</Name></Properties><ChildObjects/></Enum></MetaDataObject>"#,
+        )
+        .unwrap();
+        let args = Map::from_iter([(
+            "ObjectPath".to_string(),
+            Value::String(object.display().to_string()),
+        )]);
+
+        let check =
+            evaluate_format_guard(spec("unica.meta.validate"), &args, &context(&root)).unwrap();
+        let FormatGuardCheck::Warn { diagnostic, .. } = check else {
+            panic!("registered language must participate in format preflight");
+        };
+
+        assert_eq!(diagnostic["actualFormat"], "2.21");
+        assert_eq!(
+            normalized_path(std::path::Path::new(diagnostic["root"].as_str().unwrap())),
+            normalized_path(&english)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn meta_validate_warns_for_newer_registrar_document_it_reads() {
         let root = std::env::temp_dir().join(format!(
             "unica-format-guard-meta-validate-registrar-{}",
             std::process::id()
         ));
-        config(&root, Some("2.20"));
+        let (configuration, languages) = meta_validate_owner(
+            &root,
+            "AccumulationRegister",
+            "Sales",
+            "2.20",
+            &[("Russian", "ru", "2.20")],
+        );
+        let language = languages[0].clone();
         let register = root.join("src/AccumulationRegisters/Sales.xml");
         let document = root.join("src/Documents/Recorder.xml");
         std::fs::create_dir_all(register.parent().unwrap()).unwrap();
@@ -3602,6 +3765,21 @@ mod tests {
             )),
             normalized_path(&document)
         );
+        assert_eq!(
+            effective_format_paths(
+                native_operation_descriptor("meta-validate").unwrap(),
+                &args,
+                &context(&root)
+            )
+            .unwrap()
+            .iter()
+            .map(|path| normalized_path(path))
+            .collect::<Vec<_>>(),
+            [&register, &configuration, &language, &document]
+                .into_iter()
+                .map(|path| normalized_path(path))
+                .collect::<Vec<_>>()
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3611,7 +3789,14 @@ mod tests {
             "unica-format-guard-meta-validate-sorted-registrar-{}",
             std::process::id()
         ));
-        config(&root, Some("2.20"));
+        let (configuration, languages) = meta_validate_owner(
+            &root,
+            "AccumulationRegister",
+            "Sales",
+            "2.20",
+            &[("Russian", "ru", "2.20")],
+        );
+        let language = languages[0].clone();
         let register = root.join("src/AccumulationRegisters/Sales.xml");
         let later = root.join("src/Documents/z-later.xml");
         let first = root.join("src/Documents/a-first.xml");
@@ -3641,7 +3826,16 @@ mod tests {
 
         let dependencies = effective_format_paths(descriptor, &args, &context(&root)).unwrap();
 
-        assert!(dependencies.contains(&first), "{dependencies:?}");
+        assert_eq!(
+            dependencies
+                .iter()
+                .map(|path| normalized_path(path))
+                .collect::<Vec<_>>(),
+            [&register, &configuration, &language, &first]
+                .into_iter()
+                .map(|path| normalized_path(path))
+                .collect::<Vec<_>>()
+        );
         assert!(!dependencies.contains(&later), "{dependencies:?}");
         assert!(matches!(
             evaluate_format_guard(spec("unica.meta.validate"), &args, &context(&root)).unwrap(),
