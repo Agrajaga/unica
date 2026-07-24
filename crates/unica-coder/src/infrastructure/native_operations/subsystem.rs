@@ -371,33 +371,16 @@ fn require_subsystem_registration_owner_validation(
     context: &WorkspaceContext,
 ) -> Result<(), String> {
     if path.file_name() != Some(OsStr::new("Configuration.xml")) {
-        let outcome = validate_subsystem(&subsystem_validation_args(path), context);
-        return require_subsystem_validation(&outcome);
+        return validate_subsystem_owner_path(path, context);
     }
 
-    let args = Map::from_iter([
-        (
-            "ConfigPath".to_string(),
-            Value::String(path.display().to_string()),
-        ),
-        ("InternalLocalOwnerOnly".to_string(), Value::Bool(true)),
-    ]);
-    let outcome = validate_cf(&args, context);
-    if outcome.ok {
-        return Ok(());
-    }
-    let detail = if outcome.errors.is_empty() {
-        outcome
-            .stdout
-            .unwrap_or_else(|| "validation returned no diagnostics".to_string())
-    } else {
-        outcome.errors.join("; ")
-    };
-    Err(format!(
-        "subsystem.compile Configuration owner validation failed for {}: {}",
-        path.display(),
-        detail.trim()
-    ))
+    validate_cf_owner_path(path, context).map_err(|detail| {
+        format!(
+            "subsystem.compile Configuration owner validation failed for {}: {}",
+            path.display(),
+            detail.trim()
+        )
+    })
 }
 
 pub(crate) fn edit_subsystem(
@@ -1364,6 +1347,19 @@ pub(crate) fn validate_subsystem(
             command: None,
         },
     }
+}
+
+pub(crate) fn validate_subsystem_owner_path(
+    path: &Path,
+    context: &WorkspaceContext,
+) -> Result<(), String> {
+    let outcome = validate_subsystem(&subsystem_validation_args(path), context);
+    require_subsystem_validation(&outcome).map_err(|error| {
+        format!(
+            "subsystem owner validation failed for {}: {error}",
+            path.display()
+        )
+    })
 }
 
 pub(crate) fn analyze_subsystem_info(

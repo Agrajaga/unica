@@ -3651,43 +3651,6 @@ mod tests {
     }
 
     #[test]
-    fn internal_local_meta_validation_excludes_registrar_documents() {
-        let root = std::env::temp_dir().join(format!(
-            "unica-format-guard-meta-validate-local-only-{}",
-            std::process::id()
-        ));
-        config(&root, Some("2.20"));
-        let register = root.join("src/AccumulationRegisters/Sales.xml");
-        let document = root.join("src/Documents/Recorder.xml");
-        for path in [&register, &document] {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        }
-        std::fs::write(
-            &register,
-            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20"><AccumulationRegister><Properties><Name>Sales</Name></Properties><ChildObjects/></AccumulationRegister></MetaDataObject>"#,
-        )
-        .unwrap();
-        std::fs::write(
-            &document,
-            r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.21"><Document/></MetaDataObject>"#,
-        )
-        .unwrap();
-        let args = Map::from_iter([
-            (
-                "ObjectPath".to_string(),
-                Value::String(register.display().to_string()),
-            ),
-            ("InternalLocalOwnerOnly".to_string(), Value::Bool(true)),
-        ]);
-        let descriptor = native_operation_descriptor("meta-validate").unwrap();
-
-        let dependencies = effective_format_paths(descriptor, &args, &context(&root)).unwrap();
-
-        assert!(!dependencies.contains(&document), "{dependencies:?}");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn meta_compile_does_not_treat_unrelated_documents_as_format_dependencies() {
         let root = std::env::temp_dir().join(format!(
             "unica-format-guard-meta-compile-local-owner-{}",

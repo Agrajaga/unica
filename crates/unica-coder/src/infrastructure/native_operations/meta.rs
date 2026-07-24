@@ -4258,6 +4258,25 @@ mod edit_tests {
     }
 
     #[test]
+    fn post_write_metadata_owner_shape_does_not_require_workspace_owner() {
+        let context = temp_context("post-write-local");
+        let object = context.cwd.join("CommonModules/Local.xml");
+        write_file(
+            &object,
+            &sample_meta_object_xml("CommonModule", "Local", "", "\t\t<ChildObjects/>"),
+        );
+        write_file(
+            &context.cwd.join("Configuration.xml"),
+            "<malformed-neighbor",
+        );
+
+        validate_metadata_owner_shape_8_3_27(&object, &context, "test")
+            .expect("post-write validation must not read a neighboring owner");
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
     fn validate_meta_accepts_filled_short_synonym() {
         let synonym = "<Synonym><v8:item><v8:lang>ru</v8:lang><v8:content>Отгрузка</v8:content></v8:item></Synonym>";
         let stdout = validate_stdout_with_synonym("validate-filled-synonym", synonym);
@@ -4550,7 +4569,17 @@ pub(crate) struct MetaValidationOptions {
     pub(crate) max_errors: usize,
     pub(crate) out_file_label: Option<String>,
     pub(crate) out_file: Option<PathBuf>,
-    pub(crate) follow_metadata_references: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetaValidationScope {
+    PublicOwnerAware,
+    PostWriteLocal,
+}
+
+struct MetaValidationReferenceInputs {
+    config_dir: Option<PathBuf>,
+    language_codes: Vec<String>,
 }
 
 impl MetaValidationReporter {
@@ -4702,10 +4731,6 @@ pub(crate) fn meta_validation_options(
             .as_ref()
             .map(|path| absolutize(PathBuf::from(path), &context.cwd)),
         out_file_label,
-        follow_metadata_references: !bool_arg(
-            args,
-            &["internalLocalOwnerOnly", "InternalLocalOwnerOnly"],
-        ),
     }
 }
 
@@ -4782,8 +4807,6 @@ pub(crate) fn meta_validate_format_dependency_paths(
         "ObjectPath",
     )?;
     let raw_path_text = raw_path.to_string_lossy();
-    let follow_metadata_references =
-        !bool_arg(args, &["internalLocalOwnerOnly", "InternalLocalOwnerOnly"]);
     let mut dependencies = Vec::new();
     for raw in raw_path_text
         .split('|')
@@ -4794,12 +4817,10 @@ pub(crate) fn meta_validate_format_dependency_paths(
         let resolved =
             resolve_meta_info_path(candidate.clone()).unwrap_or_else(|_| candidate.clone());
         dependencies.push(resolved.clone());
-        if follow_metadata_references {
-            if let Ok(registered_documents) =
-                meta_validate_registered_document_dependency_paths(&resolved)
-            {
-                dependencies.extend(registered_documents);
-            }
+        if let Ok(registered_documents) =
+            meta_validate_registered_document_dependency_paths(&resolved)
+        {
+            dependencies.extend(registered_documents);
         }
     }
     dependencies.sort();
@@ -4899,13 +4920,40 @@ pub(crate) fn meta_validate_one(
     options: &MetaValidationOptions,
     context: &WorkspaceContext,
 ) -> Result<MetaValidationRun, String> {
+    meta_validate_one_with_scope(
+        raw_path,
+        options,
+        context,
+        MetaValidationScope::PublicOwnerAware,
+    )
+}
+
+fn meta_validate_one_with_scope(
+    raw_path: PathBuf,
+    options: &MetaValidationOptions,
+    context: &WorkspaceContext,
+    scope: MetaValidationScope,
+) -> Result<MetaValidationRun, String> {
     const MD_NS: &str = "http://v8.1c.ru/8.3/MDClasses";
 
     let object_path = resolve_meta_info_path(absolutize(raw_path, &context.cwd))?;
     let resolved_path = object_path
         .canonicalize()
         .unwrap_or_else(|_| object_path.clone());
-    let config_dir = meta_validate_config_dir(&resolved_path);
+    let reference_inputs = match scope {
+        MetaValidationScope::PublicOwnerAware => {
+            let config_dir = meta_validate_config_dir(&resolved_path);
+            let language_codes = meta_validate_language_codes(config_dir.as_deref());
+            MetaValidationReferenceInputs {
+                config_dir,
+                language_codes,
+            }
+        }
+        MetaValidationScope::PostWriteLocal => MetaValidationReferenceInputs {
+            config_dir: None,
+            language_codes: Vec::new(),
+        },
+    };
 
     let text = read_utf8_sig(&resolved_path)?;
     let source = text.trim_start_matches('\u{feff}');
@@ -5036,13 +5084,12 @@ pub(crate) fn meta_validate_one(
             resolved_path,
         );
     }
-    let language_codes = meta_validate_language_codes(config_dir.as_deref());
     meta_validate_check_properties(
         &mut report,
         props_node,
         name_node,
         &obj_name,
-        &language_codes,
+        &reference_inputs.language_codes,
     );
     if report.stopped {
         return meta_validate_finish(
@@ -5122,9 +5169,7 @@ pub(crate) fn meta_validate_one(
         md_type,
         props_node,
         child_obj_node,
-        config_dir
-            .as_deref()
-            .filter(|_| options.follow_metadata_references),
+        reference_inputs.config_dir.as_deref(),
         &obj_name,
     );
     if report.stopped {
@@ -5153,7 +5198,12 @@ pub(crate) fn meta_validate_one(
             resolved_path,
         );
     }
-    meta_validate_check_method_reference(&mut report, md_type, props_node, config_dir.as_deref());
+    meta_validate_check_method_reference(
+        &mut report,
+        md_type,
+        props_node,
+        reference_inputs.config_dir.as_deref(),
+    );
     if report.stopped {
         return meta_validate_finish(
             report,
@@ -9218,7 +9268,7 @@ pub(crate) fn remove_metadata_object(
             )
             .map_err(meta_remove_stdout_error)?;
             for replacement in &subsystem_replacements {
-                require_metadata_8_3_27_validation(&replacement.path, context, "meta.remove")
+                validate_metadata_owner_shape_8_3_27(&replacement.path, context, "meta.remove")
                     .map_err(meta_remove_stdout_error)?;
                 for _ in 0..replacement.removed_references {
                     stdout.push_str(&format!(
@@ -9427,7 +9477,7 @@ pub(crate) fn remove_metadata_object(
                         "meta.remove",
                     )?;
                     for path in &validation_subsystem_paths {
-                        require_metadata_8_3_27_validation(path, context, "meta.remove")?;
+                        validate_metadata_owner_shape_8_3_27(path, context, "meta.remove")?;
                     }
                     validate_meta_remove_post_state(
                         &validation_config_xml,
@@ -10504,29 +10554,13 @@ fn require_meta_configuration_owner_validation(
     context: &WorkspaceContext,
     operation: &str,
 ) -> Result<(), String> {
-    let args = Map::from_iter([
-        (
-            "ConfigPath".to_string(),
-            Value::String(config_path.display().to_string()),
-        ),
-        ("InternalLocalOwnerOnly".to_string(), Value::Bool(true)),
-    ]);
-    let outcome = validate_cf(&args, context);
-    if outcome.ok {
-        return Ok(());
-    }
-    let detail = if outcome.errors.is_empty() {
-        outcome
-            .stdout
-            .unwrap_or_else(|| "validation returned no diagnostics".to_string())
-    } else {
-        outcome.errors.join("; ")
-    };
-    Err(format!(
-        "{operation} Configuration owner validation failed for {}: {}",
-        config_path.display(),
-        detail.trim()
-    ))
+    validate_cf_owner_path(config_path, context).map_err(|detail| {
+        format!(
+            "{operation} Configuration owner validation failed for {}: {}",
+            config_path.display(),
+            detail.trim()
+        )
+    })
 }
 
 fn validate_meta_compile_post_state(
@@ -10541,7 +10575,7 @@ fn validate_meta_compile_post_state(
         let document = Document::parse(xml.trim_start_matches('\u{feff}'))
             .map_err(|error| format!("XML parse error in {}: {error}", path.display()))?;
         if document.root_element().tag_name().name() == "MetaDataObject" {
-            require_metadata_8_3_27_validation(path, context, "meta.compile")?;
+            validate_metadata_owner_shape_8_3_27(path, context, "meta.compile")?;
         }
     }
     Ok(())
@@ -11508,7 +11542,7 @@ pub(crate) fn validate_metadata_8_3_27_enum_contract(
     Ok(())
 }
 
-pub(crate) fn require_metadata_8_3_27_validation(
+pub(crate) fn validate_metadata_owner_shape_8_3_27(
     object_path: &Path,
     workspace: &WorkspaceContext,
     operation: &str,
@@ -11517,87 +11551,35 @@ pub(crate) fn require_metadata_8_3_27_validation(
     let document = Document::parse(xml_text.trim_start_matches('\u{feff}'))
         .map_err(|error| format!("XML parse error: {error}"))?;
     let root_object = meta_edit_object_node(&document)?;
-    let specialized_args = match root_object.tag_name().name() {
-        "Configuration" => Some((
-            "ConfigPath",
-            validate_cf as fn(&Map<String, Value>, &WorkspaceContext) -> AdapterOutcome,
-        )),
-        "Subsystem" => Some((
-            "SubsystemPath",
-            validate_subsystem as fn(&Map<String, Value>, &WorkspaceContext) -> AdapterOutcome,
-        )),
-        _ => None,
-    };
-    if let Some((path_argument, validator)) = specialized_args {
-        let mut validation_args = Map::from_iter([(
-            path_argument.to_string(),
-            Value::String(object_path.display().to_string()),
-        )]);
-        if root_object.tag_name().name() == "Configuration" {
-            validation_args.insert("InternalLocalOwnerOnly".to_string(), Value::Bool(true));
-        }
-        let outcome = validator(&validation_args, workspace);
-        if outcome.ok {
-            return Ok(());
-        }
-        let detail = metadata_validation_detail(&outcome);
-        return Err(format!(
-            "{operation} owner metadata validation failed for {}: {}",
-            object_path.display(),
-            detail
-        ));
+    match root_object.tag_name().name() {
+        "Configuration" => return validate_cf_owner_path(object_path, workspace),
+        "Subsystem" => return validate_subsystem_owner_path(object_path, workspace),
+        _ => {}
     }
     validate_metadata_8_3_27_boolean_contract(&xml_text, operation)?;
     validate_metadata_8_3_27_enum_contract(&xml_text, operation)?;
 
-    let validation_args = Map::from_iter([
-        (
-            "ObjectPath".to_string(),
-            Value::String(object_path.display().to_string()),
-        ),
-        ("InternalLocalOwnerOnly".to_string(), Value::Bool(true)),
-    ]);
-    let outcome = validate_meta(&validation_args, workspace);
-    if outcome.ok {
-        return Ok(());
+    let options = MetaValidationOptions {
+        detailed: true,
+        max_errors: 30,
+        out_file_label: None,
+        out_file: None,
+    };
+    let run = meta_validate_one_with_scope(
+        object_path.to_path_buf(),
+        &options,
+        workspace,
+        MetaValidationScope::PostWriteLocal,
+    )?;
+    if run.ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "{operation} owner metadata validation failed for {}: {}",
+            object_path.display(),
+            run.errors.join("; ")
+        ))
     }
-
-    let detail = metadata_validation_detail(&outcome);
-    Err(format!(
-        "{operation} owner metadata validation failed for {}: {}",
-        object_path.display(),
-        detail
-    ))
-}
-
-fn metadata_validation_detail(outcome: &AdapterOutcome) -> String {
-    let errors = outcome
-        .errors
-        .iter()
-        .map(|error| error.trim())
-        .filter(|error| !error.is_empty())
-        .collect::<Vec<_>>()
-        .join("; ");
-    if !errors.is_empty() {
-        return errors;
-    }
-    if let Some(stderr) = outcome
-        .stderr
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return stderr.to_string();
-    }
-    if let Some(stdout) = outcome
-        .stdout
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return stdout.to_string();
-    }
-    outcome.summary.clone()
 }
 
 fn validate_meta_compile_attr_type(attr: &MetaCompileAttr, context: &str) -> Result<(), String> {
