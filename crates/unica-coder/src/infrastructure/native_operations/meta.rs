@@ -18,7 +18,8 @@ use super::compile_transaction::{
     CompileTransaction, DirectoryTopologyEntry, DirectoryTopologyEntryKind, RegistrationStatus,
 };
 use super::meta_validation_context::{
-    inspect_meta_validation_reads, meta_validate_registrar_document_scan, MetaValidationOwnerKind,
+    inspect_meta_validation_reads, meta_validate_registrar_document_scan,
+    meta_validate_types_with_list_presentation, MetaValidationOwnerKind,
 };
 use super::{
     cf::*, cfe::*, dcs::*, form::*, interface::*, mxl::*, role::*, subsystem::*, template::*,
@@ -2008,6 +2009,8 @@ mod edit_tests {
     }
 
     const TEST_MD_NS: &str = "http://v8.1c.ru/8.3/MDClasses";
+    const TEST_V8_NS: &str = "http://v8.1c.ru/8.1/data/core";
+    const TEST_XR_NS: &str = "http://v8.1c.ru/8.3/xcf/readable";
 
     fn write_owner(
         source_dir: &Path,
@@ -4199,6 +4202,8 @@ mod edit_tests {
         let context = temp_context(test_name);
         let object_path = context.cwd.join("Documents").join("SampleShipment.xml");
         let xml = sample_document_xml("<RegisterRecords/>").replace("<Synonym/>", synonym_xml);
+        write_owner(&context.cwd, "Document", "SampleShipment", &["Русский"]);
+        write_language_fixture(&context, "Русский", "ru");
         write_file(&object_path, &xml);
 
         let mut args = serde_json::Map::new();
@@ -4248,12 +4253,110 @@ mod edit_tests {
         )
     }
 
+    fn validate_registered_object(
+        object_type: &str,
+        object_name: &str,
+        object_xml: &str,
+        languages: &[(&str, &str)],
+    ) -> AdapterOutcome {
+        let context = temp_context(&format!("registered-{object_type}-{object_name}"));
+        let language_names = languages.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+        let src = write_owner(
+            &context.cwd.join("src"),
+            object_type,
+            object_name,
+            &language_names,
+        );
+        for (name, code) in languages {
+            write_file(
+                &src.join("Languages").join(format!("{name}.xml")),
+                &sample_language_named(name, code),
+            );
+        }
+        let object = src
+            .join(format!("{object_type}s"))
+            .join(format!("{object_name}.xml"));
+        write_file(&object, object_xml);
+        let outcome = validate_meta(&meta_validate_args(&object), &context);
+        let _ = fs::remove_dir_all(&context.cwd);
+        outcome
+    }
+
+    fn outcome_text(outcome: &AdapterOutcome) -> String {
+        format!(
+            "{}\n{}\n{}",
+            outcome.stdout.clone().unwrap_or_default(),
+            outcome.warnings.join("\n"),
+            outcome.errors.join("\n")
+        )
+    }
+
+    fn localized_property(name: &str, values: &[(&str, &str)]) -> String {
+        let items = values
+            .iter()
+            .map(|(language, content)| {
+                format!(
+                    "<v8:item><v8:lang>{language}</v8:lang>\
+                     <v8:content>{content}</v8:content></v8:item>"
+                )
+            })
+            .collect::<String>();
+        format!("<{name}>{items}</{name}>")
+    }
+
+    fn sample_common_module_named(name: &str, synonyms: &[(&str, &str)]) -> String {
+        let synonym = localized_property("Synonym", synonyms);
+        format!(
+            r#"<MetaDataObject xmlns="{TEST_MD_NS}" xmlns:v8="{TEST_V8_NS}" version="2.20">
+<CommonModule uuid="33333333-3333-4333-8333-333333333333">
+<Properties><Name>{name}</Name>{synonym}<Comment/></Properties>
+<ChildObjects/>
+</CommonModule></MetaDataObject>"#
+        )
+    }
+
+    fn sample_enum_with_presentations(
+        name: &str,
+        synonyms: &[(&str, &str)],
+        list_presentations: &[(&str, &str)],
+    ) -> String {
+        let synonym = localized_property("Synonym", synonyms);
+        let list_presentation = localized_property("ListPresentation", list_presentations);
+        format!(
+            r#"<MetaDataObject xmlns="{TEST_MD_NS}" xmlns:v8="{TEST_V8_NS}"
+ xmlns:xr="{TEST_XR_NS}" version="2.20">
+<Enum uuid="44444444-4444-4444-8444-444444444444">
+<InternalInfo>
+<xr:GeneratedType name="EnumRef.{name}" category="Ref">
+<xr:TypeId>55555555-5555-4555-8555-555555555551</xr:TypeId>
+<xr:ValueId>55555555-5555-4555-8555-555555555552</xr:ValueId>
+</xr:GeneratedType>
+<xr:GeneratedType name="EnumManager.{name}" category="Manager">
+<xr:TypeId>55555555-5555-4555-8555-555555555553</xr:TypeId>
+<xr:ValueId>55555555-5555-4555-8555-555555555554</xr:ValueId>
+</xr:GeneratedType>
+<xr:GeneratedType name="EnumList.{name}" category="List">
+<xr:TypeId>55555555-5555-4555-8555-555555555555</xr:TypeId>
+<xr:ValueId>55555555-5555-4555-8555-555555555556</xr:ValueId>
+</xr:GeneratedType>
+</InternalInfo>
+<Properties><Name>{name}</Name>{synonym}<Comment/>
+{list_presentation}</Properties>
+<ChildObjects/>
+</Enum></MetaDataObject>"#
+        )
+    }
+
     fn validate_stdout_with_presentations(
         test_name: &str,
         synonym_items: &[(&str, &str)],
         list_presentation_items: &[(&str, &str)],
         configured_languages: &[(&str, &str)],
     ) -> String {
+        assert!(
+            !configured_languages.is_empty(),
+            "presentation validation requires an explicit language profile"
+        );
         let context = temp_context(test_name);
         let object_path = context.cwd.join("Documents").join("SampleShipment.xml");
         let synonym = format!("<Synonym>{}</Synonym>", localized_text(synonym_items));
@@ -4264,29 +4367,15 @@ mod edit_tests {
         let xml = sample_document_xml("<RegisterRecords/>")
             .replace("<Synonym/>", &synonym)
             .replace("<Comment/>", &format!("<Comment/>{list_presentation}"));
+        let language_names = configured_languages
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        write_owner(&context.cwd, "Document", "SampleShipment", &language_names);
         write_file(&object_path, &xml);
 
-        if !configured_languages.is_empty() {
-            let language_children = configured_languages
-                .iter()
-                .map(|(name, _)| format!("<Language>{name}</Language>"))
-                .collect::<String>();
-            write_file(
-                &context.cwd.join("Configuration.xml"),
-                &format!(
-                    r#"<?xml version="1.0" encoding="UTF-8"?>
-<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
-  <Configuration uuid="33333333-3333-4333-8333-333333333333">
-    <Properties><Name>TestConfiguration</Name></Properties>
-    <ChildObjects>{language_children}</ChildObjects>
-  </Configuration>
-</MetaDataObject>
-"#
-                ),
-            );
-            for (name, code) in configured_languages {
-                write_language_fixture(&context, name, code);
-            }
+        for (name, code) in configured_languages {
+            write_language_fixture(&context, name, code);
         }
 
         let mut args = serde_json::Map::new();
@@ -4607,6 +4696,90 @@ mod edit_tests {
     }
 
     #[test]
+    fn validate_meta_does_not_apply_list_command_limit_to_common_module() {
+        let outcome = validate_registered_object(
+            "CommonModule",
+            "LongModule",
+            &sample_common_module_named(
+                "LongModule",
+                &[(
+                    "ru",
+                    "Очень длинный синоним общего модуля для проверки ограничения",
+                )],
+            ),
+            &[],
+        );
+        let stdout = outcome_text(&outcome);
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert!(!stdout.contains("longer than 38 characters"), "{stdout}");
+    }
+
+    #[test]
+    fn validate_meta_prefers_list_presentation_per_registered_language() {
+        let outcome = validate_registered_object(
+            "Enum",
+            "Status",
+            &sample_enum_with_presentations(
+                "Status",
+                &[
+                    (
+                        "ru",
+                        "Очень длинный синоним для командного интерфейса перечисления",
+                    ),
+                    ("en", "Status"),
+                ],
+                &[("ru", "Статусы")],
+            ),
+            &[("Русский", "ru"), ("English", "en")],
+        );
+        let stdout = outcome_text(&outcome);
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert!(!stdout.contains("language 'ru'"), "{stdout}");
+    }
+
+    #[test]
+    fn validate_meta_uses_synonym_when_registered_language_has_no_list_presentation() {
+        let outcome = validate_registered_object(
+            "Enum",
+            "Status",
+            &sample_enum_with_presentations(
+                "Status",
+                &[(
+                    "en",
+                    "A very long status title intended for the command interface",
+                )],
+                &[("ru", "Статусы")],
+            ),
+            &[("Русский", "ru"), ("English", "en")],
+        );
+        let stdout = outcome_text(&outcome);
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert!(stdout.contains("Synonym"), "{stdout}");
+        assert!(stdout.contains("language 'en'"), "{stdout}");
+    }
+
+    #[test]
+    fn validate_meta_skips_missing_or_empty_text_for_registered_language() {
+        let outcome = validate_registered_object(
+            "Enum",
+            "Status",
+            &sample_enum_with_presentations(
+                "Status",
+                &[("ru", "Статус"), ("en", "")],
+                &[("ru", "Статусы")],
+            ),
+            &[("Русский", "ru"), ("English", "en")],
+        );
+        let stdout = outcome_text(&outcome);
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert!(!stdout.contains("language 'en'"), "{stdout}");
+    }
+
+    #[test]
     fn validate_meta_checks_every_configured_language() {
         let stdout = validate_stdout_with_presentations(
             "validate-every-configured-language",
@@ -4657,26 +4830,6 @@ mod edit_tests {
     }
 
     #[test]
-    fn validate_meta_observes_languages_from_sibling_localized_properties() {
-        let xml = sample_document_xml("<RegisterRecords/>").replace(
-            "<Comment/>",
-            "<Comment/><BriefInformation><v8:item><v8:lang>en</v8:lang><v8:content>Shipment processing</v8:content></v8:item></BriefInformation>",
-        );
-        let document = Document::parse(&xml).unwrap();
-        let type_node = document
-            .root_element()
-            .children()
-            .find(|node| node.is_element())
-            .unwrap();
-        let properties = meta_info_child(type_node, "Properties").unwrap();
-
-        assert_eq!(
-            meta_validate_observed_language_codes(properties),
-            vec!["en".to_string()]
-        );
-    }
-
-    #[test]
     fn validate_meta_ignores_non_v8_language_elements() {
         let xml = sample_document_xml("<RegisterRecords/>")
             .replace(
@@ -4700,22 +4853,6 @@ mod edit_tests {
             meta_validate_localized_values(synonym),
             vec![(None, "Shipment".to_string())]
         );
-        assert!(meta_validate_observed_language_codes(properties).is_empty());
-    }
-
-    #[test]
-    fn validate_meta_checks_all_language_neutral_presentations() {
-        let stdout = validate_stdout_with_presentations(
-            "validate-language-neutral-values",
-            &[(
-                "",
-                "A very long neutral synonym intended for the command interface",
-            )],
-            &[("", "Shipments")],
-            &[],
-        );
-        assert!(stdout.contains("Synonym"), "{stdout}");
-        assert!(stdout.contains("longer than 38 characters"), "{stdout}");
     }
 
     #[test]
@@ -5355,6 +5492,7 @@ fn meta_validate_one_with_scope(
     }
     meta_validate_check_properties(
         &mut report,
+        md_type,
         props_node,
         name_node,
         &obj_name,
@@ -5549,28 +5687,6 @@ pub(crate) fn meta_validate_localized_values(
         .collect()
 }
 
-pub(crate) fn meta_validate_observed_language_codes(
-    props_node: roxmltree::Node<'_, '_>,
-) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut language_codes = Vec::new();
-    for language_code in props_node
-        .descendants()
-        .filter(|node| {
-            node.is_element()
-                && node.tag_name().name() == "lang"
-                && node.tag_name().namespace() == Some("http://v8.1c.ru/8.1/data/core")
-        })
-        .map(meta_info_inner_text)
-    {
-        let language_code = language_code.trim();
-        if !language_code.is_empty() && seen.insert(language_code.to_string()) {
-            language_codes.push(language_code.to_string());
-        }
-    }
-    language_codes
-}
-
 pub(crate) fn meta_validate_check_internal_info(
     report: &mut MetaValidationReporter,
     md_type: &str,
@@ -5677,6 +5793,7 @@ pub(crate) fn meta_validate_check_internal_info(
 
 pub(crate) fn meta_validate_check_properties(
     report: &mut MetaValidationReporter,
+    md_type: &str,
     props_node: Option<roxmltree::Node<'_, '_>>,
     name_node: Option<roxmltree::Node<'_, '_>>,
     obj_name: &str,
@@ -5705,51 +5822,10 @@ pub(crate) fn meta_validate_check_properties(
         }
     }
     let synonym_values = meta_validate_localized_values(meta_info_child(props_node, "Synonym"));
-    let list_presentation_values =
-        meta_validate_localized_values(meta_info_child(props_node, "ListPresentation"));
     let syn_present = !synonym_values.is_empty();
 
-    let mut language_codes = configured_language_codes.to_vec();
-    if language_codes.is_empty() {
-        language_codes = meta_validate_observed_language_codes(props_node);
-    }
-
-    if language_codes.is_empty() {
-        for (_, text) in &list_presentation_values {
-            meta_validate_warn_long_command_text(report, "ListPresentation", text, None);
-        }
-        for (_, text) in &synonym_values {
-            meta_validate_warn_long_command_text(report, "Synonym", text, None);
-        }
-    } else {
-        for language_code in &language_codes {
-            let list_values = list_presentation_values
-                .iter()
-                .filter(|(language, _)| language.as_deref() == Some(language_code.as_str()))
-                .collect::<Vec<_>>();
-            if list_values.is_empty() {
-                for (_, text) in synonym_values
-                    .iter()
-                    .filter(|(language, _)| language.as_deref() == Some(language_code.as_str()))
-                {
-                    meta_validate_warn_long_command_text(
-                        report,
-                        "Synonym",
-                        text,
-                        Some(language_code),
-                    );
-                }
-            } else {
-                for (_, text) in list_values {
-                    meta_validate_warn_long_command_text(
-                        report,
-                        "ListPresentation",
-                        text,
-                        Some(language_code),
-                    );
-                }
-            }
-        }
+    if meta_validate_types_with_list_presentation().contains(&md_type) {
+        meta_validate_check_command_texts(report, props_node, configured_language_codes);
     }
     if check_ok {
         let syn_info = if syn_present {
@@ -5758,6 +5834,41 @@ pub(crate) fn meta_validate_check_properties(
             "no Synonym"
         };
         report.ok(format!("3. Properties: Name=\"{obj_name}\", {syn_info}"));
+    }
+}
+
+fn meta_validate_check_command_texts(
+    report: &mut MetaValidationReporter,
+    props_node: roxmltree::Node<'_, '_>,
+    language_codes: &[String],
+) {
+    let synonyms = meta_validate_localized_values(meta_info_child(props_node, "Synonym"));
+    let lists = meta_validate_localized_values(meta_info_child(props_node, "ListPresentation"));
+
+    for language_code in language_codes {
+        let list_values = lists
+            .iter()
+            .filter(|(language, text)| {
+                language.as_deref() == Some(language_code.as_str()) && !text.trim().is_empty()
+            })
+            .collect::<Vec<_>>();
+        let selected = if list_values.is_empty() {
+            synonyms
+                .iter()
+                .filter(|(language, text)| {
+                    language.as_deref() == Some(language_code.as_str()) && !text.trim().is_empty()
+                })
+                .map(|(_, text)| ("Synonym", text))
+                .collect::<Vec<_>>()
+        } else {
+            list_values
+                .into_iter()
+                .map(|(_, text)| ("ListPresentation", text))
+                .collect::<Vec<_>>()
+        };
+        for (source, text) in selected {
+            meta_validate_warn_long_command_text(report, source, text, Some(language_code));
+        }
     }
 }
 

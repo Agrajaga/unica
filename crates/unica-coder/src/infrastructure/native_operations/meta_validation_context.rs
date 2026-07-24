@@ -64,7 +64,6 @@ pub(crate) struct MetaValidationReadInspection {
 pub(crate) fn meta_validate_types_with_list_presentation() -> &'static [&'static str] {
     &[
         "ExchangePlan",
-        "FilterCriterion",
         "Catalog",
         "Document",
         "DocumentJournal",
