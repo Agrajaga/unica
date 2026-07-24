@@ -238,7 +238,13 @@ impl<'a> WorkspaceIndexService<'a> {
             }
         };
 
-        let info = match self.runner.run(&commands.info) {
+        let info = self.runner.run(&commands.info);
+        if active_lock(context, &source_root) {
+            return IndexStartReport {
+                warnings: vec!["rlm index building".to_string()],
+            };
+        }
+        let info = match info {
             Ok(output) => output,
             Err(error) => {
                 if let Some(message) = matching_failed.as_deref() {
@@ -348,7 +354,11 @@ impl<'a> WorkspaceIndexService<'a> {
             }
         };
 
-        let output = match self.runner.run(&commands.info) {
+        let output = self.runner.run(&commands.info);
+        if active_lock(context, &source_root) {
+            return IndexReadiness::Building;
+        }
+        let output = match output {
             Ok(output) => output,
             Err(error) => {
                 return matching_failed
@@ -1647,6 +1657,48 @@ source-set:
     }
 
     #[test]
+    fn startup_rechecks_active_lock_after_info_before_writing_ready() {
+        let context = test_context("lock-started-during-startup-info");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        let db_path = context.cache_root.join("rlm-tools-bsl/a/bsl_index.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        fs::write(&db_path, "").unwrap();
+        let runner = LockDuringInfoRunner::new(
+            context.clone(),
+            IndexOutput::success(format!("Index: {}\n  Status:   fresh\n", db_path.display())),
+        );
+        let service = WorkspaceIndexService::with_runner(&runner);
+
+        let report = service.start_for_workspace(&context, &Map::new(), false);
+
+        assert_eq!(report.warnings, vec!["rlm index building".to_string()]);
+        assert_eq!(read_bsl_index_status(&context).unwrap().status, "building");
+        runner.release();
+        cleanup(&context);
+    }
+
+    #[test]
+    fn readiness_rechecks_active_lock_after_info_before_returning_ready() {
+        let context = test_context("lock-started-during-readiness-info");
+        fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
+        let db_path = context.cache_root.join("rlm-tools-bsl/a/bsl_index.db");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        fs::write(&db_path, "").unwrap();
+        let runner = LockDuringInfoRunner::new(
+            context.clone(),
+            IndexOutput::success(format!("Index: {}\n  Status:   fresh\n", db_path.display())),
+        );
+        let service = WorkspaceIndexService::with_runner(&runner);
+
+        let readiness = service.ready_index(&context, &Map::new());
+
+        assert_eq!(readiness, IndexReadiness::Building);
+        assert_eq!(read_bsl_index_status(&context).unwrap().status, "building");
+        runner.release();
+        cleanup(&context);
+    }
+
+    #[test]
     fn stale_legacy_lock_is_recovered_and_starts_missing_index_build() {
         let context = test_context("stale-legacy-lock");
         fs::create_dir_all(context.workspace_root.join("src/CommonModules")).unwrap();
@@ -2818,6 +2870,48 @@ source-set:
     }
 
     struct FailingInfoRunner;
+
+    struct LockDuringInfoRunner {
+        context: WorkspaceContext,
+        output: IndexOutput,
+        lease: RefCell<Option<IndexLockLease>>,
+    }
+
+    impl LockDuringInfoRunner {
+        fn new(context: WorkspaceContext, output: IndexOutput) -> Self {
+            Self {
+                context,
+                output,
+                lease: RefCell::new(None),
+            }
+        }
+
+        fn release(&self) {
+            self.lease.borrow_mut().take();
+        }
+    }
+
+    impl IndexRunner for LockDuringInfoRunner {
+        fn run(&self, _command: &IndexCommand) -> Result<IndexOutput, String> {
+            let lock = lock_path(&self.context);
+            fs::create_dir_all(lock.parent().unwrap()).unwrap();
+            let lease =
+                acquire_index_lock(&lock, "build", &self.context.workspace_root.join("src"))
+                    .unwrap()
+                    .expect("competing maintenance should acquire the lock during info");
+            write_status(
+                &self.context,
+                BslIndexStatus::building("build", Some(&self.context.workspace_root.join("src"))),
+            )
+            .unwrap();
+            self.lease.replace(Some(lease));
+            Ok(self.output.clone())
+        }
+
+        fn start_background(&self, _job: IndexBackgroundJob) -> Result<(), String> {
+            panic!("active competing maintenance must prevent another background job")
+        }
+    }
 
     impl IndexRunner for FailingInfoRunner {
         fn run(&self, _command: &IndexCommand) -> Result<IndexOutput, String> {

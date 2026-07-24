@@ -155,6 +155,11 @@ This preserves the causal chain instead of reporting only the last command.
 An active lock has priority over marker state: while a worker owns the lock,
 readiness is `Building`.
 
+Both synchronous entry points recheck the active lock after the potentially
+blocking `index info` call and before interpreting or persisting that result.
+This prevents an older info snapshot from overwriting `building` or exposing
+the index while a competing request has started maintenance.
+
 Without an active lock, only a matching `failed` marker whose persisted
 `failure_class` is `terminal` blocks maintenance for the resolved source root.
 Terminal is written only after a successful update and recovery build still
@@ -234,6 +239,8 @@ No MCP request or response schema changes are required.
 ### Marker/readiness regression tests
 
 - A real active lock still returns `rlm index building`.
+- A lock acquired while `index info` is running wins before either entry point
+  writes or returns the older info result.
 - A terminal failed marker without an active lock returns `Failed(message)`.
 - A terminal failed marker is not overwritten by another automatic update.
 - A fresh info result replaces a previous terminal failed marker with `ready`.
@@ -252,9 +259,10 @@ The build-tools contract gate additionally runs the exact packaged
 
 1. initial build is fresh;
 2. changing only tracked-file mtimes produces `stale (content)`;
-3. update reports `Changed: 0` and `Fast path: True`;
-4. the following info remains `stale (content)`;
-5. a full build restores `fresh`.
+3. Git HEAD remains unchanged across update;
+4. update reports `Changed: 0` and `Fast path: True`;
+5. the following info remains `stale (content)`;
+6. a full build restores `fresh`.
 
 The fixture uses explicit sampling thresholds for a young, small index; it does
 not disable freshness sampling.

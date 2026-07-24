@@ -12,7 +12,9 @@
 
 - Keep the public MCP boundary as one server named `unica` with `unica.*` tools.
 - Do not change the bundled `rlm-tools-bsl` 1.26.0 command-line contract.
-- Do not disable or override `RLM_INDEX_SAMPLE_SIZE`.
+- Do not disable production freshness sampling or set
+  `RLM_INDEX_SAMPLE_SIZE=0`; the isolated real-tool fixture may use explicit
+  non-zero sampling thresholds.
 - Only `stale (content)` after a successful update triggers a full build.
 - Run at most one recovery build per update job.
 - Return `rlm index building` only while an active Unica index lock exists.
@@ -1107,8 +1109,8 @@ Current result:
   release asset whose SHA-256 matches `tools.lock.json`;
 - GitHub build-tools jobs for the current PR head: PASS on darwin-arm64,
   linux-x64, and win-x64, including the real packaged-binary sequence
-  `fresh -> mtime-only stale -> Changed: 0/Fast path: True -> stale -> build ->
-  fresh`.
+  `fresh -> mtime-only stale -> unchanged HEAD -> Changed: 0/Fast path: True ->
+  stale -> build -> fresh`.
 
 Expected: the new packaged-binary recovery contract passes on every build-tools
 target, the public server remains `unica`, and no bundled tool contract changes

@@ -296,8 +296,34 @@ def check_rlm_mtime_recovery_contract(
             )
             return errors
 
+        head_status, head_before_update = run_command(
+            ["git", "rev-parse", "HEAD"],
+            workspace,
+        )
+        if head_status != 0 or not head_before_update.strip():
+            errors.append(
+                "rlm mtime recovery: failed to read Git HEAD before update: "
+                f"{head_before_update.strip()}"
+            )
+            return errors
         update = invoke("update")
         if update is None:
+            return errors
+        head_status, head_after_update = run_command(
+            ["git", "rev-parse", "HEAD"],
+            workspace,
+        )
+        if head_status != 0 or not head_after_update.strip():
+            errors.append(
+                "rlm mtime recovery: failed to read Git HEAD after update: "
+                f"{head_after_update.strip()}"
+            )
+            return errors
+        if head_after_update.strip() != head_before_update.strip():
+            errors.append(
+                "rlm mtime recovery: Git HEAD changed during update: "
+                f"{head_before_update.strip()} -> {head_after_update.strip()}"
+            )
             return errors
         if "Changed: 0" not in update or "Fast path: True" not in update:
             errors.append(

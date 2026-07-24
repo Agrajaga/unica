@@ -470,6 +470,8 @@ class ProductContractTests(unittest.TestCase):
 
         def run_git(command, cwd):
             git_commands.append(command)
+            if command == ["git", "rev-parse", "HEAD"]:
+                return 0, "fixture-head\n"
             return 0, ""
 
         with patch.object(module, "run_command", side_effect=run_git):
@@ -500,7 +502,40 @@ class ProductContractTests(unittest.TestCase):
                 [*signing_disabled, "add", "."],
                 [*signing_disabled, "commit", "-q", "-m", "fixture"],
                 ["git", "status", "--porcelain", "--untracked-files=no"],
+                ["git", "rev-parse", "HEAD"],
+                ["git", "rev-parse", "HEAD"],
             ],
+        )
+
+    def test_rlm_mtime_recovery_contract_rejects_changed_git_head(self) -> None:
+        module = load_contract_module()
+        outputs = iter(
+            [
+                (0, "Index built\n"),
+                (0, "Status: fresh\n"),
+                (0, "Status: stale (content)\n"),
+                (0, "Changed: 0\nFast path: True\n"),
+                (0, "Status: stale (content)\n"),
+                (0, "Index built\n"),
+                (0, "Status: fresh\n"),
+            ]
+        )
+        heads = iter(["initial-head\n", "changed-head\n"])
+
+        def run_git(command, cwd):
+            if command == ["git", "rev-parse", "HEAD"]:
+                return 0, next(heads)
+            return 0, ""
+
+        with patch.object(module, "run_command", side_effect=run_git):
+            errors = module.check_rlm_mtime_recovery_contract(
+                Path("rlm-bsl-index"),
+                run_rlm=lambda command, cwd, env: next(outputs),
+            )
+
+        self.assertTrue(
+            any("Git HEAD changed during update" in error for error in errors),
+            errors,
         )
 
     def test_rlm_schema_contract_reports_missing_column(self) -> None:
