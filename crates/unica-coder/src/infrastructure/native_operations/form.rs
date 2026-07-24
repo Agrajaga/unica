@@ -4212,12 +4212,20 @@ enum FormEditValidation {
     Passed,
 }
 
+struct FormEditSuccess {
+    stdout: String,
+    form_path: PathBuf,
+    changed: bool,
+    warnings: Vec<String>,
+    removals: Vec<FormEditPlannedRemoval>,
+}
+
 fn form_edit_with_mode_data(
     args: &Map<String, Value>,
     context: &WorkspaceContext,
     mode: FormEditMode,
 ) -> FormEditExecution {
-    let edit_result = (|| -> Result<(String, PathBuf, bool, Vec<String>, Vec<FormEditPlannedRemoval>), String> {
+    let edit_result = (|| -> Result<FormEditSuccess, String> {
         let form_path_raw = required_path(args, FORM_PATH, "FormPath")?;
         let form_path = absolutize(form_path_raw.clone(), &context.cwd);
         if !form_path.exists() {
@@ -4510,11 +4518,23 @@ fn form_edit_with_mode_data(
         }
         stdout.push_str("Run /form-validate to verify.\n");
 
-        Ok((stdout, form_path, changed, warnings, planned_removals))
+        Ok(FormEditSuccess {
+            stdout,
+            form_path,
+            changed,
+            warnings,
+            removals: planned_removals,
+        })
     })();
 
     match edit_result {
-        Ok((stdout, form_path, changed, warnings, removals)) => FormEditExecution {
+        Ok(FormEditSuccess {
+            stdout,
+            form_path,
+            changed,
+            warnings,
+            removals,
+        }) => FormEditExecution {
             outcome: AdapterOutcome {
                 ok: true,
                 summary: if mode.is_preview() && !changed {
@@ -11513,6 +11533,99 @@ mod tests {
     }
 
     #[test]
+    fn form_edit_remove_apply_is_atomic_when_a_later_target_is_missing() {
+        let context = temp_context("edit-remove-atomic-missing");
+        let form_path = context.cwd.join("Form.xml");
+        let original = form_edit_remove_test_xml(
+            r#"		<InputField name="First" id="1"/>
+		<InputField name="Second" id="2"/>
+"#,
+        )
+        .into_bytes();
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({
+                    "removeElements": [
+                        {"name": "First"},
+                        {"name": "Missing"},
+                        {"name": "Second"}
+                    ]
+                }),
+            ),
+        ]);
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(!outcome.ok, "{outcome:?}");
+        assert!(
+            outcome
+                .errors
+                .iter()
+                .any(|error| error.contains("FORM_ELEMENT_NOT_FOUND")),
+            "{outcome:?}"
+        );
+        assert!(outcome.changes.is_empty(), "{outcome:?}");
+        assert_eq!(fs::read(&form_path).unwrap(), original);
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
+    fn form_edit_remove_apply_preserves_bom_and_crlf() {
+        let context = temp_context("edit-remove-bom-crlf");
+        let form_path = context.cwd.join("Form.xml");
+        let crlf_xml = form_edit_remove_test_xml(
+            r#"		<InputField name="RemoveMe" id="1">
+			<ContextMenu name="RemoveMeContextMenu" id="2"/>
+			<ExtendedTooltip name="RemoveMeExtendedTooltip" id="3"/>
+		</InputField>
+		<InputField name="KeepMe" id="4">
+			<ContextMenu name="KeepMeContextMenu" id="5"/>
+			<ExtendedTooltip name="KeepMeExtendedTooltip" id="6"/>
+		</InputField>
+"#,
+        )
+        .replace('\n', "\r\n");
+        let mut original = vec![0xef, 0xbb, 0xbf];
+        original.extend_from_slice(crlf_xml.as_bytes());
+        fs::write(&form_path, &original).unwrap();
+        let args = Map::from_iter([
+            (
+                "FormPath".to_string(),
+                json!(form_path.display().to_string()),
+            ),
+            (
+                "definition".to_string(),
+                json!({"removeElements": [{"name": "RemoveMe"}]}),
+            ),
+        ]);
+
+        let outcome = edit_form(&args, &context);
+
+        assert!(outcome.ok, "{outcome:?}");
+        let updated = fs::read(&form_path).unwrap();
+        assert!(updated.starts_with(&[0xef, 0xbb, 0xbf]), "{updated:?}");
+        let updated_text = std::str::from_utf8(&updated[3..]).unwrap();
+        assert_platform_text_uses_crlf_without_bare_lf(updated_text);
+        assert!(
+            !updated_text.contains("name=\"RemoveMe\""),
+            "{updated_text}"
+        );
+        assert!(updated_text.contains("name=\"KeepMe\""), "{updated_text}");
+
+        let validation = validate_form(&args, &context);
+        assert!(validation.ok, "{validation:?}");
+
+        let _ = fs::remove_dir_all(&context.cwd);
+    }
+
+    #[test]
     fn form_edit_remove_preview_reports_missing_target_with_stable_code() {
         let context = temp_context("edit-remove-missing");
         let form_path = context.cwd.join("Form.xml");
@@ -11835,6 +11948,16 @@ mod tests {
                 "Dependent",
             ),
             (
+                "dotted-standard-command-target",
+                r#"		<Table name="Table.Group" id="1"/>
+		<Button name="Dependent" id="2">
+			<CommandName>Form.Item.Table.Group.StandardCommand.Add</CommandName>
+		</Button>
+"#,
+                "CommandName",
+                "Dependent",
+            ),
+            (
                 "addition-source-item",
                 r#"		<Table name="Target" id="1"/>
 		<SearchStringAddition name="Dependent" id="2">
@@ -11850,15 +11973,20 @@ mod tests {
         ];
 
         for (case, child_items, property, owner) in cases {
+            let target = if case == "dotted-standard-command-target" {
+                "Table.Group"
+            } else {
+                "Target"
+            };
             assert_form_edit_remove_rejected_identically(
                 &format!("edit-remove-dangling-{case}"),
                 child_items,
-                json!({"removeElements": [{"name": "Target"}]}),
+                json!({"removeElements": [{"name": target}]}),
                 &[
                     "FORM_EDIT_REMOVE_SURVIVING_REFERENCE",
                     property,
                     owner,
-                    "Target",
+                    target,
                 ],
             );
         }

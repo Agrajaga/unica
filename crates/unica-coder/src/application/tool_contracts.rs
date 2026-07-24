@@ -2300,6 +2300,14 @@ mod tests {
         let cases = [
             (json!({"typoSection": []}), "FORM_EDIT_UNKNOWN_SECTION"),
             (
+                json!({"removeElements": [{}]}),
+                "FORM_EDIT_REMOVE_ELEMENT_MISSING_NAME",
+            ),
+            (
+                json!({"removeElements": [{"name": 42}]}),
+                "FORM_EDIT_REMOVE_ELEMENT_MISSING_NAME",
+            ),
+            (
                 json!({"removeElements": [{"name": "Target", "after": "Other"}]}),
                 "FORM_EDIT_REMOVE_ELEMENT_UNKNOWN_FIELD",
             ),

@@ -1770,6 +1770,19 @@ mod tests {
         assert_eq!(applied.cache.events, vec!["FormChanged"]);
         assert!(applied.stdout.is_some());
 
+        let validation_args = json!({
+            "cwd": workspace,
+            "FormPath": form_path
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let validation = app
+            .call_tool("unica.form.validate", &validation_args)
+            .unwrap();
+        assert!(validation.ok, "{:?}", validation.errors);
+        assert!(validation.cache.events.is_empty());
+
         let non_removal_form_path = workspace.join("NonRemoval.xml");
         std::fs::write(
             &non_removal_form_path,
@@ -1801,18 +1814,15 @@ mod tests {
         assert_eq!(non_removal.cache.events, vec!["FormChanged"]);
 
         let no_op_form_path = workspace.join("NoOp.xml");
-        std::fs::write(
-            &no_op_form_path,
-            r#"<?xml version="1.0" encoding="utf-8"?>
+        let no_op_original = r#"<?xml version="1.0" encoding="utf-8"?>
 <Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.20">
 	<AutoCommandBar name="FormCommandBar" id="-1"/>
 	<ChildItems/>
 	<Attributes/>
 	<Commands/>
 </Form>
-"#,
-        )
-        .unwrap();
+"#;
+        std::fs::write(&no_op_form_path, no_op_original).unwrap();
         let no_op_args = json!({
             "cwd": workspace,
             "dryRun": false,
@@ -1829,6 +1839,10 @@ mod tests {
             Some(json!({"changed": false, "removed": [], "validation": "passed"}))
         );
         assert!(no_op.cache.events.is_empty());
+        assert_eq!(
+            std::fs::read(&no_op_form_path).unwrap(),
+            no_op_original.as_bytes()
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
