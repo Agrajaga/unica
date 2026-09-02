@@ -26,7 +26,8 @@ use std::sync::{Arc, Mutex};
 use crate::domain::source_revision::SourceRevision;
 use crate::infrastructure::platform::filesystem::{
     create_new_directory_child, file_identity, hard_link_count, metadata_is_link_or_reparse_point,
-    open_directory_child_nofollow, open_directory_nofollow, open_regular_child_nofollow,
+    open_absolute_directory_path_nofollow, open_directory_child_nofollow, open_directory_nofollow,
+    open_or_create_absolute_directory_path_nofollow, open_regular_child_nofollow,
     prepare_file_for_removal, remove_identity_bound_empty_directory_child,
     remove_identity_bound_regular_child, rename_identity_bound_regular_child_no_replace,
     rename_no_replace, retain_regular_child_for_cleanup, FileIdentity, PortablePermissions,
@@ -3634,6 +3635,7 @@ struct PublishedCreate {
 #[derive(Debug)]
 struct PublishedRegistration {
     target: PathBuf,
+    target_parent: Arc<fs::File>,
     recovery: RecoveryCleanup,
     original: Vec<u8>,
     published: PublishedFileExpectation,
@@ -3671,6 +3673,28 @@ impl RecoveryDirectory {
     fn reserve(path: &Path) -> Result<Self, (ErrorKind, String)> {
         let route = absolute_lexical_path(path)
             .map_err(|error| (ErrorKind::InvalidInput, error.to_string()))?;
+        let lexical_parent = route.parent().ok_or_else(|| {
+            (
+                ErrorKind::InvalidInput,
+                format!(
+                    "registration recovery directory has no parent: {}",
+                    route.display()
+                ),
+            )
+        })?;
+        let parent = open_absolute_directory_path_nofollow(lexical_parent).map_err(|error| {
+            (
+                error.kind(),
+                format!(
+                    "failed to bind registration recovery parent identity {} without following links or reparse points: {error}",
+                    lexical_parent.display()
+                ),
+            )
+        })?;
+        Self::reserve_with_parent(route, parent)
+    }
+
+    fn reserve_with_parent(route: PathBuf, parent: fs::File) -> Result<Self, (ErrorKind, String)> {
         let name = route
             .file_name()
             .filter(|name| !name.is_empty())
@@ -3683,39 +3707,12 @@ impl RecoveryDirectory {
                     ),
                 )
             })?;
-        let lexical_parent = route.parent().ok_or_else(|| {
-            (
-                ErrorKind::InvalidInput,
-                format!(
-                    "registration recovery directory has no parent: {}",
-                    route.display()
-                ),
-            )
-        })?;
-        let canonical_parent = fs::canonicalize(lexical_parent).map_err(|error| {
-            (
-                error.kind(),
-                format!(
-                    "failed to resolve registration recovery parent identity {}: {error}",
-                    lexical_parent.display()
-                ),
-            )
-        })?;
-        let parent = open_directory_nofollow(&canonical_parent).map_err(|error| {
-            (
-                error.kind(),
-                format!(
-                    "failed to bind registration recovery parent identity {}: {error}",
-                    canonical_parent.display()
-                ),
-            )
-        })?;
         let parent_identity = file_identity(&parent).map_err(|error| {
             (
                 error.kind(),
                 format!(
                     "failed to inspect registration recovery parent identity {}: {error}",
-                    canonical_parent.display()
+                    route.parent().unwrap_or_else(|| Path::new(".")).display()
                 ),
             )
         })?;
@@ -3780,22 +3777,16 @@ impl RecoveryDirectory {
                 self.path.display()
             )
         })?;
-        let canonical_parent = fs::canonicalize(lexical_parent).map_err(|error| {
+        let parent = open_absolute_directory_path_nofollow(lexical_parent).map_err(|error| {
             format!(
-                "registration recovery parent route could not be resolved; replacement left untouched at {}: {error}",
+                "registration recovery parent identity could not be proven without following links or reparse points; replacement left untouched at {}: {error}",
                 lexical_parent.display()
-            )
-        })?;
-        let parent = open_directory_nofollow(&canonical_parent).map_err(|error| {
-            format!(
-                "registration recovery parent identity could not be proven; replacement left untouched at {}: {error}",
-                canonical_parent.display()
             )
         })?;
         let parent_identity = file_identity(&parent).map_err(|error| {
             format!(
                 "failed to recheck registration recovery parent identity {}; replacement left untouched: {error}",
-                canonical_parent.display()
+                lexical_parent.display()
             )
         })?;
         if parent_identity != self.parent_identity {
@@ -3873,6 +3864,17 @@ impl RecoveryCleanup {
     fn reserve(directory: &Path) -> Result<Self, (ErrorKind, String)> {
         Ok(Self {
             directory: RecoveryDirectory::reserve(directory)?,
+            artifact: None,
+            directory_removed: false,
+        })
+    }
+
+    fn reserve_with_parent(
+        directory: PathBuf,
+        parent: fs::File,
+    ) -> Result<Self, (ErrorKind, String)> {
+        Ok(Self {
+            directory: RecoveryDirectory::reserve_with_parent(directory, parent)?,
             artifact: None,
             directory_removed: false,
         })
@@ -3998,6 +4000,7 @@ impl RecoveryCleanup {
 #[derive(Debug)]
 struct PendingRecovery {
     cleanup: RecoveryCleanup,
+    target_parent: Arc<fs::File>,
     armed: bool,
 }
 
@@ -4068,6 +4071,7 @@ impl PendingRecovery {
         self.armed = false;
         PublishedRegistration {
             target,
+            target_parent: Arc::clone(&self.target_parent),
             recovery: self.cleanup.clone(),
             original,
             published,
@@ -4375,12 +4379,22 @@ fn recheck_removal(removal: &PlannedRemoval) -> Result<(), String> {
     }
 }
 
+#[derive(Debug)]
+struct RecoveryParent {
+    path: PathBuf,
+    directory: Arc<fs::File>,
+}
+
 fn reserve_removal_recovery(target: &Path) -> Result<PendingRemovalRecovery, String> {
     let recovery_parent = recovery_parent(target)?;
     for attempt in 1..=16 {
-        let directory = unique_recovery_directory(&recovery_parent, target);
-        match fs::create_dir(&directory) {
-            Ok(()) => {
+        let directory = unique_recovery_directory(&recovery_parent.path, target);
+        let name = directory
+            .file_name()
+            .expect("generated recovery directory must have a child name");
+        match create_new_directory_child(&recovery_parent.directory, name) {
+            Ok(retained_directory) => {
+                drop(retained_directory);
                 return Ok(PendingRemovalRecovery {
                     path: directory.join("original"),
                     directory,
@@ -4405,21 +4419,20 @@ fn reserve_removal_recovery(target: &Path) -> Result<PendingRemovalRecovery, Str
 
 fn reserve_recovery(target: &Path) -> Result<PendingRecovery, String> {
     let recovery_parent = recovery_parent(target)?;
-    reserve_recovery_with(target, || {
-        unique_recovery_directory(&recovery_parent, target)
-    })
-}
-
-fn reserve_recovery_with(
-    target: &Path,
-    mut next_directory: impl FnMut() -> PathBuf,
-) -> Result<PendingRecovery, String> {
+    let target_parent = open_target_parent_nofollow(target)?;
     for attempt in 1..=16 {
-        let directory = next_directory();
-        match RecoveryCleanup::reserve(&directory) {
+        let directory = unique_recovery_directory(&recovery_parent.path, target);
+        let parent = recovery_parent.directory.try_clone().map_err(|error| {
+            format!(
+                "failed to retain private compile recovery parent {}: {error}",
+                recovery_parent.path.display()
+            )
+        })?;
+        match RecoveryCleanup::reserve_with_parent(directory.clone(), parent) {
             Ok(cleanup) => {
                 return Ok(PendingRecovery {
                     cleanup,
+                    target_parent: Arc::clone(&target_parent),
                     armed: true,
                 });
             }
@@ -4439,21 +4452,93 @@ fn reserve_recovery_with(
     ))
 }
 
-fn recovery_parent(target: &Path) -> Result<PathBuf, String> {
+fn reserve_recovery_with(
+    target: &Path,
+    mut next_directory: impl FnMut() -> PathBuf,
+) -> Result<PendingRecovery, String> {
+    let target_parent = open_target_parent_nofollow(target)?;
+    for attempt in 1..=16 {
+        let directory = next_directory();
+        match RecoveryCleanup::reserve(&directory) {
+            Ok(cleanup) => {
+                return Ok(PendingRecovery {
+                    cleanup,
+                    target_parent: Arc::clone(&target_parent),
+                    armed: true,
+                });
+            }
+            Err((ErrorKind::AlreadyExists, _)) if attempt < 16 => continue,
+            Err((_kind, error)) => {
+                return Err(format!(
+                    "failed to reserve no-clobber recovery for {} at {}: {error}",
+                    target.display(),
+                    directory.display()
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "failed to reserve no-clobber recovery for {}",
+        target.display()
+    ))
+}
+
+fn open_target_parent_nofollow(target: &Path) -> Result<Arc<fs::File>, String> {
+    let parent = absolute_lexical_path(usable_parent(target)).map_err(|error| {
+        format!(
+            "failed to resolve compile target parent {}: {error}",
+            usable_parent(target).display()
+        )
+    })?;
+    open_absolute_directory_path_nofollow(&parent)
+        .map(Arc::new)
+        .map_err(|error| {
+            format!(
+                "failed to retain compile target parent {} without following links or reparse points: {error}",
+                parent.display()
+            )
+        })
+}
+
+fn recovery_parent(target: &Path) -> Result<RecoveryParent, String> {
     let workspace = usable_parent(target)
         .ancestors()
         .find(|ancestor| ancestor.join("v8project.yaml").is_file());
     let Some(workspace) = workspace else {
-        return Ok(usable_parent(target).to_path_buf());
+        let path = absolute_lexical_path(usable_parent(target)).map_err(|error| {
+            format!(
+                "failed to resolve compile recovery parent {}: {error}",
+                usable_parent(target).display()
+            )
+        })?;
+        let directory = open_absolute_directory_path_nofollow(&path).map_err(|error| {
+            format!(
+                "failed to bind compile recovery parent {} without following links or reparse points: {error}",
+                path.display()
+            )
+        })?;
+        return Ok(RecoveryParent {
+            path,
+            directory: Arc::new(directory),
+        });
     };
-    let private = workspace.join(".build/unica/recovery");
-    fs::create_dir_all(&private).map_err(|error| {
+    let private =
+        absolute_lexical_path(&workspace.join(".build/unica/recovery")).map_err(|error| {
+            format!(
+                "failed to resolve private compile recovery directory {}: {error}",
+                workspace.join(".build/unica/recovery").display()
+            )
+        })?;
+    let directory = open_or_create_absolute_directory_path_nofollow(&private).map_err(|error| {
         format!(
-            "failed to prepare private compile recovery directory {}: {error}",
+            "failed to prepare private compile recovery directory {} without following links or reparse points: {error}",
             private.display()
         )
     })?;
-    Ok(private)
+    Ok(RecoveryParent {
+        path: private,
+        directory: Arc::new(directory),
+    })
 }
 
 fn unique_recovery_directory(parent: &Path, target: &Path) -> PathBuf {
@@ -4947,9 +5032,13 @@ fn inspect_published_target(
 fn reserve_rollback_quarantine(target: &Path) -> Result<(PathBuf, PathBuf), String> {
     let recovery_parent = recovery_parent(target)?;
     for attempt in 1..=16 {
-        let directory = unique_recovery_directory(&recovery_parent, target);
-        match fs::create_dir(&directory) {
-            Ok(()) => {
+        let directory = unique_recovery_directory(&recovery_parent.path, target);
+        let name = directory
+            .file_name()
+            .expect("generated recovery directory must have a child name");
+        match create_new_directory_child(&recovery_parent.directory, name) {
+            Ok(retained_directory) => {
+                drop(retained_directory);
                 let path = directory.join("published");
                 return Ok((directory, path));
             }
@@ -5206,7 +5295,7 @@ fn rollback_registration(
             return;
         }
     };
-    let target_parent_handle = Arc::clone(&published.recovery.directory.parent);
+    let target_parent_handle = Arc::clone(&published.target_parent);
     match inspect_published_target(&quarantined, &published.published) {
         PublishedTargetState::Matches => {}
         PublishedTargetState::Missing => {
@@ -8272,6 +8361,68 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn private_recovery_rollback_restores_concurrent_registration_to_target_parent() {
+        let root = temp_root("private-recovery-rollback-concurrent-replacement");
+        fs::write(root.join("v8project.yaml"), b"source-set: []")
+            .expect("workspace marker must be written");
+        let source_root = root.join("src");
+        fs::create_dir(&source_root).expect("source root must be created");
+        let config = source_root.join("Configuration.xml");
+        let guard = source_root.join("Decision.bsl");
+        let original = configuration_bytes();
+        fs::write(&config, &original).expect("registration fixture must be written");
+        fs::write(&guard, b"stable").expect("guard fixture must be written");
+        let mut transaction = CompileTransaction::new();
+        transaction
+            .register_canonical_child(&config, "Role", "Reader")
+            .expect("registration must plan");
+        let diff = transaction
+            .registration_diffs()
+            .pop()
+            .expect("registration diff must exist");
+        let mut concurrent = original.clone();
+        concurrent.splice(diff.byte_range, diff.after);
+        transaction
+            .guard_exact_preimage(&guard, b"stable")
+            .expect("guard must plan");
+        let config_for_mutation = config.clone();
+        let root_for_mutation = root.clone();
+        let concurrent_for_mutation = concurrent.clone();
+        let error = with_before_rollback_mutation_hook(
+            move |path| {
+                assert_eq!(path, config_for_mutation);
+                let external = root_for_mutation.join("external-registration.xml");
+                fs::write(&external, &concurrent_for_mutation)
+                    .expect("concurrent registration must be written");
+                replace_file_atomically(&external, &config_for_mutation)
+                    .expect("concurrent registration must replace the published target");
+            },
+            || {
+                transaction.commit_with_post_validation(|| {
+                    fs::write(&guard, b"changed").expect("guard mutation must trigger rollback");
+                    Ok(())
+                })
+            },
+        )
+        .expect_err("late guard failure must roll the registration back");
+
+        assert!(error.contains("rollback conflict"), "{error}");
+        assert_eq!(
+            fs::read(&config).expect("concurrent target must be restored"),
+            concurrent
+        );
+        let private_recovery = root.join(".build/unica/recovery");
+        assert!(
+            fs::read_dir(&private_recovery)
+                .expect("private recovery root must remain readable")
+                .filter_map(Result::ok)
+                .all(|entry| !entry.path().join("published").exists()),
+            "restored concurrent target must leave every private quarantine"
+        );
+        fs::remove_dir_all(root).expect("temporary root must be removed");
+    }
+
+    #[test]
     fn registration_rollback_preserves_same_name_recovery_decoy_after_parent_swap() {
         if !testing::can_rename_parent_with_retained_cleanup_child_for_test() {
             return;
@@ -8893,6 +9044,50 @@ pub(crate) mod tests {
         assert!(removal.cleanup().is_empty());
         fs::remove_dir(&rollback_directory).expect("rollback quarantine must be removed");
         fs::remove_dir_all(root).expect("temporary root must be removed");
+    }
+
+    #[test]
+    fn compile_recovery_rejects_a_redirected_private_root_without_writing_through_it() {
+        let root = temp_root("private-recovery-root-link");
+        fs::write(root.join("v8project.yaml"), b"source-set: []")
+            .expect("workspace marker must be written");
+        let source_root = root.join("external-processors/sample");
+        fs::create_dir_all(source_root.join("Ext")).expect("source directories must be created");
+        let target = source_root.join("Ext/ObjectModule.bsl");
+        fs::write(&target, b"before").expect("registration target must be written");
+        let redirected = source_root.join("redirected-build");
+        fs::create_dir(&redirected).expect("redirect target must be created");
+        let build_link = root.join(".build");
+        let Some(link_result) = testing::create_dir_symlink_for_test(&redirected, &build_link)
+        else {
+            fs::remove_dir_all(root).expect("temporary root must be removed");
+            return;
+        };
+        if link_result.is_err() {
+            fs::remove_dir_all(root).expect("temporary root must be removed");
+            return;
+        }
+
+        let reservation = reserve_recovery(&target);
+        let redirected_recovery = redirected.join("unica/recovery");
+        if let Ok(mut recovery) = reservation {
+            let _ = recovery.cleanup();
+        }
+
+        assert!(
+            !redirected_recovery.exists(),
+            "private recovery preparation must not follow .build into the source tree"
+        );
+        testing::remove_dir_symlink_for_test(&build_link)
+            .expect("build link must be removed without following it");
+        fs::remove_dir_all(root).expect("temporary root must be removed");
+    }
+
+    #[test]
+    fn private_compile_recovery_contract_is_physical_and_rollback_safe() {
+        compile_recovery_is_reserved_outside_workspace_source_root();
+        compile_recovery_rejects_a_redirected_private_root_without_writing_through_it();
+        private_recovery_rollback_restores_concurrent_registration_to_target_parent();
     }
 
     #[test]

@@ -2,7 +2,7 @@
 id: DEC.2026-08-23.PRIVATE-COMPILE-RECOVERY
 status: active
 governs: product
-realized: crates/unica-coder/src/infrastructure/native_operations/compile_transaction.rs::compile_recovery_is_reserved_outside_workspace_source_root
+realized: crates/unica-coder/src/infrastructure/native_operations/compile_transaction.rs::private_compile_recovery_contract_is_physical_and_rollback_safe
 supersedes: []
 superseded-by: null
 establishes: [INV.SOURCE.PRIVATE-COMPILE-RECOVERY]
@@ -19,5 +19,6 @@ sibling recovery, необходимый автономным транзакци
 сделать последующую индексацию source-set невозможной. Приватный корень не
 попадает в обход исходников и остаётся на том же томе, что и workspace.
 
-**Цена.** Транзакция обязана найти ближайший `v8project.yaml` и подготовить
-приватный каталог до резервирования recovery.
+**Цена.** Транзакция обязана найти ближайший `v8project.yaml`, подготовить
+приватный каталог no-follow обходом и раздельно удерживать физические parent
+публикуемой цели и recovery до завершения rollback.

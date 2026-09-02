@@ -3,7 +3,7 @@ id: INV.SOURCE.PRIVATE-COMPILE-RECOVERY
 status: active
 governs: product
 decision: DEC.2026-08-23.PRIVATE-COMPILE-RECOVERY
-check: crates/unica-coder/src/infrastructure/native_operations/compile_transaction.rs::compile_recovery_is_reserved_outside_workspace_source_root
+check: crates/unica-coder/src/infrastructure/native_operations/compile_transaction.rs::private_compile_recovery_contract_is_physical_and_rollback_safe
 scope: [source]
 ---
 
@@ -11,4 +11,6 @@ scope: [source]
 
 Registration backup, removal backup и rollback quarantine для цели внутри
 workspace резервируются под `<workspace>/.build/unica/recovery`, а не внутри
-дерева исходников.
+дерева исходников. Подготовка и резервирование не следуют через symbolic link
+или reparse point, а rollback удерживает физический parent публикуемой цели
+отдельно от parent приватного recovery.
