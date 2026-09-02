@@ -22,17 +22,40 @@ pub(crate) mod code_intelligence;
 pub(crate) mod deferred_delivery;
 pub(crate) mod diagnostics;
 pub(crate) mod documentation;
+// This seam is intentionally dormant while production remains on v0.12.
+#[allow(dead_code)]
+pub(crate) mod invocation;
+// Durable lifecycle ownership is connected by the daemon slice, not v0.12.
+#[allow(dead_code)]
+pub(crate) mod invocation_store;
+pub(crate) mod invocation_store_actor;
+#[allow(dead_code)]
+pub(crate) mod invocation_store_v5;
+// Pure protocol-v5 lifecycle decisions are composed only by the hidden daemon.
+#[allow(dead_code)]
+pub(crate) mod invocation_v5;
 pub(crate) mod metadata;
 pub(crate) mod operation_descriptors;
 pub(crate) mod operational_config;
 mod outcome;
 pub(crate) mod ports;
 pub(crate) mod project_health;
+// The receipt authority is compiled before the private v5 daemon becomes the
+// default composition.
+#[allow(dead_code)]
+pub(crate) mod receipt_ledger;
+#[allow(dead_code)]
+pub(crate) mod receipt_ledger_actor;
 pub(crate) mod result_store;
 pub(crate) mod runtime_admission;
+pub(crate) mod shared_work;
 pub(crate) mod source_navigation;
 pub(crate) mod source_resources;
 pub(crate) mod tool_contracts;
+// The catalog is compiled for hidden canonical routing, while most semantic
+// descriptors remain unused until the atomic Task 22 public cutover.
+#[allow(dead_code)]
+pub(crate) mod v13;
 pub use tool_contracts::{input_schema_for_tool, strip_schema_descriptions};
 
 const PUBLIC_INVOCATION_DEADLINE: Duration = Duration::from_secs(5);
@@ -1434,9 +1457,38 @@ fn call_tool_with_runtime_admission(
     // обработчик скажет про отсутствующий движок ровно то же, что говорил до
     // сих пор. Предпросмотр ничего не исполняет и потому ничего не качает.
     if !dry_run {
-        if let Some(state) = ports.deliver_engine_if_missing(spec, &context, cancellation, progress)
-        {
-            return Ok(long_work_result(spec, &context, mode, state));
+        match ports.deliver_engine_if_missing(spec, &context, cancellation, progress) {
+            shared_work::EngineDeliveryState::NotRequired
+            | shared_work::EngineDeliveryState::Ready(_) => {}
+            shared_work::EngineDeliveryState::Working {
+                artifact,
+                received,
+                total,
+                poll_interval_ms,
+            } => {
+                let state = crate::domain::long_work::WorkState {
+                    status: crate::domain::long_work::WorkStatus::Working,
+                    status_message: match total {
+                        Some(total) => {
+                            format!("delivering {artifact}: {received} of {total} bytes on disk")
+                        }
+                        None => format!("delivering {artifact}: {received} bytes on disk"),
+                    },
+                    poll_interval_ms,
+                };
+                return Ok(long_work_result(spec, &context, mode, state));
+            }
+            shared_work::EngineDeliveryState::Failed { artifact, failure } => {
+                let state = crate::domain::long_work::WorkState {
+                    status: crate::domain::long_work::WorkStatus::Failed,
+                    status_message: format!(
+                        "delivery of {artifact} failed: {}",
+                        failure.legacy_diagnostic()
+                    ),
+                    poll_interval_ms: None,
+                };
+                return Ok(long_work_result(spec, &context, mode, state));
+            }
         }
     }
 
@@ -4517,7 +4569,7 @@ pub(crate) mod tests {
     struct DeliveryRecordingPorts {
         steps: std::sync::Mutex<Vec<&'static str>>,
         missing: Option<crate::domain::engine::MissingEngine>,
-        working: Option<crate::domain::long_work::WorkState>,
+        delivery: shared_work::EngineDeliveryState,
     }
 
     impl ports::ApplicationPorts for DeliveryRecordingPorts {
@@ -4558,9 +4610,9 @@ pub(crate) mod tests {
             _context: &WorkspaceContext,
             _cancellation: &CancellationToken,
             _progress: &dyn ProgressSink,
-        ) -> Option<crate::domain::long_work::WorkState> {
+        ) -> shared_work::EngineDeliveryState {
             self.steps.lock().expect("steps").push("delivery");
-            self.working.clone()
+            self.delivery.clone()
         }
 
         fn invoke_handler_with_operational_config(
@@ -4748,11 +4800,12 @@ pub(crate) mod tests {
         // Срез хоста уносит наш ответ целиком, поэтому отвечаем сами: успешный
         // результат с состоянием, а обработчик не зовётся — работать нечем.
         let ports = Arc::new(DeliveryRecordingPorts {
-            working: Some(crate::domain::long_work::WorkState {
-                status: crate::domain::long_work::WorkStatus::Working,
-                status_message: "delivering bsl-analyzer: 12 of 69 bytes on disk".to_owned(),
+            delivery: shared_work::EngineDeliveryState::Working {
+                artifact: "bsl-analyzer".to_owned(),
+                received: 12,
+                total: Some(69),
                 poll_interval_ms: Some(9_000),
-            }),
+            },
             ..Default::default()
         });
         let app = UnicaApplication::with_ports(ports.clone());
@@ -4774,6 +4827,13 @@ pub(crate) mod tests {
             Some(9_000)
         );
         assert_eq!(
+            result
+                .work
+                .as_ref()
+                .map(|work| work.status_message.as_str()),
+            Some("delivering bsl-analyzer: 12 of 69 bytes on disk")
+        );
+        assert_eq!(
             *ports.steps.lock().expect("steps"),
             vec!["delivery"],
             "обработчик не зовётся: движка ещё нет"
@@ -4785,11 +4845,13 @@ pub(crate) mod tests {
         // `working` — состояние, а не неудача, и потому `ok`. Отказ доставки —
         // неудача, и притворяться идущей работой ему нечем.
         let ports = Arc::new(DeliveryRecordingPorts {
-            working: Some(crate::domain::long_work::WorkState {
-                status: crate::domain::long_work::WorkStatus::Failed,
-                status_message: "delivery of bsl-analyzer failed: connection refused".to_owned(),
-                poll_interval_ms: None,
-            }),
+            delivery: shared_work::EngineDeliveryState::Failed {
+                artifact: "bsl-analyzer".to_owned(),
+                failure: Arc::new(shared_work::DeliveryFailure::new(
+                    shared_work::DeliveryFailureClass::Network,
+                    "connection refused",
+                )),
+            },
             ..Default::default()
         });
         let app = UnicaApplication::with_ports(ports.clone());
@@ -4810,6 +4872,10 @@ pub(crate) mod tests {
             "причина названа: {:?}",
             result.errors
         );
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| { error == "delivery of bsl-analyzer failed: connection refused" }));
         assert_eq!(
             result.work.as_ref().map(|work| work.status),
             Some(crate::domain::long_work::WorkStatus::Failed)
@@ -4957,8 +5023,9 @@ pub(crate) mod tests {
     #[test]
     fn public_definition_and_outline_accept_full_positive_i64_config_budget() {
         let workspace = std::env::temp_dir().join(format!(
-            "unica-public-full-range-read-{}",
-            std::process::id()
+            "unica-public-full-range-read-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
         ));
         let app = UnicaApplication::with_ports(Arc::new(
             OperationalConfigRecordingPorts::with_full_range_code_provider(workspace.clone()),
@@ -7384,12 +7451,13 @@ pub(crate) mod tests {
 
     fn temp_project_status_workspace(name: &str, source_path: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "unica-project-status-{name}-{}-{}",
+            "unica-project-status-{name}-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            uuid::Uuid::new_v4()
         ));
         let source_root = if source_path == "." {
             root.clone()
@@ -7410,7 +7478,11 @@ pub(crate) mod tests {
 
     #[test]
     fn project_map_reports_source_sets_as_read_only_json() {
-        let root = std::env::temp_dir().join(format!("unica-project-map-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-project-map-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         std::fs::write(
@@ -7753,8 +7825,9 @@ pub(crate) mod tests {
     #[test]
     fn project_map_reports_ambiguous_configuration_source_sets_without_failing() {
         let root = std::env::temp_dir().join(format!(
-            "unica-project-map-ambiguous-{}",
-            std::process::id()
+            "unica-project-map-ambiguous-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
         ));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(workspace.join("app")).unwrap();
@@ -7794,7 +7867,11 @@ pub(crate) mod tests {
 
     #[test]
     fn cf_info_reports_configuration_support_state_from_parent_configurations_bin() {
-        let root = std::env::temp_dir().join(format!("unica-cf-support-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-cf-support-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         let src = workspace.join("src");
         let ext = src.join("Ext");
@@ -7844,7 +7921,11 @@ pub(crate) mod tests {
 
     #[test]
     fn mutating_cf_edit_blocks_locked_configuration_directory_target() {
-        let root = std::env::temp_dir().join(format!("unica-cf-guard-dir-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-cf-guard-dir-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         let src = workspace.join("src");
         let ext = src.join("Ext");
@@ -7900,7 +7981,11 @@ pub(crate) mod tests {
 
     #[test]
     fn cf_edit_normalizes_crlf_before_lxml_compatible_write() {
-        let root = std::env::temp_dir().join(format!("unica-cf-crlf-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-cf-crlf-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         let src = workspace.join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -8883,7 +8968,11 @@ pub(crate) mod tests {
 
     #[test]
     fn cf_edit_add_child_object_does_not_escape_structural_crlf() {
-        let root = std::env::temp_dir().join(format!("unica-cf-child-crlf-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-cf-child-crlf-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         let src = workspace.join("src");
         let catalogs = src.join("Catalogs");
@@ -8945,8 +9034,11 @@ pub(crate) mod tests {
 
     #[test]
     fn cf_edit_remove_add_child_object_preserves_neighboring_childobjects() {
-        let root =
-            std::env::temp_dir().join(format!("unica-cf-issue55-roundtrip-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-cf-issue55-roundtrip-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         let src = workspace.join("src");
         let catalogs = src.join("Catalogs");
@@ -8995,8 +9087,11 @@ pub(crate) mod tests {
             &text[root_end..]
         }
 
-        let root =
-            std::env::temp_dir().join(format!("unica-cf-issue55-trailer-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-cf-issue55-trailer-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         let src = workspace.join("src");
         let catalogs = src.join("Catalogs");
@@ -9042,8 +9137,11 @@ pub(crate) mod tests {
 
     #[test]
     fn cf_edit_duplicate_add_child_object_does_not_rewrite_configuration() {
-        let root =
-            std::env::temp_dir().join(format!("unica-cf-issue55-noop-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-cf-issue55-noop-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         let src = workspace.join("src");
         let catalogs = src.join("Catalogs");
@@ -9088,7 +9186,11 @@ pub(crate) mod tests {
 
     #[test]
     fn meta_info_reports_locked_vendor_support_state_through_unica_boundary() {
-        let root = std::env::temp_dir().join(format!("unica-meta-support-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-meta-support-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         let src = workspace.join("src");
         let ext = src.join("Ext");
@@ -9209,19 +9311,35 @@ pub(crate) mod tests {
         let review = review
             .as_object()
             .expect("tool-surface review is a tool-name object");
-        let registered = tools();
+        let catalog = crate::application::v13::tool_catalog::catalog_for(
+            crate::application::tool_contracts::SurfaceRelease::V13,
+        )
+        .expect("canonical v0.13 catalog exists");
+        let registered = catalog
+            .tools
+            .iter()
+            .map(|tool| format!("unica.{}", tool.name))
+            .chain(
+                crate::application::v13::task_tools::compatibility_tool_contracts()
+                    .into_iter()
+                    .map(|tool| format!("unica.{}", tool.name)),
+            )
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(review.len(), registered.len());
+        assert_eq!(
+            review
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            registered
+        );
 
-        for tool in registered {
+        for name in registered {
             let entry = review
-                .get(tool.name)
-                .unwrap_or_else(|| panic!("{} has no tool-surface review", tool.name));
-            let expected = if entry["scope"] == "in" && entry["result"]["contract"] == "typed" {
-                ResultContract::Typed
-            } else {
-                ResultContract::ExternalStream
-            };
-            assert_eq!(tool.result_contract, expected, "{}", tool.name);
+                .get(&name)
+                .unwrap_or_else(|| panic!("{name} has no tool-surface review"));
+            assert_eq!(entry["scope"], "in", "{name}");
+            assert_eq!(entry["result"]["contract"], "typed", "{name}");
         }
     }
 
@@ -10500,8 +10618,9 @@ pub(crate) mod tests {
     #[test]
     fn cfe_patch_method_public_boundary_rejects_module_path_outside_extension() {
         let root = std::env::temp_dir().join(format!(
-            "unica-cfe-patch-public-containment-{}",
-            std::process::id()
+            "unica-cfe-patch-public-containment-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
         ));
         let workspace = root.join("workspace");
         let extension = workspace.join("ext");
@@ -11120,8 +11239,9 @@ pub(crate) mod tests {
     #[test]
     fn read_only_path_aliases_warn_for_older_directory_owned_inputs() {
         let root = std::env::temp_dir().join(format!(
-            "unica-application-read-format-aliases-{}",
-            std::process::id()
+            "unica-application-read-format-aliases-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
         ));
         let src = root.join("src");
         let extension = root.join("extension");
@@ -11197,8 +11317,9 @@ pub(crate) mod tests {
     #[test]
     fn mxl_compile_blocks_write_inside_older_dump_with_structured_diagnostic() {
         let root = std::env::temp_dir().join(format!(
-            "unica-application-format-guard-mxl-old-{}",
-            std::process::id()
+            "unica-application-format-guard-mxl-old-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
         ));
         let src = root.join("src");
         let output = src.join("Reports/Sales/Templates/Print/Ext/Template.xml");
@@ -11253,8 +11374,9 @@ pub(crate) mod tests {
     #[test]
     fn mxl_compile_allows_new_standalone_output() {
         let root = std::env::temp_dir().join(format!(
-            "unica-application-format-guard-mxl-standalone-{}",
-            std::process::id()
+            "unica-application-format-guard-mxl-standalone-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
         ));
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -11970,7 +12092,11 @@ pub(crate) mod tests {
             }
         }
 
-        let root = std::env::temp_dir().join(format!("unica-ports-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-ports-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let mut args = Map::new();
         args.insert("cwd".to_string(), Value::String(root.display().to_string()));
@@ -12077,8 +12203,11 @@ pub(crate) mod tests {
             fn notify_invalidation(&self, _context: &WorkspaceContext, _events: &[DomainEvent]) {}
         }
 
-        let root =
-            std::env::temp_dir().join(format!("unica-pre-recorded-cache-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-pre-recorded-cache-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let mut args = Map::new();
         args.insert("cwd".to_string(), Value::String(root.display().to_string()));
@@ -12411,8 +12540,11 @@ pub(crate) mod tests {
 
     #[test]
     fn support_edit_missing_parent_configurations_is_safe_noop() {
-        let root =
-            std::env::temp_dir().join(format!("unica-support-edit-no-bin-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-support-edit-no-bin-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         let src = workspace.join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -13015,7 +13147,11 @@ pub(crate) mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{nanos}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         root
     }
@@ -13413,7 +13549,11 @@ pub(crate) mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{nanos}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         let src = workspace.join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -13625,7 +13765,11 @@ pub(crate) mod tests {
         prefix: &str,
         parent_configurations_bin: String,
     ) -> (PathBuf, PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         let src = workspace.join("src");
         let ext = src.join("Ext");
@@ -13665,8 +13809,11 @@ pub(crate) mod tests {
 
     #[test]
     fn native_xml_metadata_tools_reject_edt_source_set_targets() {
-        let root =
-            std::env::temp_dir().join(format!("unica-xml-tool-edt-guard-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-xml-tool-edt-guard-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(workspace.join("src/Configuration")).unwrap();
         std::fs::write(
@@ -13704,8 +13851,9 @@ pub(crate) mod tests {
     #[test]
     fn native_xml_metadata_tools_reject_ambiguous_source_set_targets() {
         let root = std::env::temp_dir().join(format!(
-            "unica-xml-tool-ambiguous-guard-{}",
-            std::process::id()
+            "unica-xml-tool-ambiguous-guard-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
         ));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -13745,8 +13893,9 @@ pub(crate) mod tests {
     #[test]
     fn read_only_native_outfile_is_rejected_before_any_write() {
         let root = std::env::temp_dir().join(format!(
-            "unica-read-outfile-write-guard-{}",
-            std::process::id()
+            "unica-read-outfile-write-guard-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
         ));
         let workspace = root.join("workspace");
         let outside = root.join("outside").join("report.txt");
@@ -13795,8 +13944,11 @@ pub(crate) mod tests {
 
     #[test]
     fn cfe_borrow_rejects_edt_config_source_set_target() {
-        let root =
-            std::env::temp_dir().join(format!("unica-cfe-borrow-edt-guard-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-cfe-borrow-edt-guard-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(workspace.join("cfg/Configuration")).unwrap();
         std::fs::create_dir_all(workspace.join("ext")).unwrap();
@@ -13851,8 +14003,11 @@ pub(crate) mod tests {
     /// agree on which files were created and which were replaced.
     #[test]
     fn cfe_borrow_result_mutation_changes_and_workspace_agree() {
-        let root =
-            std::env::temp_dir().join(format!("unica-cfe-borrow-mutation-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-cfe-borrow-mutation-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(workspace.join("src/Catalogs")).unwrap();
         std::fs::create_dir_all(workspace.join("ext")).unwrap();
@@ -13973,8 +14128,11 @@ pub(crate) mod tests {
 
     #[test]
     fn mutating_native_operation_rejects_output_escape_before_backend_execution() {
-        let root =
-            std::env::temp_dir().join(format!("unica-app-path-policy-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "unica-app-path-policy-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let mut args = Map::new();
@@ -14199,8 +14357,9 @@ pub(crate) mod tests {
     #[test]
     fn external_init_preview_is_path_guarded_and_source_set_typed() {
         let root = std::env::temp_dir().join(format!(
-            "unica-external-init-contract-{}",
-            std::process::id()
+            "unica-external-init-contract-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
         ));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
