@@ -28,10 +28,11 @@ use crate::infrastructure::platform::filesystem::{
     create_new_directory_child, file_identity, hard_link_count, metadata_is_link_or_reparse_point,
     open_absolute_directory_path_nofollow, open_directory_child_nofollow, open_directory_nofollow,
     open_or_create_absolute_directory_path_nofollow, open_regular_child_nofollow,
-    prepare_file_for_removal, remove_identity_bound_empty_directory_child,
-    remove_identity_bound_regular_child, rename_identity_bound_regular_child_no_replace,
-    rename_no_replace, retain_regular_child_for_cleanup, FileIdentity, PortablePermissions,
-    RetainedChildCapability, RetainedDirectoryCapability, RetainedRegularFileCapability,
+    remove_identity_bound_empty_directory_child, remove_identity_bound_regular_child,
+    rename_identity_bound_directory_child_no_replace,
+    rename_identity_bound_regular_child_no_replace, retain_regular_child_for_cleanup,
+    same_filesystem, FileIdentity, PortablePermissions, RetainedChildCapability,
+    RetainedDirectoryCapability, RetainedRegularFileCapability,
 };
 use crate::infrastructure::source_revision::PreparedRevisionReconciliation;
 use crate::infrastructure::source_roots::normalize_path_identity;
@@ -129,7 +130,9 @@ fn retained_apply_fail_after_all_postimages() -> Result<(), String> {
 }
 
 #[cfg(test)]
-use crate::infrastructure::platform::filesystem::replace_file_atomically;
+use crate::infrastructure::platform::filesystem::{
+    prepare_file_for_removal, replace_file_atomically,
+};
 
 #[cfg(test)]
 use std::sync::Barrier;
@@ -1711,6 +1714,22 @@ impl CompileTransaction {
             .map_err(CommitFailure::concurrent)?;
         self.semantic_preflight().map_err(CommitFailure::provider)?;
 
+        for target in self
+            .creates
+            .iter()
+            .map(|create| create.path.as_path())
+            .chain(
+                self.registrations
+                    .values()
+                    .filter(|item| item.changed())
+                    .map(|registration| registration.path.as_path()),
+            )
+            .chain(self.removals.iter().map(|removal| removal.path.as_path()))
+        {
+            ensure_recovery_filesystem_compatibility_before_mutation(target)
+                .map_err(CommitFailure::provider)?;
+        }
+
         for create in &self.creates {
             if let Err(error) = ensure_parent_directories(&create.path, &mut state.created_dirs) {
                 let cleanup_errors = cleanup_created_directories(&mut state.created_dirs);
@@ -1897,7 +1916,18 @@ impl CompileTransaction {
                 prepared_removals.push_back((removal, reserve_removal_recovery(&removal.path)?));
             }
 
+            for (create, _) in &prepared_creates {
+                ensure_recovery_filesystem_compatibility(&create.path)?;
+            }
+            for (registration, _) in &prepared_registrations {
+                ensure_recovery_filesystem_compatibility(&registration.path)?;
+            }
+            for (removal, _) in &prepared_removals {
+                ensure_recovery_filesystem_compatibility(&removal.path)?;
+            }
+
             while let Some((create, prepared)) = prepared_creates.pop_front() {
+                let target_parent = prepared.target_parent();
                 let published_identity = match prepared.staged_file_identity() {
                     Ok(identity) => identity,
                     Err(error) => {
@@ -1915,6 +1945,7 @@ impl CompileTransaction {
                 record_cleanup_warnings(state, report.cleanup_warnings);
                 state.published_creates.push(PublishedCreate {
                     target: create.path.clone(),
+                    target_parent,
                     published: PublishedFileExpectation::new(
                         published_identity,
                         create.bytes.clone(),
@@ -2005,32 +2036,14 @@ impl CompileTransaction {
 
             while let Some((removal, recovery)) = prepared_removals.pop_front() {
                 recheck_removal(removal).map_err(CommitFailure::concurrent)?;
-                rename_no_replace(&removal.path, &recovery.path).map_err(|error| {
-                    // `AlreadyExists` here means another writer took the
-                    // recovery name between the preflight and this rename, and
-                    // `NotFound` that the removal target itself disappeared.
-                    // Both are races, and collapsing them into a provider
-                    // failure would tell the caller to retry the wrong thing.
-                    let message = format!(
-                        "failed to move removal target {} to no-clobber recovery {}: {error}",
-                        removal.path.display(),
-                        recovery.path.display()
-                    );
-                    match error.kind() {
-                        ErrorKind::AlreadyExists | ErrorKind::NotFound => {
-                            CommitFailure::concurrent(message)
-                        }
-                        _ => CommitFailure::provider(message),
-                    }
-                })?;
                 state
                     .published_removals
-                    .push(recovery.into_published(removal.path.clone(), removal.snapshot.clone()));
+                    .push(recovery.publish(removal.path.clone(), removal.snapshot.clone())?);
                 let published = state
                     .published_removals
                     .last()
                     .expect("published removal was just recorded");
-                let moved_snapshot = snapshot_removal_path(&published.recovery)?;
+                let moved_snapshot = snapshot_removal_path(&published.recovery.path())?;
                 if moved_snapshot != removal.snapshot {
                     return Err(CommitFailure::concurrent(format!(
                         "removal target changed while moving to recovery: {}",
@@ -2059,7 +2072,7 @@ impl CompileTransaction {
                         state
                             .published_removals
                             .iter()
-                            .map(|published| published.recovery_directory.clone()),
+                            .map(|published| published.recovery.directory_path().to_path_buf()),
                     ),
             );
             self.recheck_directory_membership_guards(
@@ -3629,6 +3642,7 @@ fn validate_absence_guard(path: &Path, phase: &str) -> Result<(), String> {
 #[derive(Debug)]
 struct PublishedCreate {
     target: PathBuf,
+    target_parent: Arc<fs::File>,
     published: PublishedFileExpectation,
 }
 
@@ -3670,6 +3684,7 @@ struct RecoveryDirectory {
 }
 
 impl RecoveryDirectory {
+    #[cfg(test)]
     fn reserve(path: &Path) -> Result<Self, (ErrorKind, String)> {
         let route = absolute_lexical_path(path)
             .map_err(|error| (ErrorKind::InvalidInput, error.to_string()))?;
@@ -3861,6 +3876,7 @@ struct RecoveryCleanup {
 }
 
 impl RecoveryCleanup {
+    #[cfg(test)]
     fn reserve(directory: &Path) -> Result<Self, (ErrorKind, String)> {
         Ok(Self {
             directory: RecoveryDirectory::reserve(directory)?,
@@ -4091,16 +4107,29 @@ impl Drop for PendingRecovery {
 #[derive(Debug)]
 struct PublishedRemoval {
     target: PathBuf,
-    recovery: PathBuf,
-    recovery_directory: PathBuf,
+    target_parent: Arc<fs::File>,
+    recovery: RecoveryCleanup,
+    retained: Option<RetainedRemoval>,
     snapshot: RemovalSnapshot,
 }
 
 #[derive(Debug)]
 struct PendingRemovalRecovery {
-    directory: PathBuf,
-    path: PathBuf,
+    cleanup: RecoveryCleanup,
+    target_parent: Arc<fs::File>,
     armed: bool,
+}
+
+#[derive(Debug)]
+enum RetainedRemoval {
+    File {
+        file: fs::File,
+        identity: FileIdentity,
+    },
+    Directory {
+        directory: fs::File,
+        identity: FileIdentity,
+    },
 }
 
 impl PendingRemovalRecovery {
@@ -4108,45 +4137,105 @@ impl PendingRemovalRecovery {
         if !self.armed {
             return Vec::new();
         }
-        match fs::symlink_metadata(&self.path) {
-            Ok(_) => {
-                return vec![format!(
-                    "pending removal recovery is preserved at {}",
-                    self.path.display()
-                )];
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return vec![format!(
-                    "failed to inspect pending removal recovery {}: {error}",
-                    self.path.display()
-                )];
-            }
-        }
-        match fs::remove_dir(&self.directory) {
+        match self.cleanup.cleanup_directory() {
             Ok(()) => {
-                self.armed = false;
-                Vec::new()
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {
                 self.armed = false;
                 Vec::new()
             }
             Err(error) => vec![format!(
                 "failed to remove pending removal recovery directory {}: {error}",
-                self.directory.display()
+                self.cleanup.directory_path().display()
             )],
         }
     }
 
-    fn into_published(mut self, target: PathBuf, snapshot: RemovalSnapshot) -> PublishedRemoval {
+    fn publish(
+        mut self,
+        target: PathBuf,
+        snapshot: RemovalSnapshot,
+    ) -> Result<PublishedRemoval, CommitFailure> {
+        let target_name = target.file_name().ok_or_else(|| {
+            CommitFailure::provider(format!(
+                "removal target has no child name: {}",
+                target.display()
+            ))
+        })?;
+        let recovery_name = OsStr::new("original");
+        let recovery_directory = self
+            .cleanup
+            .directory
+            .try_clone_directory()
+            .map_err(CommitFailure::provider)?;
+        let retained = match snapshot.entries.first().map(|entry| &entry.kind) {
+            Some(RemovalEntryKind::File { .. }) => {
+                let file = open_regular_child_nofollow(&self.target_parent, target_name).map_err(
+                    |error| {
+                        CommitFailure::concurrent(format!(
+                            "failed to retain removal target {}: {error}",
+                            target.display()
+                        ))
+                    },
+                )?;
+                let identity = file_identity(&file).map_err(|error| {
+                    CommitFailure::provider(format!(
+                        "failed to identify removal target {}: {error}",
+                        target.display()
+                    ))
+                })?;
+                rename_identity_bound_regular_child_no_replace(
+                    &self.target_parent,
+                    target_name,
+                    identity,
+                    &file,
+                    &recovery_directory,
+                    recovery_name,
+                )
+                .map_err(|error| adapt_removal_move_error(&target, &self.cleanup.path(), error))?;
+                RetainedRemoval::File { file, identity }
+            }
+            Some(RemovalEntryKind::Directory) => {
+                let directory = open_directory_child_nofollow(&self.target_parent, target_name)
+                    .map_err(|error| {
+                        CommitFailure::concurrent(format!(
+                            "failed to retain removal target {}: {error}",
+                            target.display()
+                        ))
+                    })?;
+                let identity = file_identity(&directory).map_err(|error| {
+                    CommitFailure::provider(format!(
+                        "failed to identify removal target {}: {error}",
+                        target.display()
+                    ))
+                })?;
+                rename_identity_bound_directory_child_no_replace(
+                    &self.target_parent,
+                    target_name,
+                    identity,
+                    &directory,
+                    &recovery_directory,
+                    recovery_name,
+                )
+                .map_err(|error| adapt_removal_move_error(&target, &self.cleanup.path(), error))?;
+                RetainedRemoval::Directory {
+                    directory,
+                    identity,
+                }
+            }
+            None => {
+                return Err(CommitFailure::provider(format!(
+                    "removal snapshot is empty: {}",
+                    target.display()
+                )))
+            }
+        };
         self.armed = false;
-        PublishedRemoval {
+        Ok(PublishedRemoval {
             target,
-            recovery: self.path.clone(),
-            recovery_directory: self.directory.clone(),
+            target_parent: Arc::clone(&self.target_parent),
+            recovery: self.cleanup.clone(),
+            retained: Some(retained),
             snapshot,
-        }
+        })
     }
 }
 
@@ -4387,22 +4476,25 @@ struct RecoveryParent {
 
 fn reserve_removal_recovery(target: &Path) -> Result<PendingRemovalRecovery, String> {
     let recovery_parent = recovery_parent(target)?;
+    let target_parent = open_target_parent_nofollow(target)?;
     for attempt in 1..=16 {
         let directory = unique_recovery_directory(&recovery_parent.path, target);
-        let name = directory
-            .file_name()
-            .expect("generated recovery directory must have a child name");
-        match create_new_directory_child(&recovery_parent.directory, name) {
-            Ok(retained_directory) => {
-                drop(retained_directory);
+        let parent = recovery_parent.directory.try_clone().map_err(|error| {
+            format!(
+                "failed to retain private compile recovery parent {}: {error}",
+                recovery_parent.path.display()
+            )
+        })?;
+        match RecoveryCleanup::reserve_with_parent(directory.clone(), parent) {
+            Ok(cleanup) => {
                 return Ok(PendingRemovalRecovery {
-                    path: directory.join("original"),
-                    directory,
+                    cleanup,
+                    target_parent: Arc::clone(&target_parent),
                     armed: true,
                 });
             }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists && attempt < 16 => continue,
-            Err(error) => {
+            Err((ErrorKind::AlreadyExists, _)) if attempt < 16 => continue,
+            Err((_kind, error)) => {
                 return Err(format!(
                     "failed to reserve removal recovery for {} at {}: {error}",
                     target.display(),
@@ -4415,6 +4507,84 @@ fn reserve_removal_recovery(target: &Path) -> Result<PendingRemovalRecovery, Str
         "failed to reserve removal recovery for {}",
         target.display()
     ))
+}
+
+fn adapt_removal_move_error(
+    target: &Path,
+    recovery: &Path,
+    error: std::io::Error,
+) -> CommitFailure {
+    let message = format!(
+        "failed to move removal target {} to no-clobber recovery {}: {error}",
+        target.display(),
+        recovery.display()
+    );
+    match error.kind() {
+        ErrorKind::AlreadyExists | ErrorKind::NotFound => CommitFailure::concurrent(message),
+        _ => CommitFailure::provider(message),
+    }
+}
+
+fn ensure_recovery_filesystem_compatibility(target: &Path) -> Result<(), String> {
+    let target_parent = open_target_parent_nofollow(target)?;
+    let recovery = recovery_parent(target)?;
+    if recovery_filesystem_compatible(&target_parent, &recovery.directory)? {
+        Ok(())
+    } else {
+        Err(format!(
+            "compile recovery and target must be on the same filesystem before publication: {} and {}",
+            target.display(), recovery.path.display()
+        ))
+    }
+}
+
+fn ensure_recovery_filesystem_compatibility_before_mutation(target: &Path) -> Result<(), String> {
+    let target_parent = open_nearest_existing_directory(usable_parent(target))?;
+    let recovery_path = recovery_parent_path(target)?;
+    let recovery_parent = open_nearest_existing_directory(&recovery_path)?;
+    if recovery_filesystem_compatible(&target_parent, &recovery_parent)? {
+        Ok(())
+    } else {
+        Err(format!(
+            "compile recovery and target must be on the same filesystem before mutation: {} and {}",
+            target.display(),
+            recovery_path.display()
+        ))
+    }
+}
+
+fn open_nearest_existing_directory(path: &Path) -> Result<fs::File, String> {
+    let absolute = absolute_lexical_path(path).map_err(|error| {
+        format!(
+            "failed to resolve filesystem preflight path {}: {error}",
+            path.display()
+        )
+    })?;
+    for candidate in absolute.ancestors() {
+        match open_absolute_directory_path_nofollow(candidate) {
+            Ok(directory) => return Ok(directory),
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to retain filesystem preflight ancestor {} without following links or reparse points: {error}",
+                    candidate.display()
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "filesystem preflight found no existing ancestor for {}",
+        path.display()
+    ))
+}
+
+fn recovery_filesystem_compatible(target: &fs::File, recovery: &fs::File) -> Result<bool, String> {
+    #[cfg(test)]
+    if let Some(compatible) = TEST_RECOVERY_FILESYSTEM_COMPATIBLE.with(|slot| slot.get()) {
+        return Ok(compatible);
+    }
+    same_filesystem(target, recovery)
+        .map_err(|error| format!("failed to compare target and recovery filesystems: {error}"))
 }
 
 fn reserve_recovery(target: &Path) -> Result<PendingRecovery, String> {
@@ -4452,6 +4622,7 @@ fn reserve_recovery(target: &Path) -> Result<PendingRecovery, String> {
     ))
 }
 
+#[cfg(test)]
 fn reserve_recovery_with(
     target: &Path,
     mut next_directory: impl FnMut() -> PathBuf,
@@ -4501,25 +4672,35 @@ fn open_target_parent_nofollow(target: &Path) -> Result<Arc<fs::File>, String> {
 }
 
 fn recovery_parent(target: &Path) -> Result<RecoveryParent, String> {
+    let path = recovery_parent_path(target)?;
+    let is_private_workspace_recovery = path.ends_with(Path::new(".build/unica/recovery"));
+    let directory = if is_private_workspace_recovery {
+        open_or_create_absolute_directory_path_nofollow(&path)
+    } else {
+        open_absolute_directory_path_nofollow(&path)
+    }
+    .map_err(|error| {
+        format!(
+            "failed to bind compile recovery parent {} without following links or reparse points: {error}",
+            path.display()
+        )
+    })?;
+    Ok(RecoveryParent {
+        path,
+        directory: Arc::new(directory),
+    })
+}
+
+fn recovery_parent_path(target: &Path) -> Result<PathBuf, String> {
     let workspace = usable_parent(target)
         .ancestors()
         .find(|ancestor| ancestor.join("v8project.yaml").is_file());
     let Some(workspace) = workspace else {
-        let path = absolute_lexical_path(usable_parent(target)).map_err(|error| {
+        return absolute_lexical_path(usable_parent(target)).map_err(|error| {
             format!(
                 "failed to resolve compile recovery parent {}: {error}",
                 usable_parent(target).display()
             )
-        })?;
-        let directory = open_absolute_directory_path_nofollow(&path).map_err(|error| {
-            format!(
-                "failed to bind compile recovery parent {} without following links or reparse points: {error}",
-                path.display()
-            )
-        })?;
-        return Ok(RecoveryParent {
-            path,
-            directory: Arc::new(directory),
         });
     };
     let private =
@@ -4529,16 +4710,7 @@ fn recovery_parent(target: &Path) -> Result<RecoveryParent, String> {
                 workspace.join(".build/unica/recovery").display()
             )
         })?;
-    let directory = open_or_create_absolute_directory_path_nofollow(&private).map_err(|error| {
-        format!(
-            "failed to prepare private compile recovery directory {} without following links or reparse points: {error}",
-            private.display()
-        )
-    })?;
-    Ok(RecoveryParent {
-        path: private,
-        directory: Arc::new(directory),
-    })
+    Ok(private)
 }
 
 fn unique_recovery_directory(parent: &Path, target: &Path) -> PathBuf {
@@ -4895,28 +5067,6 @@ fn with_rollback_diagnostics(primary: CommitFailure, diagnostics: Vec<String>) -
     }
 }
 
-fn remove_if_exists(path: &Path) -> std::io::Result<()> {
-    prepare_file_for_removal(path)?;
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-fn remove_recovery_path(path: &Path) -> std::io::Result<()> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if metadata.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        remove_if_exists(path)
-    }
-}
-
 enum PublishedTargetState {
     Matches,
     Missing,
@@ -5029,21 +5179,31 @@ fn inspect_published_target(
     }
 }
 
-fn reserve_rollback_quarantine(target: &Path) -> Result<(PathBuf, PathBuf), String> {
+struct RollbackQuarantine {
+    cleanup: RecoveryCleanup,
+    target_parent: Arc<fs::File>,
+}
+
+fn reserve_rollback_quarantine(target: &Path) -> Result<RollbackQuarantine, String> {
     let recovery_parent = recovery_parent(target)?;
+    let target_parent = open_target_parent_nofollow(target)?;
     for attempt in 1..=16 {
         let directory = unique_recovery_directory(&recovery_parent.path, target);
-        let name = directory
-            .file_name()
-            .expect("generated recovery directory must have a child name");
-        match create_new_directory_child(&recovery_parent.directory, name) {
-            Ok(retained_directory) => {
-                drop(retained_directory);
-                let path = directory.join("published");
-                return Ok((directory, path));
+        let parent = recovery_parent.directory.try_clone().map_err(|error| {
+            format!(
+                "failed to retain private compile recovery parent {}: {error}",
+                recovery_parent.path.display()
+            )
+        })?;
+        match RecoveryCleanup::reserve_with_parent(directory.clone(), parent) {
+            Ok(cleanup) => {
+                return Ok(RollbackQuarantine {
+                    cleanup,
+                    target_parent: Arc::clone(&target_parent),
+                });
             }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists && attempt < 16 => continue,
-            Err(error) => {
+            Err((ErrorKind::AlreadyExists, _)) if attempt < 16 => continue,
+            Err((_kind, error)) => {
                 return Err(format!(
                     "failed to reserve rollback quarantine for {} at {}: {error}",
                     target.display(),
@@ -5256,7 +5416,49 @@ fn rollback_registration(
     }
 
     let quarantined = recovery_directory.join("published");
-    if let Err(error) = rename_no_replace(&published.target, &quarantined) {
+    let quarantine_name = OsStr::new("published").to_os_string();
+    let quarantine_directory_handle = match published.recovery.directory.try_clone_directory() {
+        Ok(directory) => directory,
+        Err(error) => {
+            errors.push(format!(
+                "failed to retain registration rollback quarantine {}: {error}",
+                recovery_directory.display()
+            ));
+            return;
+        }
+    };
+    let target_name = match published.target.file_name() {
+        Some(name) => name,
+        None => {
+            errors.push(format!(
+                "registration rollback target has no child name: {}",
+                published.target.display()
+            ));
+            return;
+        }
+    };
+    let published_file = match retain_regular_child_for_cleanup(
+        &published.target_parent,
+        target_name,
+        published.published.identity,
+    ) {
+        Ok(file) => file,
+        Err(error) => {
+            errors.push(format!(
+                "rollback conflict for registration {}: published identity changed before quarantine; concurrent target is preserved and recovery is preserved at {}: {error}",
+                published.target.display(), recovery_path.display()
+            ));
+            return;
+        }
+    };
+    if let Err(error) = rename_identity_bound_regular_child_no_replace(
+        &published.target_parent,
+        target_name,
+        published.published.identity,
+        &published_file,
+        &quarantine_directory_handle,
+        &quarantine_name,
+    ) {
         let message = if fs::symlink_metadata(&quarantined).is_ok() {
             format!(
                 "rollback conflict for registration {}: rollback quarantine appeared concurrently at {}; published target and recovery are preserved at {}: {error}",
@@ -5274,27 +5476,7 @@ fn rollback_registration(
         errors.push(message);
         return;
     }
-    let quarantine_name = match quarantined.file_name() {
-        Some(name) => name.to_os_string(),
-        None => {
-            errors.push(format!(
-                "rollback quarantine has no child name after moving registration {}; recovery and quarantined publication are preserved at {}",
-                published.target.display(),
-                recovery_path.display()
-            ));
-            return;
-        }
-    };
-    let quarantine_directory_handle = match published.recovery.directory.try_clone_directory() {
-        Ok(directory) => directory,
-        Err(error) => {
-            errors.push(format!(
-                "failed to retain rollback quarantine directory after moving registration {}; recovery and quarantined publication are preserved: {error}",
-                published.target.display()
-            ));
-            return;
-        }
-    };
+    drop(published_file);
     let target_parent_handle = Arc::clone(&published.target_parent);
     match inspect_published_target(&quarantined, &published.published) {
         PublishedTargetState::Matches => {}
@@ -5360,14 +5542,32 @@ fn rollback_registration(
         ));
         return;
     }
-    if let Err(error) = fs::hard_link(&recovery_path, &published.target) {
-        errors.push(format!(
-            "failed to restore registration {} without clobbering; original recovery is preserved at {} and published bytes at {}: {error}",
-            published.target.display(),
-            recovery_path.display(),
-            quarantined.display()
-        ));
-        return;
+    let restored = write_exact_new_file_in_directory(
+        &published.target,
+        Arc::clone(&published.target_parent),
+        match file_identity(&published.target_parent) {
+            Ok(identity) => identity,
+            Err(error) => {
+                errors.push(format!(
+                    "failed to identify registration target parent during rollback: {error}"
+                ));
+                return;
+            }
+        },
+        &published.original,
+        &published.original_permissions,
+    );
+    match restored {
+        Ok(artifact) => drop(artifact),
+        Err(error) => {
+            errors.push(format!(
+                "failed to restore registration {} without clobbering; original recovery is preserved at {} and published bytes at {}: {error}",
+                published.target.display(),
+                recovery_path.display(),
+                quarantined.display()
+            ));
+            return;
+        }
     }
     run_after_registration_rollback_restore(&published.target, &quarantined);
 
@@ -5459,14 +5659,51 @@ fn rollback_create(published: &PublishedCreate, errors: &mut Vec<String>) {
     }
     run_before_rollback_mutation(&published.target);
 
-    let (quarantine_directory, quarantined) = match reserve_rollback_quarantine(&published.target) {
+    let mut quarantine = match reserve_rollback_quarantine(&published.target) {
         Ok(quarantine) => quarantine,
         Err(error) => {
             errors.push(error);
             return;
         }
     };
-    if let Err(error) = rename_no_replace(&published.target, &quarantined) {
+    let quarantine_directory = quarantine.cleanup.directory_path().to_path_buf();
+    let quarantined = quarantine_directory.join("published");
+    let quarantine_directory_handle = match quarantine.cleanup.directory.try_clone_directory() {
+        Ok(handle) => handle,
+        Err(error) => {
+            errors.push(error);
+            return;
+        }
+    };
+    let Some(target_name) = published.target.file_name() else {
+        errors.push(format!(
+            "create-only rollback target has no child name: {}",
+            published.target.display()
+        ));
+        return;
+    };
+    let published_file = match retain_regular_child_for_cleanup(
+        &published.target_parent,
+        target_name,
+        published.published.identity,
+    ) {
+        Ok(file) => file,
+        Err(error) => {
+            errors.push(format!(
+                "failed to retain create-only rollback target {}: {error}",
+                published.target.display()
+            ));
+            return;
+        }
+    };
+    if let Err(error) = rename_identity_bound_regular_child_no_replace(
+        &published.target_parent,
+        target_name,
+        published.published.identity,
+        &published_file,
+        &quarantine_directory_handle,
+        OsStr::new("published"),
+    ) {
         let message = if fs::symlink_metadata(&quarantined).is_ok() {
             format!(
                 "rollback conflict for create-only target {}: rollback quarantine appeared concurrently at {}; published target is preserved: {error}",
@@ -5480,7 +5717,7 @@ fn rollback_create(published: &PublishedCreate, errors: &mut Vec<String>) {
             )
         };
         errors.push(message);
-        let _ = fs::remove_dir(&quarantine_directory);
+        let _ = quarantine.cleanup.cleanup_directory();
         return;
     }
 
@@ -5497,7 +5734,12 @@ fn rollback_create(published: &PublishedCreate, errors: &mut Vec<String>) {
                     true
                 }
             };
-            if let Err(error) = remove_if_exists(&quarantined) {
+            if let Err(error) = remove_identity_bound_regular_child(
+                &quarantine_directory_handle,
+                OsStr::new("published"),
+                published.published.identity,
+                &published_file,
+            ) {
                 errors.push(format!(
                     "failed to remove quarantined create-only publication {}; recovery is preserved: {error}",
                     quarantined.display()
@@ -5518,30 +5760,12 @@ fn rollback_create(published: &PublishedCreate, errors: &mut Vec<String>) {
             ));
         }
         PublishedTargetState::Conflict(reason) => {
-            let restore = open_directory_nofollow(&quarantine_directory)
-                .map_err(|error| {
-                    format!(
-                        "failed to retain create-only rollback quarantine directory {}: {error}",
-                        quarantine_directory.display()
-                    )
-                })
-                .and_then(|quarantine_directory_handle| {
-                    open_directory_nofollow(usable_parent(&published.target))
-                        .map_err(|error| {
-                            format!(
-                                "failed to retain create-only rollback target parent {}: {error}",
-                                usable_parent(&published.target).display()
-                            )
-                        })
-                        .and_then(|target_parent_handle| {
-                            restore_quarantined_file_no_clobber(
-                                &quarantine_directory_handle,
-                                &quarantined,
-                                &target_parent_handle,
-                                &published.target,
-                            )
-                        })
-                });
+            let restore = restore_quarantined_file_no_clobber(
+                &quarantine_directory_handle,
+                &quarantined,
+                &quarantine.target_parent,
+                &published.target,
+            );
             let preservation = match restore {
                 Ok(()) => "concurrent target was restored without clobbering".to_string(),
                 Err(error) => format!(
@@ -5555,13 +5779,12 @@ fn rollback_create(published: &PublishedCreate, errors: &mut Vec<String>) {
             ));
         }
     }
-    if let Err(error) = fs::remove_dir(&quarantine_directory) {
-        if error.kind() != ErrorKind::DirectoryNotEmpty {
-            errors.push(format!(
-                "failed to remove create-only rollback quarantine directory {}: {error}",
-                quarantine_directory.display()
-            ));
-        }
+    drop(published_file);
+    if let Err(error) = quarantine.cleanup.cleanup_directory() {
+        errors.push(format!(
+            "failed to remove create-only rollback quarantine directory {}: {error}",
+            quarantine_directory.display()
+        ));
     }
 }
 
@@ -5570,13 +5793,14 @@ fn rollback(state: &mut PublishState) -> Vec<String> {
     let mut cleanup_warnings = Vec::new();
 
     for published in state.published_removals.iter().rev() {
+        let recovery_path = published.recovery.path();
         match fs::symlink_metadata(&published.target) {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Ok(_) => {
                 errors.push(format!(
                     "rollback conflict for removed target {}: a concurrent target already exists and is preserved; recovery is preserved at {}",
                     published.target.display(),
-                    published.recovery.display()
+                    recovery_path.display()
                 ));
                 continue;
             }
@@ -5584,24 +5808,68 @@ fn rollback(state: &mut PublishState) -> Vec<String> {
                 errors.push(format!(
                     "failed to inspect removed target before rollback {}: {error}; recovery is preserved at {}",
                     published.target.display(),
-                    published.recovery.display()
+                    recovery_path.display()
                 ));
                 continue;
             }
         }
-        run_before_removal_rollback_restore(&published.recovery, &published.target);
-        if let Err(error) = rename_no_replace(&published.recovery, &published.target) {
+        run_before_removal_rollback_restore(&recovery_path, &published.target);
+        let recovery_directory = match published.recovery.directory.try_clone_directory() {
+            Ok(directory) => directory,
+            Err(error) => {
+                errors.push(format!(
+                    "failed to retain removal recovery {}: {error}",
+                    recovery_path.display()
+                ));
+                continue;
+            }
+        };
+        let Some(target_name) = published.target.file_name() else {
+            errors.push(format!(
+                "removed target has no child name: {}",
+                published.target.display()
+            ));
+            continue;
+        };
+        let restore = match published
+            .retained
+            .as_ref()
+            .expect("published removal must retain its recovery child")
+        {
+            RetainedRemoval::File { file, identity } => {
+                rename_identity_bound_regular_child_no_replace(
+                    &recovery_directory,
+                    OsStr::new("original"),
+                    *identity,
+                    file,
+                    &published.target_parent,
+                    target_name,
+                )
+            }
+            RetainedRemoval::Directory {
+                directory,
+                identity,
+            } => rename_identity_bound_directory_child_no_replace(
+                &recovery_directory,
+                OsStr::new("original"),
+                *identity,
+                directory,
+                &published.target_parent,
+                target_name,
+            ),
+        };
+        if let Err(error) = restore {
             let message = if fs::symlink_metadata(&published.target).is_ok() {
                 format!(
                     "rollback conflict for removed target {}: a concurrent target appeared before atomic restoration and is preserved; recovery is preserved at {}: {error}",
                     published.target.display(),
-                    published.recovery.display()
+                    recovery_path.display()
                 )
             } else {
                 format!(
                     "failed to restore removed target {} from {} without clobbering; recovery is preserved: {error}",
                     published.target.display(),
-                    published.recovery.display()
+                    recovery_path.display()
                 )
             };
             errors.push(message);
@@ -5618,10 +5886,11 @@ fn rollback(state: &mut PublishState) -> Vec<String> {
                 published.target.display()
             )),
         }
-        if let Err(error) = fs::remove_dir(&published.recovery_directory) {
+        let mut cleanup = published.recovery.clone();
+        if let Err(error) = cleanup.cleanup_directory() {
             errors.push(format!(
                 "failed to remove restored removal recovery directory {}: {error}",
-                published.recovery_directory.display()
+                published.recovery.directory_path().display()
             ));
         }
     }
@@ -5709,19 +5978,52 @@ fn preserve_rollback_recovery_copy(
 
 fn finalize_success(state: &mut PublishState) {
     let mut cleanup_warnings = Vec::new();
-    for published in &state.published_removals {
-        if let Err(error) = remove_recovery_path(&published.recovery) {
-            state.cleanup_warnings.push(format!(
-                "failed to remove recovery for deleted target {}; recovery is preserved at {}: {error}",
-                published.target.display(),
-                published.recovery.display()
-            ));
-            continue;
+    for published in &mut state.published_removals {
+        let recovery_path = published.recovery.path();
+        run_before_removal_success_cleanup(&recovery_path);
+        let retained = published
+            .retained
+            .take()
+            .expect("published removal must retain its recovery child");
+        match retained {
+            RetainedRemoval::File { file, identity } => {
+                let recovery_directory = match published.recovery.directory.try_clone_directory() {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        state.cleanup_warnings.push(format!(
+                            "failed to retain recovery directory for deleted target {}; recovery is preserved at {}: {error}",
+                            published.target.display(), recovery_path.display()
+                        ));
+                        continue;
+                    }
+                };
+                if let Err(error) = remove_identity_bound_regular_child(
+                    &recovery_directory,
+                    OsStr::new("original"),
+                    identity,
+                    &file,
+                ) {
+                    state.cleanup_warnings.push(format!(
+                        "failed to remove identity-bound recovery for deleted target {}; recovery is preserved at {}: {error}",
+                        published.target.display(), recovery_path.display()
+                    ));
+                    continue;
+                }
+                drop(file);
+            }
+            RetainedRemoval::Directory { directory, .. } => {
+                drop(directory);
+                state.cleanup_warnings.push(format!(
+                    "directory recovery for deleted target {} is preserved at {} because secure handle-relative recursive cleanup is unavailable",
+                    published.target.display(), recovery_path.display()
+                ));
+                continue;
+            }
         }
-        if let Err(error) = fs::remove_dir(&published.recovery_directory) {
+        if let Err(error) = published.recovery.cleanup_directory() {
             state.cleanup_warnings.push(format!(
                 "failed to remove deleted-target recovery directory {}: {error}",
-                published.recovery_directory.display()
+                published.recovery.directory_path().display()
             ));
         }
     }
@@ -5879,6 +6181,9 @@ type BeforeRollbackMutationHook = Box<dyn FnOnce(&Path)>;
 type BeforeRemovalRollbackRestoreHook = Box<dyn FnOnce(&Path, &Path)>;
 
 #[cfg(test)]
+type BeforeRemovalSuccessCleanupHook = Box<dyn FnOnce(&Path)>;
+
+#[cfg(test)]
 type BeforeCleanupRetryHook = Box<dyn FnOnce()>;
 
 #[cfg(test)]
@@ -5912,6 +6217,7 @@ thread_local! {
     static TEST_PATH_IDENTITY_NORMALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static TEST_BEFORE_ROLLBACK_MUTATION_HOOK: RefCell<Option<BeforeRollbackMutationHook>> = const { RefCell::new(None) };
     static TEST_BEFORE_REMOVAL_ROLLBACK_RESTORE_HOOK: RefCell<Option<BeforeRemovalRollbackRestoreHook>> = const { RefCell::new(None) };
+    static TEST_BEFORE_REMOVAL_SUCCESS_CLEANUP_HOOK: RefCell<Option<BeforeRemovalSuccessCleanupHook>> = const { RefCell::new(None) };
     static TEST_BEFORE_CLEANUP_RETRY_HOOK: RefCell<Option<BeforeCleanupRetryHook>> = const { RefCell::new(None) };
     static TEST_BEFORE_ROLLBACK_QUARANTINE_CLEANUP_HOOK: RefCell<Option<BeforeRollbackQuarantineCleanupHook>> = const { RefCell::new(None) };
     static TEST_BEFORE_ROLLBACK_QUARANTINE_RESTORE_RENAME_HOOK: RefCell<Option<BeforeRollbackQuarantineRestoreRenameHook>> = const { RefCell::new(None) };
@@ -5922,6 +6228,23 @@ thread_local! {
     static TEST_RETAINED_APPLY_BEFORE_PROVIDER_IO_HOOK: RefCell<Option<RetainedApplyBeforeProviderIoHook>> = const { RefCell::new(None) };
     static TEST_RETAINED_APPLY_BEFORE_REVISION_VALIDATION_HOOK: RefCell<Option<RetainedApplyBeforeRevisionValidationHook>> = const { RefCell::new(None) };
     static TEST_RETAINED_APPLY_VALIDATION_PROVIDER_FAILURE: Cell<bool> = const { Cell::new(false) };
+    static TEST_RECOVERY_FILESYSTEM_COMPATIBLE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+fn with_recovery_filesystem_compatibility_for_test<T>(
+    compatible: bool,
+    action: impl FnOnce() -> T,
+) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_RECOVERY_FILESYSTEM_COMPATIBLE.with(|slot| slot.set(self.0));
+        }
+    }
+    let previous = TEST_RECOVERY_FILESYSTEM_COMPATIBLE.with(|slot| slot.replace(Some(compatible)));
+    let _reset = Reset(previous);
+    action()
 }
 
 #[cfg(test)]
@@ -6086,6 +6409,23 @@ fn with_before_removal_rollback_restore_hook<T>(
 }
 
 #[cfg(test)]
+fn with_before_removal_success_cleanup_hook<T>(
+    hook: impl FnOnce(&Path) + 'static,
+    action: impl FnOnce() -> T,
+) -> T {
+    struct Reset(Option<BeforeRemovalSuccessCleanupHook>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_BEFORE_REMOVAL_SUCCESS_CLEANUP_HOOK.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+    let previous =
+        TEST_BEFORE_REMOVAL_SUCCESS_CLEANUP_HOOK.with(|slot| slot.replace(Some(Box::new(hook))));
+    let _reset = Reset(previous);
+    action()
+}
+
+#[cfg(test)]
 fn with_before_cleanup_retry_hook<T>(
     hook: impl FnOnce() + 'static,
     action: impl FnOnce() -> T,
@@ -6211,6 +6551,15 @@ fn run_before_removal_rollback_restore(_recovery: &Path, _target: &Path) {
         TEST_BEFORE_REMOVAL_ROLLBACK_RESTORE_HOOK.with(|slot| slot.borrow_mut().take())
     {
         hook(_recovery, _target);
+    }
+}
+
+fn run_before_removal_success_cleanup(_recovery: &Path) {
+    #[cfg(test)]
+    if let Some(hook) =
+        TEST_BEFORE_REMOVAL_SUCCESS_CLEANUP_HOOK.with(|slot| slot.borrow_mut().take())
+    {
+        hook(_recovery);
     }
 }
 
@@ -7442,7 +7791,7 @@ pub(crate) mod tests {
 
         assert!(error.contains("after object files"), "{error}");
         assert!(!object.exists());
-        assert!(!root.join("Deep").exists());
+        assert!(!root.join("Deep").exists(), "{error}");
         assert_eq!(fs::read(&config).unwrap(), original);
         assert!(transaction_debris(&root).is_empty());
         fs::remove_dir_all(root).expect("temporary root must be removed");
@@ -7860,21 +8209,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn publication_cleanup_retry_preserves_a_same_name_file_replacement() {
+    fn create_publication_moves_the_retained_stage_without_cleanup_debris() {
         use super::super::single_file_publisher::{
             publish, with_publish_failpoints, PublishCheckpoint,
         };
 
-        fn assert_hard_link_count_if_supported(path: &Path, expected: u64, message: &str) {
-            let file = fs::File::open(path).expect("published target must remain readable");
-            match hard_link_count(&file) {
-                Ok(actual) => assert_eq!(actual, expected, "{message}"),
-                Err(error) if error.kind() == ErrorKind::Unsupported => {}
-                Err(error) => panic!("failed to inspect published hard links: {error}"),
-            }
-        }
-
-        let root = temp_root("publication-cleanup-retry-identity-swap");
+        let root = temp_root("publication-retained-stage-move");
         let target = root.join("created.bin");
         let report = with_publish_failpoints(&[PublishCheckpoint::Cleanup], || {
             publish(PublishRequest {
@@ -7883,54 +8223,11 @@ pub(crate) mod tests {
                 mode: PublishMode::CreateOnly,
             })
         })
-        .expect("committed create must surface cleanup as a warning");
-        let warning = report
-            .cleanup_warnings
-            .into_iter()
-            .next()
-            .expect("cleanup failpoint must retain one identity-bound warning");
-        let warned_path = warning.path.clone();
-        let displaced = root.join("displaced-stage.bin");
-        fs::rename(&warned_path, &displaced).expect("warned artifact must be displaced");
-        fs::write(&warned_path, b"same-name retry decoy").expect("retry decoy must be written");
-        let mut state = PublishState::default();
-        record_cleanup_warnings(&mut state, [warning]);
+        .expect("committed create must atomically move its retained stage");
 
-        let retry_errors = retry_warned_artifacts(&mut state);
-
-        assert!(
-            retry_errors
-                .iter()
-                .any(|error| error.contains("file identity changed")),
-            "{retry_errors:?}"
-        );
-        assert_eq!(
-            state.pending_artifact_cleanups.len(),
-            1,
-            "a failed retry must retain its identity-bound token"
-        );
-        assert_eq!(fs::read(&warned_path).unwrap(), b"same-name retry decoy");
-        assert_eq!(fs::read(&displaced).unwrap(), b"published bytes");
+        assert!(report.cleanup_warnings.is_empty());
         assert_eq!(fs::read(&target).unwrap(), b"published bytes");
-        assert_hard_link_count_if_supported(
-            &target,
-            2,
-            "the committed target and displaced owned stage must both remain",
-        );
-        fs::remove_file(&warned_path).expect("retry decoy must be removed");
-        fs::rename(&displaced, &warned_path).expect("owned artifact route must be restored");
-
-        let completed_retry = retry_warned_artifacts(&mut state);
-
-        assert!(completed_retry.is_empty(), "{completed_retry:?}");
-        assert!(state.pending_artifact_cleanups.is_empty());
-        assert!(!warned_path.exists());
-        assert_eq!(fs::read(&target).unwrap(), b"published bytes");
-        assert_hard_link_count_if_supported(
-            &target,
-            1,
-            "successful retry must remove only the owned stage link",
-        );
+        assert!(transaction_debris(&root).is_empty());
         fs::remove_dir_all(root).expect("temporary root must be removed");
     }
 
@@ -8552,7 +8849,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn registration_rollback_restore_cleanup_preserves_same_name_quarantine_decoy() {
+    fn registration_rollback_refuses_identity_swapped_target_before_quarantine() {
         let root = temp_root("registration-rollback-restore-cleanup-identity-swap");
         let config = root.join("Configuration.xml");
         let guard = root.join("Decision.bsl");
@@ -8609,22 +8906,14 @@ pub(crate) mod tests {
             },
         )
         .expect_err("late guard failure must roll the registration back");
-        let (quarantined, displaced) = paths_receiver
-            .recv()
-            .expect("rollback restore hook must report quarantine paths");
-
         assert!(error.contains("rollback conflict"), "{error}");
-        assert!(error.contains("regular child identity changed"), "{error}");
+        assert!(error.contains("identity changed"), "{error}");
         assert!(
-            !config.exists(),
-            "identity loss must not publish the same-name quarantine decoy"
+            paths_receiver.try_recv().is_err(),
+            "unsafe quarantine restore must not begin"
         );
         assert_eq!(
-            fs::read(&quarantined).expect("cleanup must preserve the quarantine decoy"),
-            b"same-name quarantine decoy"
-        );
-        assert_eq!(
-            fs::read(&displaced).expect("cleanup must preserve the displaced concurrent link"),
+            fs::read(&config).expect("concurrent target must stay in place"),
             concurrent
         );
         let recovery_directory = transaction_debris(&root)
@@ -9020,12 +9309,13 @@ pub(crate) mod tests {
         let mut registration = reserve_recovery(&target).expect("recovery must be reserved");
         let mut removal =
             reserve_removal_recovery(&target).expect("removal recovery must be reserved");
-        let (rollback_directory, _rollback_path) =
+        let mut rollback =
             reserve_rollback_quarantine(&target).expect("rollback quarantine must be reserved");
+        let rollback_directory = rollback.cleanup.directory_path().to_path_buf();
 
         for recovery_directory in [
             registration.cleanup.directory_path(),
-            removal.directory.as_path(),
+            removal.cleanup.directory_path(),
             rollback_directory.as_path(),
         ] {
             assert!(
@@ -9042,7 +9332,211 @@ pub(crate) mod tests {
 
         assert!(registration.cleanup().is_empty());
         assert!(removal.cleanup().is_empty());
-        fs::remove_dir(&rollback_directory).expect("rollback quarantine must be removed");
+        rollback
+            .cleanup
+            .cleanup_directory()
+            .expect("rollback quarantine must be removed");
+        fs::remove_dir_all(root).expect("temporary root must be removed");
+    }
+
+    #[test]
+    fn compile_rejects_incompatible_recovery_filesystem_before_first_mutation() {
+        let root = temp_root("recovery-filesystem-preflight");
+        fs::write(root.join("v8project.yaml"), b"source-set: []")
+            .expect("workspace marker must be written");
+        let target = root.join("Ext/ObjectModule.bsl");
+
+        let mut transaction = CompileTransaction::new();
+        transaction
+            .create_bytes(target.clone(), b"published".to_vec())
+            .expect("create must be planned");
+        let error = with_recovery_filesystem_compatibility_for_test(false, || transaction.commit())
+            .expect_err("cross-filesystem recovery must fail before publication");
+
+        assert!(error.contains("same filesystem"), "{error}");
+        assert!(
+            !target.exists(),
+            "target must remain absent after preflight rejection"
+        );
+        assert!(
+            !root.join("Ext").exists(),
+            "target parent must not be created"
+        );
+        assert!(
+            !root.join(".build").exists(),
+            "private recovery root must not be created"
+        );
+        fs::remove_dir_all(root).expect("temporary root must be removed");
+    }
+
+    #[test]
+    fn removal_publication_uses_retained_recovery_after_route_swap() {
+        let root = temp_root("removal-recovery-route-swap");
+        fs::write(root.join("v8project.yaml"), b"source-set: []")
+            .expect("workspace marker must be written");
+        let target = root.join("Ext/ObjectModule.bsl");
+        fs::create_dir_all(target.parent().unwrap()).expect("target parent must be created");
+        fs::write(&target, b"original").expect("target must be written");
+        let redirected = root.join("redirected-build");
+        fs::create_dir(&redirected).expect("redirected root must be created");
+        let probe = root.join("probe-build-link");
+        let Some(link_result) = testing::create_dir_symlink_for_test(&redirected, &probe) else {
+            fs::remove_dir_all(root).expect("temporary root must be removed");
+            return;
+        };
+        if link_result.is_err() {
+            fs::remove_dir_all(root).expect("temporary root must be removed");
+            return;
+        }
+        fs::remove_file(&probe)
+            .or_else(|_| fs::remove_dir(&probe))
+            .expect("probe link must be removed");
+
+        let mut transaction = CompileTransaction::new();
+        transaction
+            .remove_path(target.clone())
+            .expect("removal must be planned");
+        let build = root.join(".build");
+        let displaced = root.join(".build-displaced");
+        let displaced_for_hook = displaced.clone();
+        let redirected_for_hook = redirected.clone();
+        crate::infrastructure::platform::filesystem::set_before_identity_bound_no_replace_rename_hook(move || {
+            fs::rename(&build, &displaced_for_hook).expect("private build route must be displaced");
+            testing::create_dir_symlink_for_test(&redirected_for_hook, &build)
+                .expect("link operation must be supported")
+                .expect("private build route must be redirected");
+        });
+        let error = with_commit_failpoint(CommitFailpoint::PostWriteValidation, || {
+            transaction.commit()
+        })
+        .expect_err("post-write failpoint must force rollback");
+
+        assert!(error.contains("post-write validation"), "{error}");
+        assert_eq!(
+            fs::read(&target).expect("target must be restored"),
+            b"original"
+        );
+        assert!(
+            fs::read_dir(&redirected).unwrap().next().is_none(),
+            "redirected route must stay untouched"
+        );
+        fs::remove_file(root.join(".build"))
+            .or_else(|_| fs::remove_dir(root.join(".build")))
+            .expect("redirect link must be removed");
+        fs::rename(displaced, root.join(".build")).expect("private build route must be restored");
+        fs::remove_dir_all(root).expect("temporary root must be removed");
+    }
+
+    #[test]
+    fn create_publication_and_rollback_use_the_prepared_parent_after_route_swap() {
+        let root = temp_root("create-parent-route-swap");
+        let parent = root.join("Ext");
+        fs::create_dir(&parent).expect("target parent must be created");
+        let target = parent.join("ObjectModule.bsl");
+        let redirected = root.join("redirected-parent");
+        fs::create_dir(&redirected).expect("redirected parent must be created");
+        let probe = root.join("probe-parent-link");
+        let Some(link_result) = testing::create_dir_symlink_for_test(&redirected, &probe) else {
+            fs::remove_dir_all(root).expect("temporary root must be removed");
+            return;
+        };
+        if link_result.is_err() {
+            fs::remove_dir_all(root).expect("temporary root must be removed");
+            return;
+        }
+        fs::remove_file(&probe)
+            .or_else(|_| fs::remove_dir(&probe))
+            .expect("probe link must be removed");
+
+        let displaced = root.join("Ext-displaced");
+        let parent_for_hook = parent.clone();
+        let displaced_for_hook = displaced.clone();
+        let redirected_for_hook = redirected.clone();
+        let mut transaction = CompileTransaction::new();
+        transaction
+            .create_bytes(target.clone(), b"published".to_vec())
+            .expect("create must be planned");
+        let error = with_before_commit_hook(
+            move |_target| {
+                fs::rename(&parent_for_hook, &displaced_for_hook)
+                    .expect("prepared target parent must be displaced");
+                testing::create_dir_symlink_for_test(&redirected_for_hook, &parent_for_hook)
+                    .expect("link operation must be supported")
+                    .expect("target parent route must be redirected");
+            },
+            || with_commit_failpoint(CommitFailpoint::AfterObjectFiles, || transaction.commit()),
+        )
+        .expect_err("late failure must roll back the physical publication");
+
+        assert!(error.contains("after object files"), "{error}");
+        assert!(!redirected.join("ObjectModule.bsl").exists());
+        assert!(!displaced.join("ObjectModule.bsl").exists());
+        fs::remove_file(&parent)
+            .or_else(|_| fs::remove_dir(&parent))
+            .expect("redirect link must be removed");
+        fs::rename(displaced, parent).expect("target parent route must be restored");
+        fs::remove_dir_all(root).expect("temporary root must be removed");
+    }
+
+    #[test]
+    fn directory_removal_success_cleanup_never_deletes_a_redirected_tree() {
+        let root = temp_root("removal-success-cleanup-route-swap");
+        fs::write(root.join("v8project.yaml"), b"source-set: []")
+            .expect("workspace marker must be written");
+        let target = root.join("Ext/Owned");
+        fs::create_dir_all(&target).expect("target directory must be created");
+        fs::write(target.join("ObjectModule.bsl"), b"owned").expect("target child must be written");
+        let redirected = root.join("redirected-build");
+        fs::create_dir(&redirected).expect("redirected root must be created");
+        fs::write(redirected.join("sentinel"), b"must survive")
+            .expect("redirected sentinel must be written");
+        let probe = root.join("probe-build-link");
+        let Some(link_result) = testing::create_dir_symlink_for_test(&redirected, &probe) else {
+            fs::remove_dir_all(root).expect("temporary root must be removed");
+            return;
+        };
+        if link_result.is_err() {
+            fs::remove_dir_all(root).expect("temporary root must be removed");
+            return;
+        }
+        fs::remove_file(&probe)
+            .or_else(|_| fs::remove_dir(&probe))
+            .expect("probe link must be removed");
+
+        let mut transaction = CompileTransaction::new();
+        transaction
+            .remove_path(target.clone())
+            .expect("directory removal must be planned");
+        let build = root.join(".build");
+        let displaced = root.join(".build-displaced");
+        let displaced_for_hook = displaced.clone();
+        let redirected_for_hook = redirected.clone();
+        let report = with_before_removal_success_cleanup_hook(
+            move |_recovery| {
+                fs::rename(&build, &displaced_for_hook)
+                    .expect("private build route must be displaced");
+                testing::create_dir_symlink_for_test(&redirected_for_hook, &build)
+                    .expect("link operation must be supported")
+                    .expect("private build route must be redirected");
+            },
+            || transaction.commit(),
+        )
+        .expect("directory removal must commit safely");
+
+        assert!(!target.exists(), "planned target must remain removed");
+        assert_eq!(
+            fs::read(redirected.join("sentinel")).expect("redirected sentinel must survive"),
+            b"must survive"
+        );
+        assert!(
+            report.cleanup_warnings.iter().any(|warning| warning
+                .contains("secure handle-relative recursive cleanup is unavailable")),
+            "safe preservation must be reported"
+        );
+        fs::remove_file(root.join(".build"))
+            .or_else(|_| fs::remove_dir(root.join(".build")))
+            .expect("redirect link must be removed");
+        fs::rename(displaced, root.join(".build")).expect("private build route must be restored");
         fs::remove_dir_all(root).expect("temporary root must be removed");
     }
 
@@ -9087,6 +9581,10 @@ pub(crate) mod tests {
     fn private_compile_recovery_contract_is_physical_and_rollback_safe() {
         compile_recovery_is_reserved_outside_workspace_source_root();
         compile_recovery_rejects_a_redirected_private_root_without_writing_through_it();
+        compile_rejects_incompatible_recovery_filesystem_before_first_mutation();
+        create_publication_and_rollback_use_the_prepared_parent_after_route_swap();
+        removal_publication_uses_retained_recovery_after_route_swap();
+        directory_removal_success_cleanup_never_deletes_a_redirected_tree();
         private_recovery_rollback_restores_concurrent_registration_to_target_parent();
     }
 
@@ -9429,7 +9927,7 @@ pub(crate) mod tests {
             .expect("descendant transaction thread must not panic");
 
         contention.expect("descendant publication must contend on the subtree-removal gate");
-        removal_result.expect("subtree removal must commit");
+        let removal_report = removal_result.expect("subtree removal must commit");
         let error = descendant_result
             .expect_err("stale descendant preimage must fail after subtree removal");
         assert!(
@@ -9440,7 +9938,15 @@ pub(crate) mod tests {
         );
         assert!(!tree.exists());
         assert!(!outside.exists());
-        assert!(transaction_debris(&root).is_empty());
+        assert!(
+            removal_report.cleanup_warnings.iter().any(|warning| warning
+                .contains("secure handle-relative recursive cleanup is unavailable")),
+            "directory recovery preservation must be explicit"
+        );
+        assert!(
+            transaction_debris(&root).iter().any(|path| path.is_dir()),
+            "preserved directory recovery must remain discoverable"
+        );
         fs::remove_dir_all(root).expect("temporary root must be removed");
     }
 

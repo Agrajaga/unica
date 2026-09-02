@@ -13,4 +13,6 @@ Registration backup, removal backup и rollback quarantine для цели вн�
 workspace резервируются под `<workspace>/.build/unica/recovery`, а не внутри
 дерева исходников. Подготовка и резервирование не следуют через symbolic link
 или reparse point, а rollback удерживает физический parent публикуемой цели
-отдельно от parent приватного recovery.
+отдельно от parent приватного recovery. Публикация и восстановление перемещают
+identity-bound child между этими удержанными parent, а совместимость файловых
+систем проверяется до первой мутации.

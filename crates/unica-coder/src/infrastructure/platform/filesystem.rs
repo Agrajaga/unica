@@ -326,6 +326,10 @@ impl FileIdentity {
     }
 }
 
+pub(crate) fn same_filesystem(left: &fs::File, right: &fs::File) -> io::Result<bool> {
+    Ok(file_identity(left)?.volume == file_identity(right)?.volume)
+}
+
 /// Retained, no-follow capability for one named absolute directory.
 ///
 /// The descriptor keeps the originally admitted directory available for
@@ -4371,11 +4375,13 @@ fn verify_owner_only_security_descriptor(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn install_file_no_clobber(source: &Path, target: &Path) -> io::Result<()> {
     fs::hard_link(source, target)
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
+#[allow(dead_code)]
 pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -4409,6 +4415,7 @@ pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> 
 }
 
 #[cfg(target_vendor = "apple")]
+#[allow(dead_code)]
 pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -4428,6 +4435,7 @@ pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> 
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 
@@ -4449,6 +4457,7 @@ pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> 
     target_vendor = "apple",
     windows
 )))]
+#[allow(dead_code)]
 pub(crate) fn rename_no_replace(_source: &Path, _target: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -5076,6 +5085,7 @@ pub(crate) fn sync_directory(_directory: &fs::File) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 pub(crate) fn prepare_file_for_removal(_path: &Path) -> io::Result<()> {
     Ok(())
 }
@@ -5085,6 +5095,7 @@ pub(crate) fn prepare_file_for_removal(_path: &Path) -> io::Result<()> {
     clippy::permissions_set_readonly_false,
     reason = "on Windows this only clears the FILE_ATTRIBUTE_READONLY flag"
 )]
+#[allow(dead_code)]
 pub(crate) fn prepare_file_for_removal(path: &Path) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,

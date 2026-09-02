@@ -25,10 +25,10 @@ use std::sync::{
 
 use crate::infrastructure::platform::filesystem::{
     create_new_regular_child, discard_created_regular_child, file_identity, hard_link_count,
-    install_file_no_clobber, metadata_is_link_or_reparse_point, open_directory_nofollow,
-    open_regular_child_nofollow, path_lock_identity, portable_permissions,
-    remove_identity_bound_regular_child, replace_file_atomically, restrict_stage_to_owner,
-    retain_regular_child_for_cleanup, FileIdentity, PortablePermissions,
+    metadata_is_link_or_reparse_point, open_directory_nofollow, open_regular_child_nofollow,
+    path_lock_identity, portable_permissions, remove_identity_bound_regular_child,
+    rename_identity_bound_regular_child_no_replace, replace_file_atomically,
+    restrict_stage_to_owner, retain_regular_child_for_cleanup, FileIdentity, PortablePermissions,
 };
 
 const STAGE_ATTEMPTS: usize = 16;
@@ -582,6 +582,10 @@ impl PreparedCreate<'_, '_, '_> {
         Ok(self.stage.artifact.file_identity)
     }
 
+    pub(crate) fn target_parent(&self) -> Arc<File> {
+        Arc::clone(&self.stage.artifact.directory)
+    }
+
     pub(crate) fn commit(mut self) -> Result<PublishReport, PublishError> {
         run_before_commit_hook(self.target);
         let recheck = injected_failure(PublishCheckpoint::Recheck, self.target)
@@ -596,7 +600,40 @@ impl PreparedCreate<'_, '_, '_> {
             attach_stage_cleanup(&mut error, &mut self.stage);
             return Err(error);
         }
-        if let Err(source) = install_file_no_clobber(&self.stage.path, self.target) {
+        let stage_name = self.stage.path.file_name().ok_or_else(|| {
+            PublishError::io(
+                PublishPhase::Commit,
+                self.target,
+                io::Error::new(ErrorKind::InvalidInput, "stage has no child name"),
+            )
+        })?;
+        let target_name = self.target.file_name().ok_or_else(|| {
+            PublishError::io(
+                PublishPhase::Commit,
+                self.target,
+                io::Error::new(ErrorKind::InvalidInput, "target has no child name"),
+            )
+        })?;
+        let rename_result = (|| -> io::Result<()> {
+            let retained = self
+                .stage
+                .artifact
+                .file
+                .lock()
+                .map_err(|_| io::Error::other("stage file-handle state is poisoned"))?;
+            let retained = retained
+                .as_ref()
+                .ok_or_else(|| io::Error::other("retained stage file handle is missing"))?;
+            rename_identity_bound_regular_child_no_replace(
+                &self.stage.artifact.directory,
+                stage_name,
+                self.stage.artifact.file_identity,
+                retained,
+                &self.stage.artifact.directory,
+                target_name,
+            )
+        })();
+        if let Err(source) = rename_result {
             let mut error = if source.kind() == ErrorKind::AlreadyExists {
                 PublishError::new(PublishErrorKind::AlreadyExists {
                     target: self.target.to_path_buf(),
@@ -607,11 +644,10 @@ impl PreparedCreate<'_, '_, '_> {
             attach_stage_cleanup(&mut error, &mut self.stage);
             return Err(error);
         }
-
-        let cleanup_warnings = self.stage.cleanup().err().into_iter().collect();
+        self.stage.disarm();
         Ok(PublishReport {
             effect: PublishEffect::Created,
-            cleanup_warnings,
+            cleanup_warnings: Vec::new(),
         })
     }
 
@@ -1682,8 +1718,8 @@ mod tests {
         PublishErrorKind, PublishMode, PublishPhase, PublishRequest,
     };
     use crate::infrastructure::platform::filesystem::{
-        create_dir_symlink_for_test, hard_link_count, metadata_is_link_or_reparse_point,
-        portable_permissions, prepare_file_for_removal,
+        create_dir_symlink_for_test, metadata_is_link_or_reparse_point, portable_permissions,
+        prepare_file_for_removal,
     };
     use crate::infrastructure::platform::testing::{
         can_rename_parent_with_retained_cleanup_child_for_test, create_file_link_fixture_for_test,
@@ -2150,8 +2186,8 @@ mod tests {
     }
 
     #[test]
-    fn committed_create_with_cleanup_failure_returns_warning() {
-        let root = unique_temp_root("committed-create-cleanup-warning");
+    fn committed_create_moves_stage_without_cleanup_phase() {
+        let root = unique_temp_root("committed-create-stage-move");
         let target = root.join("created.bin");
         let permissions_probe = root.join("permissions-probe.bin");
         fs::write(&permissions_probe, b"probe").unwrap();
@@ -2165,35 +2201,18 @@ mod tests {
                 mode: PublishMode::CreateOnly,
             })
         })
-        .expect("cleanup after a committed create must be a warning, not an error");
+        .expect("committed create must atomically move its retained stage");
 
         assert_eq!(report.effect, PublishEffect::Created);
-        assert_eq!(report.cleanup_warnings.len(), 1);
-        assert!(report.cleanup_warnings[0]
-            .message
-            .contains("injected publication cleanup failure"));
+        assert!(report.cleanup_warnings.is_empty());
         assert_eq!(fs::read(&target).unwrap(), b"committed bytes");
         assert!(expected_permissions.matches(&fs::metadata(&target).unwrap()));
-        let debris = publication_debris(&root);
-        assert_eq!(debris, [report.cleanup_warnings[0].path.clone()]);
-        assert_eq!(fs::read(&debris[0]).unwrap(), b"committed bytes");
-        assert!(expected_permissions.matches(&fs::metadata(&debris[0]).unwrap()));
-        assert_eq!(
-            hard_link_count(&fs::File::open(&target).unwrap()).unwrap(),
-            2
-        );
-        cleanup_publication_artifact(&report.cleanup_warnings[0].artifact)
-            .expect("identity-bound cleanup after failpoint scope must succeed");
-        assert_eq!(
-            hard_link_count(&fs::File::open(&target).unwrap()).unwrap(),
-            1
-        );
         assert!(publication_debris(&root).is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn bound_cleanup_cannot_be_redirected_after_the_last_route_check() {
+    fn failed_create_stage_cleanup_cannot_be_redirected_after_the_last_route_check() {
         if !can_rename_parent_with_retained_cleanup_child_for_test() {
             return;
         }
@@ -2202,16 +2221,21 @@ mod tests {
         let preserved_parent = root.join("preserved");
         fs::create_dir(&active_parent).unwrap();
         let target = active_parent.join("created.bin");
-        let report = with_publish_failpoints(&[PublishCheckpoint::Cleanup], || {
-            publish(PublishRequest {
-                target: &target,
-                replacement: b"committed bytes",
-                mode: PublishMode::CreateOnly,
-            })
-        })
-        .expect("committed create must retain one cleanup token");
-        let warning = report
-            .cleanup_warnings
+        let error = with_publish_failpoints(
+            &[PublishCheckpoint::Commit, PublishCheckpoint::Cleanup],
+            || {
+                publish(PublishRequest {
+                    target: &target,
+                    replacement: b"committed bytes",
+                    mode: PublishMode::CreateOnly,
+                })
+            },
+        )
+        .expect_err("commit failure must retain one cleanup token");
+        let warning = error
+            .cleanup_warnings()
+            .iter()
+            .cloned()
             .into_iter()
             .next()
             .expect("cleanup failpoint must report the staged artifact");
@@ -2240,8 +2264,9 @@ mod tests {
         );
         assert!(!preserved_parent.join(&stage_name).exists());
         assert_eq!(
-            fs::read(preserved_parent.join("created.bin")).unwrap(),
-            b"committed bytes"
+            fs::read_dir(&preserved_parent).unwrap().count(),
+            0,
+            "failed create must leave neither stage nor target in the retained parent"
         );
         fs::remove_dir_all(root).unwrap();
     }
