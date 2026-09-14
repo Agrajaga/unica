@@ -219,6 +219,7 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
         self.assertEqual(set(needs(proof)), {"build-tools", "package-thin", "release-assessment"})
         for argument in (
             "scripts/ci/release-proof.py",
+            "--surface-ledger arch/tool-surface.md",
             "--wire-dir",
             "--package-dir",
             "--asset-verification-dir",
