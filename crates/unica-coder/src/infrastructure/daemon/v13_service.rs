@@ -21,7 +21,7 @@ use crate::domain::apply::OperationRegistry;
 use crate::domain::call_graph_identity::{CallGraphIdentity, CallGraphIdentityError};
 use crate::domain::cancellation::CancellationToken;
 use crate::domain::invocation::{DomainResult, InvocationFailure};
-use crate::domain::refusal::RefusalCode;
+use crate::domain::refusal::{RefusalCode, RefusalDetail};
 use crate::infrastructure::native_operations::apply::{
     ApplyPlanErrorKind, ApplyStagedState, PlannedApplyEffects, StagedChangeKind, StagedFileState,
 };
@@ -1606,6 +1606,9 @@ fn run_bsl_diagnostics(
             // «проверено и чисто» — худшее направление ошибки для инструмента
             // проверки.
             if !result.ok || result.state != DiagnosticResultState::Completed {
+                // Прогон начался и не завершился — это не отсутствие
+                // поставщика: уточнения у такого случая нет, и код отвечает
+                // своим умолчанием.
                 return Err(Box::new(error_result(
                     Some(address.to_string()),
                     RefusalCode::ProviderUnavailable,
@@ -1631,11 +1634,27 @@ fn run_bsl_diagnostics(
             });
             Ok((passed, findings))
         }
-        Err(error) => Err(Box::new(error_result(
-            Some(address.to_string()),
-            RefusalCode::ProviderUnavailable,
-            format!("{}: {}", error.code, error.message),
-        ))),
+        // Координатор отказывает по разным причинам, и уточнение получает
+        // только та, которую словарь уточнений называет: «подходящего
+        // поставщика нет». Отмена — свой код, а не отказ провайдера; всё
+        // остальное отвечает умолчанием, а не выдуманным уточнением.
+        Err(error) => Err(Box::new(match error.code {
+            "cancelled" => error_result(
+                Some(address.to_string()),
+                RefusalCode::Cancelled,
+                format!("{}: {}", error.code, error.message),
+            ),
+            "no_applicable_provider" => error_result_detailed(
+                Some(address.to_string()),
+                RefusalDetail::ProviderAbsent,
+                format!("{}: {}", error.code, error.message),
+            ),
+            _ => error_result(
+                Some(address.to_string()),
+                RefusalCode::ProviderUnavailable,
+                format!("{}: {}", error.code, error.message),
+            ),
+        })),
     }
 }
 
@@ -1743,9 +1762,9 @@ fn run_native_validator(
                 })
                 .collect(),
         )),
-        Err(CheckError::DependencyUnavailable) => Err(Box::new(error_result(
+        Err(CheckError::DependencyUnavailable) => Err(Box::new(error_result_detailed(
             Some(at),
-            RefusalCode::ProviderUnavailable,
+            RefusalDetail::ProviderAbsent,
             "the native validator dependency is unavailable",
         ))),
         Err(error) => Err(Box::new(error_result(
@@ -1830,9 +1849,9 @@ fn run_meta_validator(
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
-            Err(Box::new(error_result(
+            Err(Box::new(error_result_detailed(
                 Some(at.to_string()),
-                RefusalCode::ProviderUnavailable,
+                RefusalDetail::SourceUnreadable,
                 if message.is_empty() {
                     "the metadata descriptor could not be read for validation".to_string()
                 } else {
@@ -1920,6 +1939,15 @@ enum SearchCorpus {
 
 fn error_result(at: Option<String>, code: RefusalCode, message: impl Into<String>) -> DomainResult {
     DomainResult::canonical_rejection(at, code, message)
+}
+
+/// Отказ с уточнением там, где один код покрывает несколько исходов.
+fn error_result_detailed(
+    at: Option<String>,
+    detail: RefusalDetail,
+    message: impl Into<String>,
+) -> DomainResult {
+    DomainResult::canonical_rejection_detailed(at, detail, message)
 }
 
 /// Отказ чтения передаётся целиком, а не разбирается на код и текст: иначе
