@@ -53,6 +53,17 @@ impl CallGraphSummary {
         }
     }
 
+    /// Есть ли в запрошенном направлении сосед, которого анализатор называет
+    /// файлом: только ему нужна раскладка, чтобы получить адрес. Направление
+    /// спрашивается именно потому, что страница отвечает за своё: сосед другого
+    /// направления не повод строить раскладку и не повод отказать этой странице.
+    pub(super) fn names_a_peer_by_file(&self, direction: CallGraphDirection) -> bool {
+        self.result(direction)
+            .edges
+            .iter()
+            .any(|edge| edge.id.starts_with("method/file/"))
+    }
+
     fn result(&self, direction: CallGraphDirection) -> &CallGraphResult {
         match direction {
             CallGraphDirection::Callers => &self.callers,
@@ -277,6 +288,36 @@ pub(super) fn fetch_summary(
     })
 }
 
+/// Файл модуля, которым анализатор называет форму или команду, по месту их
+/// дескриптора в раскладке: форма размещена по `…/Forms/<Имя>.xml`, её модуль
+/// лежит в `…/Forms/<Имя>/Ext/Form/Module.bsl`; команда размещена каталогом,
+/// её модуль — `Ext/CommandModule.bsl` в нём. Остальные виды анализатор
+/// называет логически, и файла им не нужно.
+pub(super) fn module_file_for_placed(kind: &str, placed: &str) -> Option<String> {
+    match kind {
+        "Form" => placed
+            .strip_suffix(".xml")
+            .map(|directory| format!("{directory}/Ext/Form/Module.bsl")),
+        "Command" => Some(format!(
+            "{}/Ext/CommandModule.bsl",
+            placed.trim_end_matches('/')
+        )),
+        _ => None,
+    }
+}
+
+/// Обратный перевод: по пути файла модуля из ответа анализатора — место
+/// дескриптора в раскладке и роль модуля, которой заканчивается адрес.
+pub(super) fn placed_for_module_file(path: &str) -> Option<(String, &'static str)> {
+    if let Some(directory) = path.strip_suffix("/Ext/Form/Module.bsl") {
+        return Some((format!("{directory}.xml"), "Form"));
+    }
+    if let Some(directory) = path.strip_suffix("/Ext/CommandModule.bsl") {
+        return Some((directory.to_string(), "Command"));
+    }
+    None
+}
+
 fn unavailable() -> CallGraphResult {
     CallGraphResult {
         state: CallGraphState::Unavailable,
@@ -290,7 +331,8 @@ fn unavailable() -> CallGraphResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        branch_collection, branch_direction, branch_owner, extend_method_node, CallGraphSummary,
+        branch_collection, branch_direction, branch_owner, extend_method_node,
+        module_file_for_placed, placed_for_module_file, CallGraphSummary,
     };
     use crate::domain::address::QualifiedAddress;
     use crate::domain::code_intelligence::{
@@ -469,6 +511,62 @@ mod tests {
             resolved["items"][2]["at"],
             "main:Catalog.Валюты.Form.Форма.Module.Form.Method.ПриОткрытии"
         );
+    }
+
+    /// Перевод адреса формы и команды в файл модуля и обратно замкнут: то, что
+    /// раскладка размещает дескриптором, анализатор называет файлом модуля.
+    #[test]
+    fn form_and_command_modules_translate_between_placement_and_analyzer_file() {
+        assert_eq!(
+            module_file_for_placed("Form", "Catalogs/Валюты/Forms/Форма.xml").as_deref(),
+            Some("Catalogs/Валюты/Forms/Форма/Ext/Form/Module.bsl")
+        );
+        assert_eq!(
+            module_file_for_placed("Command", "Catalogs/Валюты/Commands/Обновить").as_deref(),
+            Some("Catalogs/Валюты/Commands/Обновить/Ext/CommandModule.bsl")
+        );
+        assert_eq!(
+            module_file_for_placed("Catalog", "Catalogs/Валюты.xml"),
+            None
+        );
+        assert_eq!(
+            placed_for_module_file("Catalogs/Валюты/Forms/Форма/Ext/Form/Module.bsl"),
+            Some(("Catalogs/Валюты/Forms/Форма.xml".to_string(), "Form"))
+        );
+        assert_eq!(
+            placed_for_module_file("Catalogs/Валюты/Commands/Обновить/Ext/CommandModule.bsl"),
+            Some(("Catalogs/Валюты/Commands/Обновить".to_string(), "Command"))
+        );
+        assert_eq!(
+            placed_for_module_file("Catalogs/Валюты/Ext/ObjectModule.bsl"),
+            None
+        );
+    }
+
+    /// Страница отвечает за своё направление: файловый сосед у вызываемых не
+    /// заставляет страницу вызывающих просить раскладку.
+    #[test]
+    fn a_file_named_peer_is_seen_only_in_its_own_direction() {
+        let summary = CallGraphSummary {
+            callers: ready(
+                1,
+                vec![edge(
+                    "method/object/Catalog/Валюты/ПриЗаписи",
+                    CallEdgeProvenance::Resolved,
+                )],
+            ),
+            callees: ready(
+                1,
+                vec![edge(
+                    "method/file/Catalogs/Валюты/Forms/Форма/Ext/Form/Module.bsl::ПриОткрытии",
+                    CallEdgeProvenance::Resolved,
+                )],
+            ),
+            reason: None,
+        };
+
+        assert!(!summary.names_a_peer_by_file(CallGraphDirection::Callers));
+        assert!(summary.names_a_peer_by_file(CallGraphDirection::Callees));
     }
 
     /// Адрес, не называющий ветвь графа, направления не даёт.
