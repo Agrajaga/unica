@@ -157,7 +157,7 @@ Runtime идёт через `unica.run`: вызов без `op` отдаёт с�
 > Ниже приведён низкоуровневый справочник платформы. Целевой `pull`
 > имеет статус unavailable с адаптером 0.11: старый full dump не обеспечивает
 > защиту локальных изменений и поколений. Не используй эти параметры как
-> обход отказа `unica.run`. См. `INV.RUNTIME.RUNNER-ONE-CAPABILITIES`.
+> обход отказа `unica.run`.
 
 | Параметр | Описание |
 |----------|----------|
@@ -321,7 +321,7 @@ Documents/РеализацияТоваровУслуг/Forms/ФормаДоку�
 
 Platform-generated CDFI sidecar с корнем `<ConfigDumpInfo>` — локальное
 runtime-состояние конкретной ИБ, а не коллективный XML-исходник. Не добавляй
-этот sidecar в Git и не передавай его в `unica.cf.*` или `unica.meta.*`. Чистый
+этот sidecar в Git и не редактируй его как объект метаданных через `unica.apply`. Чистый
 checkout без него является нормальным состоянием. Unica не считает его
 признаком формата source-set и не включает в mutation targets/receipts.
 Legitimate metadata descriptor (включая external EPF/ERF) объекта с именем
