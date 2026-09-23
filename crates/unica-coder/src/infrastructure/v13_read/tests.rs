@@ -28,6 +28,92 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[test]
+fn borrowed_common_module_keeps_missing_privileged_unknown() {
+    let borrowed = fixture_text("platform_8_3_27/cfe_borrow/extension-common-module.xml");
+    let props = super::common_module_properties(borrowed.as_bytes(), SourceSetKind::Extension)
+        .expect("platform borrowed CommonModule omits Privileged");
+    let serialized = serde_json::to_value(props).unwrap();
+    assert_eq!(serialized["privileged"], serde_json::Value::Null);
+
+    let ordinary = fixture_text("platform_8_3_27/cfe_borrow/parent-common-module.xml");
+    let missing = ordinary.replace("<Privileged>false</Privileged>", "");
+    assert_eq!(
+        super::common_module_properties(missing.as_bytes(), SourceSetKind::Configuration)
+            .unwrap_err()
+            .code(),
+        RefusalCode::ProviderUnavailable,
+    );
+    assert_eq!(
+        super::common_module_properties(borrowed.as_bytes(), SourceSetKind::Configuration)
+            .unwrap_err()
+            .code(),
+        RefusalCode::ProviderUnavailable,
+    );
+    let own_extension = borrowed.replace(
+        "<ExtendedConfigurationObject>ac847dc9-e222-45cf-af4a-6fa863c919a8</ExtendedConfigurationObject>",
+        "",
+    );
+    assert!(
+        super::common_module_properties(own_extension.as_bytes(), SourceSetKind::Extension)
+            .is_err(),
+        "an extension's own CommonModule still requires Privileged",
+    );
+    for (raw, expected) in [("true", true), ("false", false)] {
+        let explicit = borrowed.replace(
+            "<ReturnValuesReuse>",
+            &format!("<Privileged>{raw}</Privileged><ReturnValuesReuse>"),
+        );
+        let props =
+            super::common_module_properties(explicit.as_bytes(), SourceSetKind::Extension).unwrap();
+        assert_eq!(props.privileged, Some(expected));
+    }
+    for raw in ["", "unknown"] {
+        let invalid = borrowed.replace(
+            "<ReturnValuesReuse>",
+            &format!("<Privileged>{raw}</Privileged><ReturnValuesReuse>"),
+        );
+        assert!(
+            super::common_module_properties(invalid.as_bytes(), SourceSetKind::Extension).is_err(),
+            "explicit invalid Privileged must not become null",
+        );
+    }
+}
+
+#[test]
+fn borrowed_common_module_view_serializes_unknown_privileged_without_losing_contexts() {
+    let fixture = RealReaderFixture::new();
+    let configuration = fs::read_to_string(fixture.source.join("Configuration.xml")).unwrap();
+    write(
+        &fixture.source.join("Configuration.xml"),
+        &configuration.replace(
+            "</ChildObjects>",
+            "<CommonModule>CorpusModule</CommonModule></ChildObjects>",
+        ),
+    );
+    write(
+        &fixture.source.join("CommonModules/CorpusModule.xml"),
+        &fixture_text("platform_8_3_27/cfe_borrow/extension-common-module.xml"),
+    );
+    write(
+        &fixture
+            .source
+            .join("CommonModules/CorpusModule/Ext/Module.bsl"),
+        "Процедура Проверка() Экспорт\nКонецПроцедуры\n",
+    );
+    let view = fixture
+        .extension_view_service()
+        .view(ViewRequest::new("main:CommonModule.CorpusModule").unwrap());
+    assert!(view.ok, "{:?}", view.diagnostics);
+    let data = view.data.unwrap();
+    assert_eq!(
+        data["props"]["commonModule"]["privileged"],
+        serde_json::Value::Null
+    );
+    assert!(data["props"]["commonModule"]["server"].is_boolean());
+    assert!(data["branches"].is_array());
+}
+
 fn configuration_payload(
     reader: &ProviderReadAuthority,
 ) -> Result<serde_json::Value, crate::application::v13::view::ViewError> {
@@ -772,6 +858,95 @@ fn metadata_node_props_carry_the_observed_object_properties() {
     assert_eq!(props["Hierarchical"], json!(true));
     assert_eq!(props["CodeLength"], json!(11));
     assert_eq!(props["kind"], json!("Catalog"));
+}
+
+/// Три роли дампа `PrintWebDAV`: заимствован с перекрытием, заимствован без
+/// перекрытия, собственный объект расширения.
+///
+/// Признак заимствования — `ExtendedConfigurationObject`, а не `Adopted`:
+/// корень `Configuration` самого расширения тоже `Adopted`, и читать его как
+/// заимствованный объект — дефект. `xr:PropertyState` несёт **список**
+/// перекрытых свойств, а не флаг: заимствованный объект без перекрытий его не
+/// несёт вовсе.
+#[test]
+fn borrowing_props_name_the_three_roles_of_an_extension_source_set() {
+    let fixture = RealReaderFixture::new();
+    fixture.borrow_catalog("Catalogs/Владельцы.xml", Some("Synonym"));
+    fixture.borrow_catalog("Documents/Order.xml", None);
+    let service = fixture.extension_view_service();
+
+    let overridden = service.view(ViewRequest::new("main:Catalog.Владельцы").unwrap());
+    assert!(overridden.ok, "{:?}", refusal_codes(&overridden));
+    let props = &overridden.data.as_ref().unwrap()["props"];
+    assert_eq!(props["belonging"], json!("borrowed"));
+    assert_eq!(
+        props["parentId"],
+        json!("11111111-1111-4111-8111-111111111111")
+    );
+    assert_eq!(props["overrides"], json!("Synonym"));
+    assert!(
+        props.get("extends").is_none(),
+        "UUID is not a readable parent address"
+    );
+    assert_eq!(props["parentStatus"], json!("unavailable"));
+
+    let plain = service.view(ViewRequest::new("main:Document.Order").unwrap());
+    assert!(plain.ok, "{:?}", refusal_codes(&plain));
+    let props = &plain.data.as_ref().unwrap()["props"];
+    assert_eq!(props["belonging"], json!("borrowed"));
+    assert_eq!(
+        props["parentId"],
+        json!("11111111-1111-4111-8111-111111111111")
+    );
+    assert!(
+        props.get("overrides").is_none(),
+        "заимствование без перекрытий ключа `overrides` не несёт: пустой список — это его отсутствие"
+    );
+
+    let own = service.view(ViewRequest::new("main:Catalog.Items").unwrap());
+    assert!(own.ok, "{:?}", refusal_codes(&own));
+    let props = &own.data.as_ref().unwrap()["props"];
+    assert_eq!(props["belonging"], json!("own"));
+    assert!(props.get("extends").is_none());
+    assert!(props.get("overrides").is_none());
+}
+
+/// Заимствование не стоит второго чтения дескриптора.
+///
+/// Свойства объекта и его заимствование разбираются из одних и тех же байтов.
+/// Второе чтение того же файла стоило бы лишнего доступа и, что хуже, могло бы
+/// застать файл изменившимся между чтениями — тогда два ответа об одном
+/// объекте описывали бы разные состояния источника.
+#[test]
+fn borrowing_costs_no_second_descriptor_read() {
+    let fixture = RealReaderFixture::new();
+    fixture.borrow_catalog("Catalogs/Владельцы.xml", Some("Synonym"));
+    let authority = fixture.extension_read_authority();
+
+    assert_reader_reaches(&authority, &["main:Catalog.Владельцы"]);
+
+    assert_eq!(
+        authority.metadata_descriptor_read_count("Catalog.Владельцы"),
+        2,
+        "заимствование читается тем же дескриптором, что и свойства объекта: \
+         доказательство владельца плюс типизированная проекция, и ни чтением больше",
+    );
+}
+
+/// В наборе вида `configuration` заимствования не бывает, и `belonging: own`
+/// у каждого объекта было бы шумом.
+#[test]
+fn a_configuration_source_set_carries_no_borrowing_props() {
+    let fixture = RealReaderFixture::new();
+    let service = fixture.view_service();
+
+    let result = service.view(ViewRequest::new("main:Catalog.Items").unwrap());
+
+    assert!(result.ok, "{:?}", refusal_codes(&result));
+    let props = &result.data.as_ref().unwrap()["props"];
+    for key in ["belonging", "extends", "overrides"] {
+        assert!(props.get(key).is_none(), "{key} в конфигурации не отвечает");
+    }
 }
 
 #[test]
@@ -3854,6 +4029,57 @@ impl RealReaderFixture {
 
     fn view_service(&self) -> ViewService<LogicalViewReadAuthority<'_>> {
         ViewService::new(self.read_authority(), ViewCursorStore::default())
+    }
+
+    /// Тот же набор, объявленный расширением: заимствование живёт только здесь.
+    fn extension_read_authority(&self) -> LogicalViewReadAuthority<'_> {
+        let source_root = Arc::new(RetainedDirectoryCapability::open(&self.source).unwrap());
+        let revisions = Arc::new(
+            SourceRevisionService::new_reconciling_for_test(&self.context, &self.source).unwrap(),
+        );
+        LogicalViewReadAuthority::new(
+            &self.cancellation,
+            "main",
+            "actor-fixture-extension-borrowing",
+            SourceSetKind::Extension,
+            revisions,
+            source_root,
+            PlatformProfile::v8_3_27(),
+        )
+    }
+
+    fn extension_view_service(&self) -> ViewService<LogicalViewReadAuthority<'_>> {
+        ViewService::new(self.extension_read_authority(), ViewCursorStore::default())
+    }
+
+    /// Платформенная форма заимствования: `Adopted` в свойствах,
+    /// `ExtendedConfigurationObject` с UUID родителя после имени и, когда
+    /// свойство перекрыто, запись `xr:PropertyState` в `InternalInfo`.
+    fn borrow_catalog(&self, relative: &str, overridden: Option<&str>) {
+        let path = self.source.join(relative);
+        let text = fs::read_to_string(&path).unwrap();
+        let properties = text.find("<Properties>").unwrap();
+        let after_open = properties + "<Properties>".len();
+        let mut patched = format!(
+            "{}<ObjectBelonging>Adopted</ObjectBelonging>{}",
+            &text[..after_open],
+            &text[after_open..]
+        );
+        let name_end = patched.find("</Name>").unwrap() + "</Name>".len();
+        patched = format!(
+            "{}<ExtendedConfigurationObject>11111111-1111-4111-8111-111111111111</ExtendedConfigurationObject>{}",
+            &patched[..name_end],
+            &patched[name_end..]
+        );
+        if let Some(property) = overridden {
+            let properties = patched.find("<Properties>").unwrap();
+            patched = format!(
+                "{}<InternalInfo><xr:PropertyState><xr:Property>{property}</xr:Property><xr:State>Extended</xr:State></xr:PropertyState></InternalInfo>{}",
+                &patched[..properties],
+                &patched[properties..]
+            );
+        }
+        write(&path, &patched);
     }
 
     fn install_main_form_sources(&self, form_xml: &str, module_bsl: &str) {

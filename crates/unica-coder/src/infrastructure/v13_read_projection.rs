@@ -762,6 +762,13 @@ fn validate_reader_payload(reader: LogicalReader, payload: &Value) -> Result<(),
             "relations",
             "collections",
             "predefinedItems",
+            // Заимствование расширением: только в наборе вида `extension`.
+            "belonging",
+            "parentId",
+            "parentStatus",
+            "overridesCount",
+            "overridesComplete",
+            "overrides",
         ],
         LogicalReader::Form => &[
             "name",
@@ -958,7 +965,23 @@ fn project_metadata(
     suffix: &[AddressSegment],
 ) -> Result<NodeViewData, ViewError> {
     if suffix.is_empty() {
-        let mut props = selected_scalar_props(payload, &["kind", "synonym", "support"]);
+        let mut props = selected_scalar_props(
+            payload,
+            &[
+                "kind",
+                "synonym",
+                "support",
+                // Заимствование расширением: ключи есть только в наборе
+                // расширения и только у заимствованного объекта, кроме
+                // `belonging` — он отвечает у всякого объекта расширения.
+                "belonging",
+                "parentId",
+                "parentStatus",
+                "overridesCount",
+                "overridesComplete",
+                "overrides",
+            ],
+        );
         props.extend(metadata_property_props(payload));
         props.extend(metadata_detail_props(payload));
         // Счёт предопределённых элементов берётся из ответа читателя, а не из
@@ -1859,6 +1882,34 @@ fn metadata_property_props(payload: &Value) -> Map<String, Value> {
             Some((key.to_string(), value))
         })
         .collect()
+}
+
+pub(crate) fn borrowing_props(
+    borrowing: &crate::infrastructure::native_operations::meta::MetaBorrowing,
+) -> Map<String, Value> {
+    let mut props = Map::new();
+    props.insert(
+        "belonging".into(),
+        json!(if borrowing.extends.is_some() {
+            "borrowed"
+        } else {
+            "own"
+        }),
+    );
+    if let Some(parent_id) = &borrowing.extends {
+        if safe_prop("parentId", &json!(parent_id)) {
+            props.insert("parentId".into(), json!(parent_id));
+        }
+        props.insert("parentStatus".into(), json!("unavailable"));
+        let overrides = borrowing.overrides.join(", ");
+        let complete = safe_prop("overrides", &json!(overrides));
+        props.insert("overridesCount".into(), json!(borrowing.overrides.len()));
+        props.insert("overridesComplete".into(), json!(complete));
+        if complete && !overrides.is_empty() {
+            props.insert("overrides".into(), json!(overrides));
+        }
+    }
+    props
 }
 
 fn selected_scalar_props(value: &Value, keys: &[&str]) -> Map<String, Value> {

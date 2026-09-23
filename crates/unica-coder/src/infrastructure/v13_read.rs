@@ -199,6 +199,106 @@ impl<'a> LogicalViewReadAuthority<'a> {
         }
     }
 
+    pub(crate) fn object_borrowing(
+        &self,
+        at: &QualifiedAddress,
+    ) -> Result<Option<crate::infrastructure::native_operations::meta::MetaBorrowing>, ViewError>
+    {
+        if self.read.source_set_kind() != SourceSetKind::Extension
+            || at.segments().len() != 1
+            || at.segments()[0].name().is_none()
+            || !at.segments()[0].kind().is_metadata_kind()
+        {
+            return Ok(None);
+        }
+        let target = MetadataAddress::parse(
+            PLATFORM_XML_8_3_27_FORMAT_2_20,
+            at.to_string().split_once(':').expect("qualified address").1,
+        )
+        .map_err(|error| ViewError::detailed(RefusalDetail::SourceUnreadable, error.to_string()))?;
+        let admitted = ViewSourceSnapshot {
+            source_set_identity: self.read.source_set_identity().to_string(),
+            revision: self.exact_revision()?,
+        };
+        self.verify_registered_owner(&target, &admitted)?;
+        crate::infrastructure::native_operations::meta::parse_meta_borrowing(
+            &self.read.metadata_descriptor(&target)?,
+        )
+        .map(Some)
+        .map_err(|error| ViewError::detailed(RefusalDetail::SourceUnreadable, error))
+    }
+
+    /// Resolve only registered, readable objects under this retained source.
+    /// A matching filename or name alone is not parent identity evidence.
+    pub(crate) fn borrowed_parent_matches(
+        &self,
+        parent_uuid: &str,
+        kind: &str,
+    ) -> Result<Vec<String>, ViewError> {
+        let admitted = ViewSourceSnapshot {
+            source_set_identity: self.read.source_set_identity().to_string(),
+            revision: self.exact_revision()?,
+        };
+        let payload = self
+            .read
+            .configuration_payload_with_checkpoint(&mut || self.read_checkpoint())?;
+        let mut matches = Vec::new();
+        for item in payload
+            .get("registeredObjects")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if item.get("kind").and_then(Value::as_str) != Some(kind) {
+                continue;
+            }
+            self.read_checkpoint()?;
+            let name = item.get("name").and_then(Value::as_str).ok_or_else(|| {
+                ViewError::detailed(
+                    RefusalDetail::SourceUnreadable,
+                    "registered parent has no name",
+                )
+            })?;
+            let target =
+                MetadataAddress::parse(PLATFORM_XML_8_3_27_FORMAT_2_20, &format!("{kind}.{name}"))
+                    .map_err(|error| {
+                        ViewError::detailed(RefusalDetail::SourceUnreadable, error.to_string())
+                    })?;
+            self.verify_registered_owner(&target, &admitted)?;
+            let bytes = self.read.metadata_descriptor(&target)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                ViewError::detailed(
+                    RefusalDetail::SourceUnreadable,
+                    "parent descriptor is not UTF-8",
+                )
+            })?;
+            let doc = roxmltree::Document::parse(text.trim_start_matches('\u{feff}')).map_err(
+                |error| ViewError::detailed(RefusalDetail::SourceUnreadable, error.to_string()),
+            )?;
+            let uuid = doc
+                .root_element()
+                .children()
+                .find(|node| node.is_element())
+                .and_then(|node| node.attribute("uuid"));
+            if uuid.is_some_and(|uuid| uuid.eq_ignore_ascii_case(parent_uuid)) {
+                let at = format!("{}:{}", self.read.source_set(), target.as_str());
+                let address = QualifiedAddress::parse(&at).map_err(|error| {
+                    ViewError::detailed(RefusalDetail::SourceUnreadable, error.to_string())
+                })?;
+                // A valid registered descriptor must also be readable through the public reader.
+                self.read_exact(&address, &ViewFilter::default(), &admitted)?;
+                matches.push(at);
+            }
+        }
+        if self.exact_revision()? != admitted.revision {
+            return Err(ViewError::new(
+                RefusalCode::StaleRevision,
+                "parent source changed during identity resolution",
+            ));
+        }
+        Ok(matches)
+    }
+
     fn exact_revision(&self) -> Result<String, ViewError> {
         self.read_checkpoint()?;
         self.read.exact_revision(self.deadline, self.cancellation)
@@ -458,7 +558,8 @@ impl<'a> LogicalViewReadAuthority<'a> {
         if MetadataKind::parse(kind).is_err() {
             return self.read.identity_metadata_payload(target);
         }
-        let local = self.read.metadata_local(target)?;
+        let read = self.read.metadata_local(target)?;
+        let local = read.info;
         for (kind, children) in [
             (NodeKind::Form, &local.collections.forms),
             (NodeKind::Template, &local.collections.templates),
@@ -488,6 +589,14 @@ impl<'a> LogicalViewReadAuthority<'a> {
             ViewError::detailed(RefusalDetail::SourceUnreadable, error.to_string())
         })?;
         payload.insert("collections".to_string(), collections);
+        // Заимствование отвечает только в наборе расширения; там оно есть у
+        // всякого объекта, и «своё» — такой же ответ, как «заимствовано».
+        if let Some(borrowing) = read.borrowing {
+            payload.extend(crate::infrastructure::v13_read_projection::borrowing_props(
+                &borrowing,
+            ));
+        }
+
         // Предопределённые элементы — содержимое самого объекта, и писатель у
         // них есть. Без читателя агент, добавивший элемент, не может
         // подтвердить результат: ни счёта, ни списка, ни адреса.
@@ -692,7 +801,10 @@ impl<'a> LogicalViewReadAuthority<'a> {
                 |error| ViewError::detailed(RefusalDetail::SourceUnreadable, error.to_string()),
             )?;
             let descriptor = self.read.metadata_descriptor(&owner)?;
-            Some(common_module_properties(&descriptor)?)
+            Some(common_module_properties(
+                &descriptor,
+                self.read.source_set_kind(),
+            )?)
         } else {
             None
         };
@@ -1671,7 +1783,10 @@ fn module_source_address(
         .map_err(|error| ViewError::new(RefusalCode::ProviderUnavailable, error))
 }
 
-fn common_module_properties(bytes: &[u8]) -> Result<CommonModuleProperties, ViewError> {
+fn common_module_properties(
+    bytes: &[u8],
+    source_kind: SourceSetKind,
+) -> Result<CommonModuleProperties, ViewError> {
     let text = std::str::from_utf8(bytes).map_err(|_| {
         ViewError::detailed(
             RefusalDetail::SourceUnreadable,
@@ -1681,6 +1796,11 @@ fn common_module_properties(bytes: &[u8]) -> Result<CommonModuleProperties, View
     let document = roxmltree::Document::parse(text.trim_start_matches('\u{feff}'))
         .map_err(|error| ViewError::detailed(RefusalDetail::SourceUnreadable, error.to_string()))?;
     let root = document.root_element();
+    let borrowed = source_kind == SourceSetKind::Extension
+        && crate::infrastructure::native_operations::meta::parse_meta_borrowing(bytes)
+            .map_err(|error| ViewError::detailed(RefusalDetail::SourceUnreadable, error))?
+            .extends
+            .is_some_and(|id| uuid::Uuid::parse_str(&id).is_ok());
     let boolean = |name| -> Result<bool, ViewError> {
         let raw = xml_descendant_text(root, name).ok_or_else(|| {
             ViewError::detailed(
@@ -1697,6 +1817,28 @@ fn common_module_properties(bytes: &[u8]) -> Result<CommonModuleProperties, View
             )),
         }
     };
+    let privileged = match root
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "Privileged")
+    {
+        None if borrowed => None,
+        None => {
+            return Err(ViewError::detailed(
+                RefusalDetail::SourceUnreadable,
+                "common module descriptor has no Privileged property",
+            ));
+        }
+        Some(node) => match node.text().map(str::trim) {
+            Some("true") => Some(true),
+            Some("false") => Some(false),
+            _ => {
+                return Err(ViewError::detailed(
+                    RefusalDetail::SourceUnreadable,
+                    "common module Privileged property is not boolean",
+                ));
+            }
+        },
+    };
     Ok(CommonModuleProperties {
         global: boolean("Global")?,
         client_managed_application: boolean("ClientManagedApplication")?,
@@ -1704,7 +1846,7 @@ fn common_module_properties(bytes: &[u8]) -> Result<CommonModuleProperties, View
         external_connection: boolean("ExternalConnection")?,
         client_ordinary_application: boolean("ClientOrdinaryApplication")?,
         server_call: boolean("ServerCall")?,
-        privileged: boolean("Privileged")?,
+        privileged,
         return_values_reuse: xml_descendant_text(root, "ReturnValuesReuse")
             .ok_or_else(|| {
                 ViewError::detailed(

@@ -201,6 +201,7 @@ impl CanonicalV13ReadService {
             }
             Ok(planned) => planned,
         };
+        let borrowing = effects.borrowing().to_vec();
         let has_changes = !staged.planned_changes().is_empty();
         if !has_changes {
             effects = Default::default();
@@ -260,6 +261,10 @@ impl CanonicalV13ReadService {
             "effects": publication.effects().events().len(),
             "cache": publication.effects().cache(),
         }));
+        if !borrowing.is_empty() {
+            result.data.as_mut().expect("apply data exists")["borrowing"] =
+                serde_json::json!(borrowing);
+        }
         if has_changes {
             result.changed = changed;
         }
@@ -446,13 +451,37 @@ impl CanonicalV13ReadService {
                 .any(|section| section.as_str() == Some(CALL_GRAPH_SECTION))
         });
         let service = ViewService::with_shared_cursors(authority, Arc::clone(&self.cursors));
-        let mut result = if let Some(sections) = sections.filter(|_| !call_graph_requested) {
-            service.view_projected(request, &|data| {
-                project_view_sections(data, sections)
+        let enrich_and_project = |data: &Value| -> Result<Value, ViewError> {
+            let mut data = data.clone();
+            if source.source_kind() == crate::domain::project_sources::SourceSetKind::Extension
+                && data
+                    .get("props")
+                    .is_some_and(|props| props.get("belonging").is_none())
+            {
+                let borrowing = source
+                    .logical_view_read_authority(cancellation)
+                    .map_err(|message| ViewError::detailed(RefusalDetail::ProviderAbsent, message))?
+                    .object_borrowing(&address)?;
+                if let Some(borrowing) = borrowing {
+                    if let Some(props) = data.get_mut("props").and_then(Value::as_object_mut) {
+                        props.extend(crate::infrastructure::v13_read_projection::borrowing_props(
+                            &borrowing,
+                        ));
+                    }
+                }
+            }
+            self.resolve_borrowed_parent(invocation, &address, &mut data, cancellation);
+            if let Some(sections) = sections {
+                project_view_sections(&data, sections)
                     .map_err(|error| ViewError::new(error.code(), error.to_string()))
-            })
-        } else {
+            } else {
+                Ok(data)
+            }
+        };
+        let mut result = if call_graph_requested {
             service.view(request)
+        } else {
+            service.view_projected(request, &enrich_and_project)
         };
         if call_graph_requested && result.ok {
             let is_method = result
@@ -583,6 +612,82 @@ impl CanonicalV13ReadService {
             ))
         })?;
         Ok((summary, directory))
+    }
+
+    fn resolve_borrowed_parent(
+        &self,
+        invocation: &ActorBoundExecution,
+        address: &QualifiedAddress,
+        data: &mut Value,
+        cancellation: &CancellationToken,
+    ) {
+        let Some(data) = data.as_object_mut() else {
+            return;
+        };
+        let Some(owner) = address
+            .segments()
+            .first()
+            .filter(|_| address.segments().len() == 1)
+        else {
+            return;
+        };
+        let kind = owner.kind().as_str();
+        let Some(props) = data.get_mut("props").and_then(Value::as_object_mut) else {
+            return;
+        };
+        let Some(parent_id) = props
+            .get("parentId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let mut matches = Vec::new();
+        let sources = match invocation
+            .admit_borrowing_parent_sources(cancellation)
+            .and_then(|()| {
+                invocation.read_sources().map(|sources| {
+                    sources
+                        .into_iter()
+                        .filter(|source| {
+                            source.source_kind()
+                                == crate::domain::project_sources::SourceSetKind::Configuration
+                        })
+                        .collect::<Vec<_>>()
+                })
+            }) {
+            Ok(sources) if !sources.is_empty() => sources,
+            _ => {
+                props.insert("parentStatus".into(), json!("unavailable"));
+                return;
+            }
+        };
+        for source in sources {
+            let candidate = source
+                .logical_view_read_authority(cancellation)
+                .map_err(|_| ())
+                .and_then(|authority| {
+                    authority
+                        .borrowed_parent_matches(&parent_id, kind)
+                        .map_err(|_| ())
+                });
+            match candidate {
+                Ok(found) => matches.extend(found),
+                Err(_) => {
+                    props.insert("parentStatus".into(), json!("unavailable"));
+                    return;
+                }
+            }
+        }
+        let status = match matches.as_slice() {
+            [parent] => {
+                props.insert("extends".into(), json!(parent));
+                "resolved"
+            }
+            [] => "not_found",
+            _ => "ambiguous",
+        };
+        props.insert("parentStatus".into(), json!(status));
     }
 
     /// Справочник раскладки одного допущенного набора — тот же, что строит
