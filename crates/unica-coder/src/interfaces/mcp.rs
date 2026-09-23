@@ -400,6 +400,7 @@ fn project_compatibility_snapshot(
         snapshot.status(),
         snapshot.completed_result().cloned(),
         snapshot.failure_reason().is_some(),
+        snapshot.cancel_requested(),
         snapshot.created_at_epoch_ms(),
         snapshot.updated_at_epoch_ms(),
         snapshot.ttl_ms(),
@@ -3311,6 +3312,137 @@ mod tests {
         compatibility_closed_errors_case().await;
         compatibility_hostile_status_payload_case().await;
         compatibility_daemon_restart_case().await;
+    }
+
+    #[tokio::test]
+    async fn public_task_cancel_and_result_preserve_a_started_infobase_create_receipt() {
+        use crate::infrastructure::daemon::server::actor_capacity_tests::{
+            canonical_v13_service, install_cancellable_create_runner, LiveV5Daemon,
+        };
+
+        async fn terminal_result(
+            client: &mut McpClient,
+            task_id: &str,
+            deadline: Instant,
+        ) -> Value {
+            let mut request_id = 10_u64;
+            loop {
+                assert!(Instant::now() < deadline, "task.result did not settle");
+                client
+                    .send(json!({
+                        "jsonrpc":"2.0", "id":request_id, "method":"tools/call",
+                        "params":{"name":"unica.task.result", "arguments":{"taskId":task_id,"waitMs":1000}, "_meta":modern_meta()}
+                    }))
+                    .await;
+                let result = client.receive().await;
+                if !matches!(
+                    result["result"]["structuredContent"]["data"]["task"]["status"].as_str(),
+                    Some("queued" | "working")
+                ) {
+                    return result;
+                }
+                request_id += 1;
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        install_cancellable_create_runner(root.path());
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join("v8project.yaml"),
+            "format: DESIGNER\ninfobase:\n  connection: 'File=build/ib'\n",
+        )
+        .unwrap();
+        let workspace = std::fs::canonicalize(workspace).unwrap();
+        let daemon = LiveV5Daemon::start(canonical_v13_service());
+        let owner = daemon.owner();
+        let (mut client, _) = spawn_unica_server(UnicaServer::with_canonical_daemon(
+            daemon.owner(),
+            workspace.to_string_lossy().into_owned(),
+        ));
+        client
+            .send(json!({
+                "jsonrpc":"2.0", "id":1, "method":"tools/call",
+                "params":{"name":"unica.run", "arguments":{"op":"infobase.create","args":{},"dryRun":true}, "_meta":modern_meta()}
+            }))
+            .await;
+        let preview = client.receive().await;
+        let preview_id = preview["result"]["structuredContent"]["data"]["task"]["taskId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("preview did not return a task: {preview}"));
+        let preview_result = terminal_result(
+            &mut client,
+            preview_id,
+            Instant::now() + Duration::from_secs(20),
+        )
+        .await;
+        let rev = preview_result["result"]["structuredContent"]["rev"]
+            .as_str()
+            .unwrap_or_else(|| panic!("preview has no revision: {preview_result}"));
+        client
+            .send(json!({
+                "jsonrpc":"2.0", "id":3, "method":"tools/call",
+                "params":{"name":"unica.run", "arguments":{"op":"infobase.create","args":{},"dryRun":false,"ifRev":rev}, "_meta":modern_meta()}
+            }))
+            .await;
+        let apply = client.receive().await;
+        let task_id = apply["result"]["structuredContent"]["data"]["task"]["taskId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("apply did not return a task: {apply}"))
+            .to_owned();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !workspace.join("entered.marker").exists() {
+            assert!(Instant::now() < deadline, "mutating runner did not start");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        client
+            .send(json!({
+                "jsonrpc":"2.0", "id":4, "method":"tools/call",
+                "params":{"name":"unica.task.cancel", "arguments":{"taskId":task_id}, "_meta":modern_meta()}
+            }))
+            .await;
+        let cancelled = client.receive().await;
+        assert_eq!(
+            cancelled["result"]["structuredContent"]["data"]["task"]["status"], "working",
+            "{cancelled}"
+        );
+        assert_eq!(
+            cancelled["result"]["structuredContent"]["data"]["task"]["cancelRequested"], true,
+            "{cancelled}"
+        );
+        assert!(!workspace.join("created.marker").exists());
+        std::fs::write(workspace.join("release.marker"), "finish mutation").unwrap();
+        let result = terminal_result(
+            &mut client,
+            &task_id,
+            Instant::now() + Duration::from_secs(20),
+        )
+        .await;
+        assert_eq!(
+            result["result"]["structuredContent"]["ok"], true,
+            "{result}"
+        );
+        assert_eq!(
+            result["result"]["structuredContent"]["data"]["state"], "created",
+            "{result}"
+        );
+        assert_eq!(
+            result["result"]["structuredContent"]["data"]["receipt"],
+            "repeated preview reports nothing left to create",
+            "{result}"
+        );
+        assert!(workspace.join("created.marker").exists());
+        let internal_task: crate::domain::invocation::TaskId = task_id.parse().unwrap();
+        assert!(matches!(
+            daemon.get(&owner, internal_task),
+            crate::infrastructure::daemon::protocol_v5::V5DaemonTaskSnapshot::Completed {
+                cancel_requested: true,
+                ..
+            }
+        ));
+        client.shutdown().await;
+        daemon.finish(owner);
     }
 
     async fn tasks_direct_first_capability_case() {
