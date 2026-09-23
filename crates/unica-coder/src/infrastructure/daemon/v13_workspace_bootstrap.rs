@@ -136,7 +136,7 @@ impl PreparedWorkspaceInspection {
             if cancellation.is_cancelled() {
                 Err(cancelled_error("workspace inspection cancelled"))
             } else {
-                deadline.checkpoint_handoff().map_err(str::to_string)
+                Ok(())
             }
         };
         let discovery =
@@ -765,6 +765,80 @@ mod tests {
     use crate::domain::project_sources::{
         ProjectSourceMap, ProjectSourceSet, SourceFormat, SourceSetKind,
     };
+
+    #[test]
+    fn root_inspection_discovers_sources_after_response_handoff() {
+        use super::{prepare, Preparation};
+        use crate::application::invocation::InvocationResponseDeadline;
+        use crate::application::invocation_store::ToolIdentity;
+        use crate::application::ports::Clock;
+        use crate::domain::cancellation::CancellationToken;
+        use crate::infrastructure::daemon::protocol::InvocationRequest;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        struct ManualClock {
+            start: Instant,
+            elapsed_ms: AtomicU64,
+        }
+
+        impl Clock for ManualClock {
+            fn now(&self) -> Instant {
+                self.start + Duration::from_millis(self.elapsed_ms.load(Ordering::SeqCst))
+            }
+        }
+
+        for configured in [true, false] {
+            for tool in [ToolIdentity::View, ToolIdentity::Check] {
+                let workspace = tempfile::tempdir().unwrap();
+                let root = std::fs::canonicalize(workspace.path()).unwrap();
+                std::fs::create_dir(root.join("src")).unwrap();
+                std::fs::write(root.join("src/Configuration.xml"), "<MetaDataObject/>").unwrap();
+                if configured {
+                    std::fs::write(
+                        root.join("v8project.yaml"),
+                        "format: DESIGNER\nsource-set:\n  - name: main\n    type: CONFIGURATION\n    path: src\n",
+                    )
+                    .unwrap();
+                }
+                let clock = Arc::new(ManualClock {
+                    start: Instant::now(),
+                    elapsed_ms: AtomicU64::new(0),
+                });
+                let request = InvocationRequest::new(
+                    tool,
+                    serde_json::json!({}),
+                    root.to_string_lossy(),
+                    7_000,
+                )
+                .unwrap();
+                let Preparation::Ready(inspection) =
+                    prepare(&request, InvocationResponseDeadline::capture(clock.clone()))
+                else {
+                    panic!("root inspection must prepare before response handoff");
+                };
+
+                clock.elapsed_ms.store(9_000, Ordering::SeqCst);
+                let result = inspection.execute(CancellationToken::new()).unwrap();
+                assert!(result.ok, "{tool:?}, configured={configured}: {result:?}");
+                let data = result.data.unwrap();
+                if tool == ToolIdentity::Check {
+                    assert_eq!(data["readinessState"], "incomplete");
+                } else {
+                    assert_eq!(data["sourceSets"][0]["name"], "main");
+                    assert_eq!(
+                        data["config"]["state"],
+                        if configured {
+                            "configured"
+                        } else {
+                            "autodetected"
+                        }
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn root_inspection_cancellation_prevents_discovery_and_late_publication() {
