@@ -19,6 +19,9 @@ use std::path::PathBuf;
 
 const PROJECT_CONFIG_MAX_BYTES: usize = 8 * 1024 * 1024;
 
+#[cfg(test)]
+pub(super) mod test_control;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InfobaseTarget {
     configured: bool,
@@ -164,6 +167,8 @@ fn bootstrap_result(
     let health = if source_map.source_sets.is_empty() {
         None
     } else {
+        #[cfg(test)]
+        test_control::pause_before_health(&context.workspace_root);
         let health_budget = response_deadline.remaining_handoff_budget();
         let cancellation = CancellationToken::new();
         Some(

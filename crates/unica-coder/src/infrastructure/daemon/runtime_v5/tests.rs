@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[path = "tests/root_inspection.rs"]
+mod root_inspection;
+
 #[test]
 fn protected_mutation_preserves_success_and_failure_after_cancel_request() {
     let cancellation = CancellationToken::new();
