@@ -3,6 +3,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "platform/v13_search_unreadable.rs"]
+mod unreadable;
+
 const RESPONSE_DEADLINE: Duration = Duration::from_secs(15);
 
 struct McpProcess {

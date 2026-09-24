@@ -34,7 +34,9 @@ use crate::infrastructure::native_operations::apply::{
     ApplyPlanErrorKind, ApplyStagedState, PlannedApplyEffects, StagedChangeKind, StagedFileState,
 };
 use crate::infrastructure::native_operations::apply_families::plan_hidden_v13_apply;
-use crate::infrastructure::v13_find::{LayoutFindSource, WorkspaceFindDirectoryBuilder};
+use crate::infrastructure::v13_find::{
+    FindBuildError, LayoutFindSource, WorkspaceFindDirectoryBuilder,
+};
 use crate::infrastructure::workspace_actor::{
     ApplyAdmissionError, ApplyEffectDisposition, ApplyPublicationErrorKind,
 };
@@ -108,6 +110,18 @@ impl CanonicalInvocationService for CanonicalV13ReadService {
 }
 
 impl CanonicalV13ReadService {
+    #[cfg(test)]
+    pub(super) fn with_name_read_fault_for_test(
+        relative: &'static str,
+        kind: std::io::ErrorKind,
+    ) -> Self {
+        let mut service = Self::default();
+        service.find_builder = service
+            .find_builder
+            .with_local_read_fault_for_test(relative, kind);
+        service
+    }
+
     fn execute_apply(
         &self,
         invocation: &ActorBoundExecution,
@@ -801,7 +815,7 @@ impl CanonicalV13ReadService {
         )];
         self.find_builder
             .build(&layout, source.deadline(), cancellation)
-            .map_err(|error| Box::new(error_result(at, error.code(), error.to_string())))
+            .map_err(|error| Box::new(find_build_error_result(at, error)))
     }
 
     fn execute_search(
@@ -1270,9 +1284,9 @@ impl CanonicalV13ReadService {
                     selector.insert("sourceSet".to_string(), Value::String((*name).to_string()));
                 }
                 None => {
-                    return error_result(
+                    return error_result_detailed(
                         None,
-                        RefusalCode::ProviderUnavailable,
+                        RefusalDetail::ProviderAbsent,
                         "no admitted source set is available for a role search",
                     )
                 }
@@ -1407,6 +1421,13 @@ impl CanonicalV13ReadService {
             Ok(sources) => sources,
             Err(error) => return error_result(None, RefusalCode::ProviderUnavailable, error),
         };
+        if sources.is_empty() {
+            return error_result_detailed(
+                None,
+                RefusalDetail::ProviderAbsent,
+                "name search has no admitted source sets",
+            );
+        }
         let selected = sources
             .iter()
             .filter(|source| {
@@ -1427,17 +1448,29 @@ impl CanonicalV13ReadService {
             .iter()
             .map(|source| LayoutFindSource::new(source.name(), source.kind(), source.root()))
             .collect::<Vec<_>>();
-        let directory = match self.find_builder.build(&layout, deadline, cancellation) {
-            Ok(directory) => directory,
-            Err(error) => return error_result(None, error.code(), error.to_string()),
+        let built = match self
+            .find_builder
+            .build_for_search(&layout, deadline, cancellation)
+        {
+            Ok(built) => built,
+            Err(error) => return find_build_error_result(None, error),
         };
         if let Some(scope) = scope {
-            if let Err((code, message)) = validate_name_scope(&directory, &scope, first.kind()) {
+            if let Err((code, message)) = validate_name_scope(&built.index, &scope, first.kind()) {
+                if built.omissions.total != 0
+                    && matches!(code, RefusalCode::NotFound | RefusalCode::InvalidState)
+                {
+                    return error_result_detailed(
+                        Some(scope.to_string()),
+                        RefusalDetail::SourceUnreadable,
+                        "name search cannot prove the requested scope in an incomplete source layout",
+                    );
+                }
                 return error_result(Some(scope.to_string()), code, message);
             }
             request = request.with_scope(scope);
         }
-        let found = directory.find(request);
+        let found = built.index.find(request);
         let matches: Vec<Value> = found
             .candidates()
             .iter()
@@ -1450,10 +1483,26 @@ impl CanonicalV13ReadService {
                 })
             })
             .collect();
-        let mut result = DomainResult::success("name search completed");
+        let mut result = DomainResult::success(if built.omissions.total == 0 {
+            "name search completed".to_string()
+        } else {
+            format!(
+                "name search has {} unreadable descriptor candidates",
+                built.omissions.total
+            )
+        });
         result.data = Some(serde_json::json!({
             "mode": "names",
             "matches": matches,
+            "sourceCoverage": {
+                "complete": built.omissions.total == 0,
+                "omitted": built.omissions.total,
+                "detailsTruncated": built.omissions.total > built.omissions.details.len(),
+                "details": built.omissions.details.iter().map(|detail| serde_json::json!({
+                    "sourceSet": detail.source_set,
+                    "reason": detail.reason,
+                })).collect::<Vec<_>>(),
+            },
             // Совпадение по близости — догадка, и она названа: читатель
             // обязан отличать «нашлось» от «похоже на».
             "approximate": found.is_nearest(),
@@ -1711,9 +1760,9 @@ impl CanonicalV13ReadService {
             Err(error) => return error_result(None, RefusalCode::ProviderUnavailable, error),
         };
         let Some(deadline) = sources.first().map(|source| source.deadline()) else {
-            return error_result(
+            return error_result_detailed(
                 None,
-                RefusalCode::ProviderUnavailable,
+                RefusalDetail::ProviderAbsent,
                 "resolve has no admitted source sets",
             );
         };
@@ -1723,7 +1772,7 @@ impl CanonicalV13ReadService {
             .collect::<Vec<_>>();
         let directory = match self.find_builder.build(&layout, deadline, cancellation) {
             Ok(directory) => directory,
-            Err(error) => return error_result(None, error.code(), error.to_string()),
+            Err(error) => return find_build_error_result(None, error),
         };
         let Some(entry) = directory.locate_path(path) else {
             return error_result(
@@ -1965,6 +2014,13 @@ fn collect_json_changes(
             "left": left,
             "right": right,
         })),
+    }
+}
+
+fn find_build_error_result(at: Option<String>, error: FindBuildError) -> DomainResult {
+    match error.detail() {
+        Some(detail) => error_result_detailed(at, detail, error.to_string()),
+        None => error_result(at, error.code(), error.to_string()),
     }
 }
 
