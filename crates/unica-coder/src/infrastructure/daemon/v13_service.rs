@@ -11,7 +11,7 @@ use super::v13_read_modes::{filter_diff_data, project_view_sections, search_scop
 use crate::application::invocation_store::ToolIdentity;
 use crate::application::operation_descriptors::ExecutionClass;
 use crate::application::result_store::{
-    SearchCursorBinding, SearchCursorStore, StoredSearchCursor, ViewCursorStore,
+    SearchCursorBinding, SearchCursorStore, StoredSearchCursor, ViewCursorBinding, ViewCursorStore,
 };
 use crate::application::tool_contracts::SurfaceRelease;
 use crate::application::v13::apply::parse_request as parse_apply_request;
@@ -1626,12 +1626,36 @@ impl CanonicalV13ReadService {
             return error_result(
                 None,
                 RefusalCode::BadValue,
-                "check takes only `at`; the validators of a node follow from its kind",
+                "check does not accept a validator filter; validators follow from the node kind",
             );
         }
         if let Some(at) = arguments.get("at") {
             let Some(at) = at.as_str() else {
                 return error_result(None, RefusalCode::BadValue, "check at must be a string");
+            };
+            let limit = match arguments.get("limit") {
+                None => 20,
+                Some(value) => match bounded_usize(value).filter(|limit| *limit <= 50) {
+                    Some(limit) => limit,
+                    None => {
+                        return error_result(
+                            Some(at.to_string()),
+                            RefusalCode::BadValue,
+                            "check limit must be an integer from 1 through 50",
+                        )
+                    }
+                },
+            };
+            let cursor = match arguments.get("cursor") {
+                None => None,
+                Some(Value::String(cursor)) => Some(cursor.as_str()),
+                Some(_) => {
+                    return error_result(
+                        Some(at.to_string()),
+                        RefusalCode::BadValue,
+                        "check cursor must be a string",
+                    )
+                }
             };
             let view_arguments =
                 Map::from_iter([("at".to_string(), Value::String(at.to_string()))]);
@@ -1641,6 +1665,33 @@ impl CanonicalV13ReadService {
                     return refusal;
                 }
                 return viewed;
+            }
+            let Some(revision) = viewed.rev.as_deref() else {
+                return error_result(
+                    Some(at.to_string()),
+                    RefusalCode::InvalidState,
+                    "check could not establish the source revision",
+                );
+            };
+            let binding = ViewCursorBinding {
+                canonical_at: at.to_string(),
+                projection: "check".to_string(),
+                normalized_filter: String::new(),
+                source_set_identity: format!(
+                    "{}:{}",
+                    invocation.workspace_identity_hash().as_str(),
+                    at.split_once(':').map_or("", |(source_set, _)| source_set)
+                ),
+                source_revision: revision.to_string(),
+                page_limit: limit,
+            };
+            if let Some(cursor) = cursor {
+                return crate::application::v13::check::page_diagnostics(
+                    &self.cursors,
+                    binding,
+                    None,
+                    Some(cursor),
+                );
             }
             let kind = viewed
                 .data
@@ -1658,7 +1709,32 @@ impl CanonicalV13ReadService {
                 cancellation,
             );
             if result.ok {
-                result.rev = viewed.rev;
+                if cancellation.is_cancelled() {
+                    return error_result(
+                        Some(at.to_string()),
+                        RefusalCode::Cancelled,
+                        "check was cancelled before publishing its result",
+                    );
+                }
+                let current =
+                    self.execute_view_arguments(invocation, &view_arguments, cancellation);
+                if !current.ok {
+                    return current;
+                }
+                if current.rev.as_deref() != Some(revision) {
+                    return error_result(
+                        Some(at.to_string()),
+                        RefusalCode::ConcurrentChange,
+                        "source changed while check ran; retry the question",
+                    );
+                }
+                result.rev = Some(revision.to_string());
+                return crate::application::v13::check::page_diagnostics(
+                    &self.cursors,
+                    binding,
+                    Some(result),
+                    None,
+                );
             }
             return result;
         }
@@ -2264,9 +2340,7 @@ fn run_bsl_diagnostics(
 ) -> Result<(bool, Vec<Value>), Box<DomainResult>> {
     use crate::application::diagnostics::DiagnosticCoordinator;
     use crate::application::ports::ApplicationPorts;
-    use crate::domain::diagnostics::{
-        DiagnosticAction, DiagnosticFilter, DiagnosticRequest, DiagnosticResultState,
-    };
+    use crate::domain::diagnostics::{DiagnosticAction, DiagnosticFilter, DiagnosticRequest};
 
     let registry = match ports.diagnostic_provider_registry() {
         Ok(registry) => registry,
@@ -2311,7 +2385,10 @@ fn run_bsl_diagnostics(
         metadata_path,
         filter: DiagnosticFilter::default(),
         range: None,
-        limit: 200,
+        // The coordinator truncates only after collecting and sorting all
+        // findings. `check` must decide its verdict from the complete set;
+        // its public page limit is applied afterwards.
+        limit: usize::MAX,
         // Срок берётся из настройки пользователя. Подменять его выдуманным
         // умолчанием нельзя: человек настроил срок и не узнал бы, что
         // настройка не читается.
@@ -2336,7 +2413,7 @@ fn run_bsl_diagnostics(
             // Пустой список находок при незавершённом прогоне выглядел бы как
             // «проверено и чисто» — худшее направление ошибки для инструмента
             // проверки.
-            if !result.ok || result.state != DiagnosticResultState::Completed {
+            if !bsl_result_proves_full_verdict(&result) {
                 // Прогон начался и не завершился — это не отсутствие
                 // поставщика: уточнения у такого случая нет, и код отвечает
                 // своим умолчанием.
@@ -2349,20 +2426,12 @@ fn run_bsl_diagnostics(
             let findings: Vec<Value> = result
                 .items
                 .iter()
-                .filter_map(|item| serde_json::to_value(item).ok())
+                .map(|item| serde_json::to_value(item).expect("diagnostic items serialize"))
                 .collect();
             // Провалом считается ошибка, а не всякая пометка: подсказка по
             // стилю не ломает модуль, и остальные валидаторы поверхности
             // судят так же.
-            let passed = !result.items.iter().any(|item| {
-                matches!(
-                    item,
-                    crate::domain::diagnostics::DiagnosticItem::Diagnostic {
-                        severity: crate::domain::diagnostics::DiagnosticSeverity::Error,
-                        ..
-                    } | crate::domain::diagnostics::DiagnosticItem::ResourceFailure { .. }
-                )
-            });
+            let passed = bsl_findings_passed(&result.items);
             Ok((passed, findings))
         }
         // Координатор отказывает по разным причинам, и уточнение получает
@@ -2387,6 +2456,29 @@ fn run_bsl_diagnostics(
             ),
         })),
     }
+}
+
+fn bsl_result_proves_full_verdict(result: &crate::domain::diagnostics::DiagnosticResult) -> bool {
+    use crate::domain::diagnostics::DiagnosticResultState;
+    result.ok
+        && result.state == DiagnosticResultState::Completed
+        && result.complete
+        && result.truncated == Some(false)
+        && result.items_total == Some(result.items.len())
+        && result.items_returned == Some(result.items.len())
+}
+
+fn bsl_findings_passed(items: &[crate::domain::diagnostics::DiagnosticItem]) -> bool {
+    use crate::domain::diagnostics::{DiagnosticItem, DiagnosticSeverity};
+    !items.iter().any(|item| {
+        matches!(
+            item,
+            DiagnosticItem::Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                ..
+            } | DiagnosticItem::ResourceFailure { .. }
+        )
+    })
 }
 
 fn run_node_checks(
@@ -2819,6 +2911,62 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn bsl_check_never_calls_a_truncated_analyzer_result_complete() {
+        use crate::domain::diagnostics::{
+            DiagnosticAction, DiagnosticResult, DiagnosticResultState, DiagnosticSelection,
+        };
+        let mut result = DiagnosticResult {
+            ok: true,
+            action: DiagnosticAction::Analyze,
+            selection: DiagnosticSelection {
+                source_set: "main".to_string(),
+                metadata_path: None,
+                target_kind: None,
+                providers: vec!["bsl-language-server"],
+                filter: None,
+                limit: Some(200),
+            },
+            state: DiagnosticResultState::Completed,
+            complete: true,
+            providers: Vec::new(),
+            items_total: Some(201),
+            items_returned: Some(200),
+            truncated: Some(true),
+            items: Vec::new(),
+        };
+        assert!(!super::bsl_result_proves_full_verdict(&result));
+        result.truncated = Some(false);
+        result.items_total = Some(0);
+        result.items_returned = Some(0);
+        assert!(super::bsl_result_proves_full_verdict(&result));
+    }
+
+    #[test]
+    fn bsl_check_sees_an_error_after_two_hundred_warnings() {
+        use crate::domain::diagnostics::{DiagnosticFocus, DiagnosticItem, DiagnosticSeverity};
+        use crate::domain::source_location::SourceLocation;
+        use crate::domain::source_target::TargetKind;
+        let finding = |severity| DiagnosticItem::Diagnostic {
+            provider: "bsl-language-server",
+            location: SourceLocation::Addressed {
+                source_set: "main".to_string(),
+                metadata_path: None,
+                target_kind: TargetKind::Module,
+            },
+            location_reason: None,
+            focus: DiagnosticFocus::Target,
+            code: "late-error".to_string(),
+            severity,
+            message: "finding".to_string(),
+            tags: Vec::new(),
+        };
+        let mut items = vec![finding(DiagnosticSeverity::Warning); 200];
+        assert!(super::bsl_findings_passed(&items));
+        items.push(finding(DiagnosticSeverity::Error));
+        assert!(!super::bsl_findings_passed(&items));
+    }
 
     struct CountingSearchProvider {
         identity: ProviderIdentity,
