@@ -106,7 +106,7 @@ impl RunOperation {
             RunIntent::InfobaseImport => {
                 "Import a DT transfer file as the infobase; the mode states whether an absent infobase is created or the data of an existing one is discarded."
             }
-            RunIntent::ExtensionList => "Read installed extensions through a previewed platform session. Name prefixes are not reported by the platform.",
+            RunIntent::ExtensionList => "Read installed extensions through a previewed platform session. Each namePrefix is the provider-attested value or null when unknown.",
             RunIntent::ExtensionActivate => "Set the named installed extension active or inactive.",
             RunIntent::ConfigurationApply => "Apply the working configuration to the database configuration; unlike unica.apply this changes the infobase.",
             RunIntent::ConfigurationReset => "Discard pending configuration changes in the infobase, restoring its database configuration.",
@@ -311,7 +311,7 @@ pub(crate) fn catalog_for(release: SurfaceRelease) -> Option<V13Catalog> {
                 },
                 V13ToolContract {
                     name: "search",
-                    description: "Search one corpus for a query: BSL module text, or the names and synonyms of metadata objects. Optionally under one logical subtree.",
+                    description: "Search one corpus for a query: BSL module text, or the names and synonyms of metadata objects. Optionally under one logical subtree. Results use pages; provider roles report whether their finite search window is complete. Names report descriptor-read coverage separately from approximate name matching.",
                     input_schema: schema(
                         json!({
                             "query": {"type": "string", "description": "Literal BSL text, symbol, or metadata name to search for."},
@@ -319,18 +319,22 @@ pub(crate) fn catalog_for(release: SurfaceRelease) -> Option<V13Catalog> {
                             "kind": {"type": "string", "description": "`names` corpus only: narrow the search to one logical node kind."},
                             "role": {"type": "string", "enum": ["lexical", "symbol", "semantic"], "description": "`text` corpus only: which provider answers. `lexical` matches literally, `symbol` uses the symbol index, `semantic` matches by meaning. Omit for the literal search Unica performs itself."},
                             "scope": logical_subtree_address(),
-                            "regex": {"type": "boolean", "description": "Request regex matching; currently only false is implemented.", "default": false},
-                            "limit": limit("Maximum matches to return."),
+                            "regex": {"type": "boolean", "description": "Use a regular expression for local text search.", "default": false},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20,
+                                "description": "Maximum matches per page, from 1 to 50. Provider roles may stop after their first 200 retrieved matches and mark the search incomplete."},
+                            "cursor": cursor("Continue a previous search page. Bound to the question, source sets, page limit and the relevant revision or complete retrieved result."),
                         }),
                         json!(["query"]),
                     ),
                 },
                 V13ToolContract {
                     name: "check",
-                    description: "Confirm workspace source-set admission, or validate one logical node: readability plus every validator its kind owns.",
+                    description: "Confirm workspace source-set admission, or validate one logical node: readability plus every validator its kind owns. Node diagnostics are returned in stable pages.",
                     input_schema: schema(
                         json!({
                             "at": logical_address(),
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20, "description": "Maximum diagnostics in one node-check page (default 20, maximum 50)."},
+                            "cursor": cursor("Continuation cursor from an earlier check of the same node."),
                         }),
                         json!([]),
                     ),
@@ -365,11 +369,13 @@ pub(crate) fn catalog_for(release: SurfaceRelease) -> Option<V13Catalog> {
                 },
                 V13ToolContract {
                     name: "docs",
-                    description: "Search bundled Unica and safe 1C documentation by topic.",
+                    description: "Search bundled Unica and safe 1C documentation by topic, or open a document locator. Search hits and long document text use pages; each search source reports whether its retrieved window is complete.",
                     input_schema: schema(
                         json!({
                             "query": {"type": "string", "description": "Documentation question or search phrase."},
                             "source": {"type": "string", "description": "Optional documented source kind, not a provider identity."},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20, "description": "Maximum hits per search page or text fragments per long document page, from 1 to 50. A text fragment is one line or at most 16 KiB of a longer line; short documents still arrive whole."},
+                            "cursor": cursor("Continue the same documentation search or long document. A document cursor checks its complete text and metadata for changes; concatenate document.text fragments in page order."),
                         }),
                         json!(["query"]),
                     ),
@@ -490,7 +496,13 @@ fn result_envelope_schema() -> Value {
             "rev": {"type": "string"},
             "cursor": cursor("Opaque continuation cursor issued by this result stream."),
             "page": {"type": "object", "additionalProperties": false,
-                "properties": {"stoppedBy": {"type": "string", "enum": ["limit", "bytes", "complete"]}},
+                "properties": {
+                    "stoppedBy": {"type": "string", "enum": ["limit", "bytes", "complete"]},
+                    "startByte": {"type": "integer", "minimum": 0},
+                    "endByte": {"type": "integer", "minimum": 0},
+                    "totalBytes": {"type": "integer", "minimum": 0},
+                    "fragmentsReturned": {"type": "integer", "minimum": 0}
+                },
                 "required": ["stoppedBy"]},
         },
         "required": ["ok", "summary"],
@@ -727,9 +739,22 @@ mod tests {
             &catalog.tools,
             "search",
             json!(["query"]),
-            &["query", "corpus", "kind", "role", "scope", "regex", "limit"],
+            &[
+                "query", "corpus", "kind", "role", "scope", "regex", "limit", "cursor",
+            ],
         );
-        assert_schema(&catalog.tools, "check", json!([]), &["at"]);
+        assert_schema(
+            &catalog.tools,
+            "check",
+            json!([]),
+            &["at", "limit", "cursor"],
+        );
+        let check = catalog
+            .tools
+            .iter()
+            .find(|tool| tool.name == "check")
+            .unwrap();
+        assert_eq!(check.input_schema["properties"]["limit"]["maximum"], 50);
         assert_schema(
             &catalog.tools,
             "diff",
@@ -746,7 +771,7 @@ mod tests {
             &catalog.tools,
             "docs",
             json!(["query"]),
-            &["query", "source"],
+            &["query", "source", "limit", "cursor"],
         );
 
         for (tool, field) in [
@@ -765,6 +790,7 @@ mod tests {
             ("run", "ifRev"),
             ("docs", "query"),
             ("docs", "source"),
+            ("docs", "cursor"),
         ] {
             assert_field_type(&catalog.tools, tool, field, "string");
         }
@@ -788,6 +814,16 @@ mod tests {
         }
         assert_eq!(input_field(&catalog.tools, "view", "limit")["default"], 20);
         assert_eq!(input_field(&catalog.tools, "view", "limit")["maximum"], 50);
+        assert_eq!(input_field(&catalog.tools, "docs", "limit")["default"], 20);
+        assert_eq!(input_field(&catalog.tools, "docs", "limit")["maximum"], 50);
+        assert_eq!(
+            input_field(&catalog.tools, "search", "limit")["default"],
+            20
+        );
+        assert_eq!(
+            input_field(&catalog.tools, "search", "limit")["maximum"],
+            50
+        );
         assert_field_type(&catalog.tools, "view", "cursor", "string");
         assert_data_object(
             input_field(&catalog.tools, "view", "filter"),
@@ -956,6 +992,16 @@ mod tests {
         assert_eq!(output["type"], "object");
         assert_eq!(output["additionalProperties"], false);
         assert_eq!(output["required"], json!(["ok", "summary"]));
+        for field in ["startByte", "endByte", "totalBytes", "fragmentsReturned"] {
+            assert_eq!(
+                output["properties"]["page"]["properties"][field]["type"],
+                "integer"
+            );
+            assert_eq!(
+                output["properties"]["page"]["properties"][field]["minimum"],
+                0
+            );
+        }
         assert_eq!(
             output["properties"]
                 .as_object()

@@ -77,7 +77,7 @@ pub(super) fn prepare(
             ),
             RootQuestion::Verdict => (
                 "unica.check",
-                "check takes only `at`; call unica.check with an empty object for the workspace verdict",
+                "check limit and cursor require `at`; call unica.check with an empty object for the workspace verdict",
             ),
         };
         let mut result = DomainResult::canonical_rejection(None, RefusalCode::BadValue, summary);

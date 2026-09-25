@@ -340,6 +340,7 @@ fn validate_canonical_value(
 pub(super) struct V5CanonicalInvocationRuntime {
     service: Arc<dyn CanonicalInvocationService>,
     clock: Arc<dyn Clock>,
+    documentation_cursors: Arc<crate::application::result_store::SearchCursorStore>,
     workspace_actors: WorkspaceActorRegistry,
     deliveries: Arc<crate::infrastructure::engine_delivery::DeliveryDesk>,
     provider_hosts: Arc<ProviderHostOwner>,
@@ -474,6 +475,9 @@ impl V5CanonicalInvocationRuntime {
         Self {
             service,
             clock,
+            documentation_cursors: Arc::new(
+                crate::application::result_store::SearchCursorStore::default(),
+            ),
             workspace_actors,
             deliveries: Arc::new(crate::infrastructure::engine_delivery::DeliveryDesk::default()),
             provider_hosts: Arc::new(ProviderHostOwner::default()),
@@ -675,7 +679,7 @@ impl V5CanonicalInvocationRuntime {
                 });
             }
         }
-        match super::v13_documentation::prepare(&request) {
+        match super::v13_documentation::prepare(&request, Arc::clone(&self.documentation_cursors)) {
             super::v13_documentation::Preparation::NotApplicable => {}
             super::v13_documentation::Preparation::Rejected(result) => {
                 return Err(V5CanonicalPrepareError::Rejected(result))
@@ -3004,7 +3008,7 @@ pub(crate) mod actor_capacity_tests {
                 "search_bsl_literal",
                 (
                     true,
-                    "fn search_bsl_literal(&self, matcher: &super::super::v13_read_modes::SearchMatcher, limit: usize, scope_prefix: Option<&str>, scope_at: &QualifiedAddress, cancellation: &CancellationToken,) -> Result<Vec<serde_json::Value>, String>",
+                    "fn search_bsl_literal(&self, matcher: &super::super::v13_read_modes::SearchMatcher, skip: &mut usize, limit: usize, scope_prefix: Option<&str>, scope_at: &QualifiedAddress, cancellation: &CancellationToken,) -> Result<Vec<serde_json::Value>, String>",
                     "",
                 ),
             ),
@@ -4423,6 +4427,11 @@ struct ActorLogicalReadLease {"#,
                 "validators",
             ),
             (
+                ToolIdentity::Check,
+                serde_json::json!({"at": "main:Catalog.Items", "limit": 1}),
+                "diagnosticCount",
+            ),
+            (
                 ToolIdentity::Diff,
                 serde_json::json!({
                     "left": "main:Catalog.Items",
@@ -4659,8 +4668,7 @@ struct ActorLogicalReadLease {"#,
                 }),
                 "unsupported_scope",
             ),
-            // `check` takes only `at`: the validators of a node follow from
-            // its kind, so any filter is an unknown argument.
+            // Validator selection follows the node kind, not a caller filter.
             (
                 ToolIdentity::Check,
                 serde_json::json!({"filter": {"severity": "warning"}}),
@@ -7735,7 +7743,7 @@ fn main() {
                 "sourceManifest": true,
                 "tools": [{
                     "name": "v8-runner",
-                    "version": "0.11.1",
+                    "version": "0.11.2",
                     "binaries": {target: {"binaryPath": relative, "sha256": digest}}
                 }]
             })

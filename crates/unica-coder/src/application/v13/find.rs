@@ -1,4 +1,6 @@
-use crate::domain::address::NodeKind;
+use crate::domain::address::{NodeKind, QualifiedAddress};
+use crate::domain::cancellation::CancellationToken;
+use crate::domain::code_intelligence::ProviderDeadline;
 use crate::domain::refusal::RefusalCode;
 use serde::Serialize;
 use std::cmp::Ordering;
@@ -11,6 +13,7 @@ const MAX_QUERY_CHARS: usize = 1_024;
 pub(crate) struct FindRequest {
     query: String,
     kind: Option<String>,
+    scope: Option<QualifiedAddress>,
     limit: usize,
 }
 
@@ -32,6 +35,7 @@ impl FindRequest {
         Ok(Self {
             query: query.to_string(),
             kind: None,
+            scope: None,
             limit: DEFAULT_LIMIT,
         })
     }
@@ -58,6 +62,25 @@ impl FindRequest {
         }
         self.limit = limit.min(MAX_LIMIT);
         Ok(self)
+    }
+
+    pub(crate) fn with_scope(mut self, scope: QualifiedAddress) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    fn contains_address(&self, at: &str) -> bool {
+        let Some(scope) = &self.scope else {
+            return true;
+        };
+        if scope.segments().len() == 1 && scope.segments()[0].kind() == NodeKind::Configuration {
+            return at.starts_with(&format!("{}:", scope.source_set()));
+        }
+        let at_scope = scope.to_string();
+        at == at_scope
+            || at
+                .strip_prefix(&at_scope)
+                .is_some_and(|tail| tail.starts_with('.'))
     }
 }
 
@@ -285,6 +308,12 @@ impl FindIndex {
             .find(|document| document.at == at && document.path.is_some())
     }
 
+    pub(crate) fn has_address(&self, at: &str) -> bool {
+        self.documents
+            .binary_search_by(|document| document.at.as_str().cmp(at))
+            .is_ok()
+    }
+
     /// Точный поиск по пути. Путь мог прийти абсолютным или относительно
     /// корня рабочего пространства, поэтому хвост принимается тоже — но
     /// только целиком, посегментно, а не подстрокой.
@@ -307,43 +336,97 @@ impl FindIndex {
     }
 
     pub(crate) fn find(&self, request: FindRequest) -> FindResult {
+        let limit = request.limit;
+        self.find_ranked(request, Some(limit), || Ok(()))
+            .expect("an unchecked find cannot fail")
+    }
+
+    /// Return the entire ranked stream for a paged public search. The
+    /// historical `find` limit remains intact for internal readers.
+    pub(crate) fn find_all_checked(
+        &self,
+        request: FindRequest,
+        deadline: ProviderDeadline,
+        cancellation: &CancellationToken,
+    ) -> Result<FindResult, FindError> {
+        self.find_ranked(request, None, || {
+            if cancellation.is_cancelled() {
+                return Err(FindError::new(
+                    RefusalCode::Cancelled,
+                    "name search was cancelled",
+                ));
+            }
+            if deadline.remaining().is_zero() {
+                return Err(FindError::new(
+                    RefusalCode::DeadlineExceeded,
+                    "name search deadline elapsed",
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    fn find_ranked(
+        &self,
+        request: FindRequest,
+        cap: Option<usize>,
+        mut checkpoint: impl FnMut() -> Result<(), FindError>,
+    ) -> Result<FindResult, FindError> {
+        checkpoint()?;
         let query = normalize(&request.query);
         let eligible = self.documents.iter().filter(|document| {
             request
                 .kind
                 .as_ref()
                 .is_none_or(|kind| kind == &document.kind)
+                && request.contains_address(&document.at)
         });
-        let mut direct = eligible
-            .clone()
-            .filter_map(|document| best_direct_match(document, &query))
-            .collect::<Vec<_>>();
+        let mut direct = Vec::new();
+        for (index, document) in eligible.clone().enumerate() {
+            if index % 128 == 0 {
+                checkpoint()?;
+            }
+            if let Some(candidate) = best_direct_match(document, &query) {
+                direct.push(candidate);
+            }
+        }
+        checkpoint()?;
         direct.sort_by(scored_order);
         direct.dedup_by(|left, right| left.document.at == right.document.at);
+        checkpoint()?;
         if !direct.is_empty() {
-            return FindResult {
+            return Ok(FindResult {
                 candidates: direct
                     .into_iter()
-                    .take(request.limit)
+                    .take(cap.unwrap_or(usize::MAX))
                     .map(ScoredCandidate::into_candidate)
                     .collect(),
                 nearest: false,
-            };
+            });
         }
 
-        let mut nearest = eligible
-            .filter_map(|document| nearest_match(document, &query))
-            .collect::<Vec<_>>();
+        let mut nearest = Vec::new();
+        for (index, document) in eligible.enumerate() {
+            if index % 128 == 0 {
+                checkpoint()?;
+            }
+            if let Some(candidate) = nearest_match(document, &query) {
+                nearest.push(candidate);
+            }
+        }
+        checkpoint()?;
         nearest.sort_by(scored_order);
         nearest.dedup_by(|left, right| left.document.at == right.document.at);
-        FindResult {
+        let has_nearest = !nearest.is_empty();
+        checkpoint()?;
+        Ok(FindResult {
             candidates: nearest
                 .into_iter()
-                .take(request.limit.min(10))
+                .take(cap.map_or(usize::MAX, |limit| limit.min(10)))
                 .map(ScoredCandidate::into_candidate)
                 .collect(),
-            nearest: true,
-        }
+            nearest: has_nearest,
+        })
     }
 
     #[cfg(test)]
@@ -467,6 +550,11 @@ fn bounded_levenshtein(left: &str, right: &str, bound: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{FindDocument, FindFact, FindFactKind, FindIndex, FindRequest};
+    use crate::domain::address::QualifiedAddress;
+    use crate::domain::cancellation::CancellationToken;
+    use crate::domain::code_intelligence::ProviderDeadline;
+    use crate::domain::refusal::RefusalCode;
+    use std::time::Duration;
 
     fn index() -> FindIndex {
         FindIndex::new(vec![
@@ -524,6 +612,25 @@ mod tests {
     }
 
     #[test]
+    fn empty_search_has_no_approximate_match() {
+        let absent_kind = index().find(
+            FindRequest::new("Валюты")
+                .unwrap()
+                .with_kind("Role")
+                .unwrap(),
+        );
+        assert!(absent_kind.candidates().is_empty());
+        assert!(!absent_kind.is_nearest());
+
+        let distant = index().find(
+            FindRequest::new("A query longer than the nearest bound of thirty two characters")
+                .unwrap(),
+        );
+        assert!(distant.candidates().is_empty());
+        assert!(!distant.is_nearest());
+    }
+
+    #[test]
     fn default_and_oversized_limits_are_bounded() {
         let documents = (0..150)
             .map(|index| {
@@ -556,6 +663,85 @@ mod tests {
                 .len(),
             100,
         );
+        assert_eq!(
+            index
+                .find_all_checked(
+                    FindRequest::new("Node").unwrap(),
+                    ProviderDeadline::from_budget(Duration::from_secs(5)),
+                    &CancellationToken::new(),
+                )
+                .unwrap()
+                .candidates()
+                .len(),
+            150,
+        );
+    }
+
+    #[test]
+    fn paged_name_ranking_keeps_all_nearest_candidates_and_checks_cancellation() {
+        let documents = (0..15)
+            .map(|index| {
+                FindDocument::new(
+                    format!("main:Catalog.Node{index:02}"),
+                    "Catalog",
+                    format!("Node{index:02}"),
+                    vec![FindFact::new(FindFactKind::Name, format!("Node{index:02}"))],
+                )
+            })
+            .collect();
+        let index = FindIndex::new(documents);
+        let request = FindRequest::new("Nade").unwrap();
+        let found = index
+            .find_all_checked(
+                request.clone(),
+                ProviderDeadline::from_budget(Duration::from_secs(5)),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert!(found.is_nearest());
+        assert_eq!(found.candidates().len(), 15);
+        assert_eq!(index.find(request.clone()).candidates().len(), 10);
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            index
+                .find_all_checked(
+                    request.clone(),
+                    ProviderDeadline::from_budget(Duration::from_secs(5)),
+                    &cancelled,
+                )
+                .unwrap_err()
+                .code(),
+            RefusalCode::Cancelled,
+        );
+        assert_eq!(
+            index
+                .find_all_checked(
+                    request,
+                    ProviderDeadline::from_budget(Duration::ZERO),
+                    &CancellationToken::new(),
+                )
+                .unwrap_err()
+                .code(),
+            RefusalCode::DeadlineExceeded,
+        );
+    }
+
+    #[test]
+    fn name_scope_stops_at_a_logical_segment_boundary() {
+        let index = FindIndex::new(vec![
+            FindDocument::new("main:Catalog.Item", "Catalog", "Item", vec![]),
+            FindDocument::new("main:Catalog.Items", "Catalog", "Items", vec![]),
+            FindDocument::new("other:Catalog.Item", "Catalog", "Item", vec![]),
+        ]);
+        let request = FindRequest::new("Item")
+            .unwrap()
+            .with_scope(QualifiedAddress::parse("main:Catalog.Item").unwrap());
+
+        let found = index.find(request);
+        assert_eq!(found.candidates().len(), 1);
+        assert_eq!(found.candidates()[0].at(), "main:Catalog.Item");
     }
 
     #[test]

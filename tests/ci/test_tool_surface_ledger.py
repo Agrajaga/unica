@@ -197,11 +197,11 @@ class ToolSurfaceLedgerTests(unittest.TestCase):
             # `corpus` выбирает свод — текст модулей или имена метаданных, —
             # а `kind` сужает поиск по именам до одного вида узла. Оба входа
             # логические: ни один не называет файл.
-            "unica.search": {"query", "corpus", "kind", "role", "scope", "regex", "limit"},
-            "unica.check": {"at"},
+            "unica.search": {"query", "corpus", "kind", "role", "scope", "regex", "limit", "cursor"},
+            "unica.check": {"at", "limit", "cursor"},
             "unica.diff": {"left", "right", "filter", "limit", "cursor"},
             "unica.run": {"op", "args", "dryRun", "ifRev", "infobase"},
-            "unica.docs": {"query", "source"},
+            "unica.docs": {"query", "source", "limit", "cursor"},
         }
         for name, properties in expected_properties.items():
             with self.subTest(tool=name):

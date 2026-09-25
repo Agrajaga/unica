@@ -584,7 +584,7 @@ impl ApplicationPorts for InfrastructureApplicationPorts {
                     .and_then(Value::as_str)
                     .unwrap_or("ru")
                     .to_string();
-                let registry = documentation_registry(context, cancellation)?;
+                let registry = documentation_registry(context, cancellation, false)?;
                 let requested_version = args.get("platformVersion").and_then(Value::as_str);
                 let context = documentation_context(
                     &crate::infrastructure::platform::full_dump_publication::default_platform_roots(
@@ -868,6 +868,7 @@ const DOCUMENTATION_PROVIDER_IDS: &[&str] = &[
 fn documentation_registry(
     context: &WorkspaceContext,
     cancellation: &crate::domain::cancellation::CancellationToken,
+    revalidate_search: bool,
 ) -> Result<crate::domain::documentation::DocumentationRegistry, String> {
     use std::sync::Arc;
 
@@ -918,6 +919,7 @@ fn documentation_registry(
             crate::infrastructure::standards_documentation::V8StdDocumentationProvider {
                 search_cache_ttl:
                     crate::infrastructure::standards_documentation::V8STD_SEARCH_CACHE_TTL,
+                revalidate_search,
                 endpoint,
                 network: policy.network("v8std"),
                 http: crate::infrastructure::internal_adapters::shared_http_client(),
@@ -938,7 +940,7 @@ fn documentation_registry(
 /// Поставщики выдают идентификатор со схемой — `configuration-help:<набор>:<путь>`
 /// — или ссылкой. Ни имя метода, ни фраза на языке такой формы не имеют,
 /// поэтому разделение детерминированно и не гадает.
-fn documentation_locator(query: &str) -> Option<&str> {
+pub(crate) fn documentation_locator(query: &str) -> Option<&str> {
     let trimmed = query.trim();
     if trimmed.contains(char::is_whitespace) {
         return None;
@@ -960,7 +962,7 @@ fn open_documentation_page(
     cancellation: &CancellationToken,
 ) -> crate::domain::invocation::DomainResult {
     let opened = (|| {
-        let registry = documentation_registry(workspace, cancellation)?;
+        let registry = documentation_registry(workspace, cancellation, false)?;
         let context = documentation_context(
             &crate::infrastructure::platform::full_dump_publication::default_platform_roots(),
             None,
@@ -991,10 +993,22 @@ fn open_documentation_page(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn canonical_v13_docs_search(
     workspace: &WorkspaceContext,
     query: &str,
     source: Option<&str>,
+    cancellation: &CancellationToken,
+) -> crate::domain::invocation::DomainResult {
+    canonical_v13_docs_search_with_limit(workspace, query, source, 20, false, cancellation)
+}
+
+pub(crate) fn canonical_v13_docs_search_with_limit(
+    workspace: &WorkspaceContext,
+    query: &str,
+    source: Option<&str>,
+    fetch_limit: usize,
+    revalidate_search: bool,
     cancellation: &CancellationToken,
 ) -> crate::domain::invocation::DomainResult {
     let source_kinds = match source {
@@ -1039,11 +1053,11 @@ pub(crate) fn canonical_v13_docs_search(
     let request = crate::domain::documentation::DocumentationSearchRequest {
         query: query.to_string(),
         source_kinds,
-        limit: 20,
+        limit: fetch_limit,
         language: "ru".to_string(),
     };
     let result = (|| {
-        let registry = documentation_registry(workspace, cancellation)?;
+        let registry = documentation_registry(workspace, cancellation, revalidate_search)?;
         let context = documentation_context(
             &crate::infrastructure::platform::full_dump_publication::default_platform_roots(),
             None,
@@ -2372,6 +2386,7 @@ mod tests {
         let registry = documentation_registry(
             &context,
             &crate::domain::cancellation::CancellationToken::default(),
+            false,
         )
         .expect("registry constructs");
         let ids: Vec<String> = registry
@@ -2441,6 +2456,7 @@ mod tests {
         let registry = documentation_registry(
             &context,
             &crate::domain::cancellation::CancellationToken::default(),
+            false,
         )
         .expect("registry constructs");
         let provider = registry.providers().next().expect("первый поставщик");
