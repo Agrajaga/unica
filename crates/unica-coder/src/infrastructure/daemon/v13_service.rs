@@ -2144,6 +2144,17 @@ fn provider_search_page(
         );
     }
     let section = sections.remove(0);
+    let mut warnings = execution.warnings;
+    if section.hits.len() >= PROVIDER_SEARCH_FETCH_LIMIT {
+        let scope_hint = if role == ProviderRole::Lexical {
+            " or scope"
+        } else {
+            ""
+        };
+        warnings.push(format!(
+            "Search returned 200 matches. Ask the user to narrow the query{scope_hint} before searching again."
+        ));
+    }
     let summary = if section.search_complete {
         format!("{} search completed", role.as_str())
     } else {
@@ -2152,7 +2163,7 @@ fn provider_search_page(
     // Providers expose top-N only. Re-query the same finite window on a later
     // page and bind the cursor to every fact returned by that provider; an
     // index refresh must make the old cursor stale instead of moving hits.
-    let fingerprint_bytes = serde_json::to_vec(&(&section, &execution.warnings))
+    let fingerprint_bytes = serde_json::to_vec(&(&section, &warnings))
         .expect("provider search evidence is serializable");
     let mut hasher = Sha256::new();
     hasher.update(b"unica-v13-provider-search-v1\0");
@@ -2165,13 +2176,29 @@ fn provider_search_page(
             .as_array_mut()
             .expect("provider search hits serialize as an array"),
     );
+    // The cursor names the previous complete provider answer. Verify that
+    // identity before inspecting sizes in a different answer; changed late
+    // results must report stale_cursor after pages were already published.
+    let cursor = match cursor_token {
+        None => None,
+        Some(token) => match cursors.read(token, &binding) {
+            Ok(cursor) => Some((token, cursor)),
+            Err(error) => {
+                return error_result(
+                    None,
+                    error.code(),
+                    "provider search cursor is invalid or stale",
+                )
+            }
+        },
+    };
     let cursor_placeholder = "sc1.00000000000000000000000000000000";
     let probe = |page_hits: &[Value]| {
         serde_json::to_vec(&provider_search_page_result(
             role,
             &section_value,
             page_hits,
-            &execution.warnings,
+            &warnings,
             &summary,
             "limit",
             Some(cursor_placeholder),
@@ -2202,19 +2229,6 @@ fn provider_search_page(
             );
         }
     }
-    let cursor = match cursor_token {
-        None => None,
-        Some(token) => match cursors.read(token, &binding) {
-            Ok(cursor) => Some((token, cursor)),
-            Err(error) => {
-                return error_result(
-                    None,
-                    error.code(),
-                    "provider search cursor is invalid or stale",
-                )
-            }
-        },
-    };
     let offset = cursor.as_ref().map_or(0, |(_, stored)| stored.offset);
     if offset >= hits.len() && cursor.is_some() {
         return error_result(
@@ -2259,7 +2273,7 @@ fn provider_search_page(
         role,
         &section_value,
         &page_hits,
-        &execution.warnings,
+        &warnings,
         &summary,
         stopped_by,
         None,
@@ -3252,6 +3266,18 @@ mod tests {
                 );
                 assert!(!changed.ok);
                 assert_eq!(changed.diagnostics[0]["code"], "stale_cursor");
+                let mut oversized_change = provider_search_test_execution(75, 8, false);
+                oversized_change.result.sections[0].hits[74].snippet =
+                    "x".repeat(crate::application::invocation_store::MAX_CANONICAL_RESULT_BYTES);
+                let stale_before_size = super::provider_search_page(
+                    &store,
+                    ProviderRole::Semantic,
+                    oversized_change,
+                    provider_search_test_binding(ProviderRole::Semantic, 20),
+                    result.cursor.as_deref(),
+                    &cancellation,
+                );
+                assert_eq!(stale_before_size.diagnostics[0]["code"], "stale_cursor");
             }
             cursor = result.cursor;
         }
@@ -3275,6 +3301,11 @@ mod tests {
                 &cancellation,
             );
             assert!(result.ok, "{result:?}");
+            assert!(result.warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("200") && text.contains("narrow the query"))
+            }));
             cursor = result.cursor.clone();
             last = Some(result);
         }

@@ -12,12 +12,15 @@ check:
   - crates/unica-coder/src/infrastructure/daemon/v13_service.rs::public_role_search_surfaces_partial_provider_warning_and_hit
   - crates/unica-coder/src/infrastructure/daemon/v13_service.rs::provider_limit_remains_visible_after_the_last_received_page
   - crates/unica-coder/src/infrastructure/code_intelligence.rs::bsl_analyzer_at_requested_limit_does_not_claim_exhaustion
+  - crates/unica-coder/src/infrastructure/code_intelligence.rs::bsl_analyzer_at_its_internal_cap_does_not_claim_exhaustion
+  - crates/unica-coder/src/infrastructure/code_intelligence.rs::bsl_analyzer_output_budget_truncation_does_not_claim_exhaustion
   - crates/unica-coder/src/infrastructure/code_intelligence.rs::rlm_at_requested_limit_does_not_claim_exhaustion
+  - crates/unica-coder/src/infrastructure/code_intelligence.rs::rlm_at_one_source_quota_does_not_claim_exhaustion
   - crates/unica-coder/src/infrastructure/code_intelligence.rs::bsl_analyzer_does_not_claim_complete_when_one_header_is_unreadable
   - crates/unica-coder/src/infrastructure/code_intelligence.rs::rlm_parser_keeps_valid_rows_and_reports_malformed_siblings
   - crates/unica-coder/src/infrastructure/code_intelligence.rs::git_grep_keeps_valid_hits_but_reports_malformed_siblings_as_partial
+  - crates/unica-coder/src/infrastructure/platform/process.rs::completed_line_drain_keeps_stop_only_for_successful_children
   - crates/unica-coder/src/infrastructure/code_intelligence.rs::cancelled_projection_is_not_reported_as_a_malformed_search_result
-gap: https://github.com/IngvarConsulting/unica/issues/871
 ---
 
 # Результат поиска сохраняет источник и пределы достоверности
@@ -27,6 +30,9 @@ gap: https://github.com/IngvarConsulting/unica/issues/871
 Ранг поставщика сохраняется как его собственная оценка.
 Если поставщик вернул ровно запрошенное число результатов без признака конца,
 секция сообщает о достижении предела и даёт нижнюю оценку числа совпадений.
+Учитывается и меньший внутренний предел поставщика: 50 результатов у
+`bsl-analyzer`, квота на каждую из шести категорий у RLM. Сообщение
+`bsl-analyzer` об усечении по бюджету вывода также не считается полным ответом.
 Если поставщик завершил поиск, но отдельный результат нельзя разобрать,
 остальные проверенные совпадения сохраняются, а секция получает статус
 `partial` и нижнюю оценку.
@@ -48,4 +54,7 @@ gap: https://github.com/IngvarConsulting/unica/issues/871
 Провайдерный поиск выдаёт страницы полученного окна, сохраняя его роль,
 поставщика и полноту. Курсор не доказывает, что поставщик нашёл всё: при
 достижении его предела последняя страница сохраняет `limitReached` и нижнюю
-оценку. Продолжение за пределами окна поставщика остаётся в `gap`.
+оценку. При 200 полученных результатах ответ рекомендует уточнить запрос.
+Если окно неполно, он не обещает выдачу его хвоста. Меньшие внутренние квоты
+`bsl-analyzer` и RLM остаются видимой неполнотой, но сами по себе не означают,
+что запрос слишком широк.
