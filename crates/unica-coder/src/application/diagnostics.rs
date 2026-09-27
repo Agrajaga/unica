@@ -653,6 +653,14 @@ fn sanitize_provider_outcome(outcome: &mut DiagnosticProviderOutcome, context: &
 }
 
 fn sanitize_public_diagnostic_error(error: &mut DiagnosticError) {
+    if error.code == "diagnostics_invalid" {
+        if let Some(message) =
+            crate::domain::diagnostics::stream_error::canonical_stream_error(&error.message)
+        {
+            error.message = message;
+            return;
+        }
+    }
     error.message = match error.code.as_str() {
         "source_analysis_failed" => "diagnostic provider could not analyze the selected resource",
         "source_decode_failed" => "source is not valid in the detected encoding",
@@ -2555,36 +2563,16 @@ mod tests {
 
     #[test]
     fn diagnostics_public_result_preserves_safe_jsonl_failure_location_and_reason() {
-        use crate::infrastructure::diagnostics_jsonl::DiagnosticsJsonlParser;
-
-        let fixture = tempfile::TempDir::new().unwrap();
-        let private_path = fixture.path().join("Secret.bsl");
-        let secret = "private-severity-token-1064";
-        let mut parser = DiagnosticsJsonlParser::new(fixture.path()).unwrap();
-        let lines = [
-            json!({"type": "start", "total_files": 1, "version": "test"}),
-            json!({
-                "type": "file",
-                "path": private_path,
-                "diagnostics": [{
-                    "code": "X",
-                    "message": format!("{secret} at {}", private_path.display()),
-                    "severity": format!("{secret} at {}", private_path.display()),
-                    "start_line": 0,
-                    "start_column": 0,
-                    "end_line": 0,
-                    "end_column": 1,
-                    "tags": []
-                }]
-            }),
-        ];
-        for (index, line) in lines.iter().enumerate() {
-            parser.push_line(index + 1, line.to_string().as_bytes());
-        }
+        let mut outcome = failed("diagnostics_invalid");
+        outcome.error = Some(DiagnosticError {
+            code: "diagnostics_invalid".to_string(),
+            message: "line 2: unknown diagnostic severity. Check compatibility between Unica and its bundled analyzer; if the problem persists, report this reason and line number.".to_string(),
+            retryable: false,
+        });
 
         let result = run_with_logical_mapping(
             &ANALYZER_DESCRIPTOR,
-            parser.finish().outcome,
+            outcome,
             &findings_request(),
             &workspace(),
         );
@@ -2600,13 +2588,72 @@ mod tests {
             "diagnostics_invalid"
         );
         assert_eq!(serialized["providers"][0]["error"]["retryable"], false);
-        assert_no_physical_transport(&serialized, &fixture.path().to_string_lossy());
-        assert!(!serialized.to_string().contains(secret));
-        assert!(!serialized.to_string().contains("Secret.bsl"));
+        assert_no_physical_transport(&serialized, "workspace");
         assert_eq!(
             serialized["providers"][0]["error"]["message"],
-            "line 2: unknown diagnostic severity. Check compatibility between Unica and its bundled analyzer; if the problem persists, report this line number and the diagnostic.severity field."
+            "line 2: unknown diagnostic severity. Check compatibility between Unica and its bundled analyzer; if the problem persists, report this reason and line number."
         );
+    }
+
+    #[test]
+    fn diagnostics_public_result_reports_empty_stream_without_a_line_number() {
+        let mut outcome = failed("diagnostics_invalid");
+        outcome.error = Some(DiagnosticError {
+            code: "diagnostics_invalid".to_string(),
+            message: "stream is missing start event. Check compatibility between Unica and its bundled analyzer; if the problem persists, report this reason.".to_string(),
+            retryable: false,
+        });
+        let result = run_with_logical_mapping(
+            &ANALYZER_DESCRIPTOR,
+            outcome,
+            &findings_request(),
+            &workspace(),
+        );
+        assert!(result.items.is_empty());
+        let serialized = serde_json::to_value(result).unwrap();
+        assert_eq!(serialized["state"], "failed");
+        assert_eq!(
+            serialized["providers"][0]["error"]["code"],
+            "diagnostics_invalid"
+        );
+        assert_eq!(
+            serialized["providers"][0]["error"]["message"],
+            "stream is missing start event. Check compatibility between Unica and its bundled analyzer; if the problem persists, report this reason."
+        );
+    }
+
+    #[test]
+    fn diagnostics_public_result_rejects_noncanonical_stream_error_messages() {
+        let canonical = "line 2: unknown diagnostic severity. Check compatibility between Unica and its bundled analyzer; if the problem persists, report this reason and line number.";
+        for message in [
+            format!("{canonical} secret=/private/Secret.bsl"),
+            format!("secret {canonical}"),
+            canonical.replace("line 2:", "line 02:"),
+            canonical.replace("line 2:", "line +2:"),
+            canonical.replace("line 2:", "line 0:"),
+            canonical.replace("line 2:", "line 184467440737095516160:"),
+            canonical.replace(
+                "unknown diagnostic severity",
+                "unknown diagnostic severity `secret`",
+            ),
+            format!("{canonical}\n"),
+            "line 2: unknown diagnostic severity".to_string(),
+            "stream is missing start event. Check compatibility between Unica and its bundled analyzer; if the problem persists, report this reason. private-token".to_string(),
+        ] {
+            let mut outcome = failed("diagnostics_invalid");
+            outcome.error.as_mut().unwrap().message = message;
+            let result = run_with_logical_mapping(
+                &ANALYZER_DESCRIPTOR,
+                outcome,
+                &findings_request(),
+                &workspace(),
+            );
+            let serialized = serde_json::to_value(result).unwrap();
+            assert_eq!(
+                serialized["providers"][0]["error"]["message"],
+                "diagnostic provider returned an invalid diagnostics stream"
+            );
+        }
     }
 
     #[test]
