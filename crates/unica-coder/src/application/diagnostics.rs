@@ -1709,6 +1709,200 @@ mod tests {
         )
     }
 
+    struct CachePorts {
+        workspace: WorkspaceContext,
+        outcome: DiagnosticProviderOutcome,
+    }
+
+    impl crate::application::ports::ApplicationPorts for CachePorts {
+        fn discover_workspace(&self, _: Option<PathBuf>) -> Result<WorkspaceContext, String> {
+            Ok(self.workspace.clone())
+        }
+        fn validate_tool_context(
+            &self,
+            _: crate::application::ToolSpec,
+            _: &Map<String, Value>,
+            _: crate::application::InvocationMode,
+            _: &WorkspaceContext,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn evaluate_support_guard(
+            &self,
+            _: crate::application::ToolSpec,
+            _: &Map<String, Value>,
+            _: &WorkspaceContext,
+        ) -> Result<crate::application::ports::SupportGuardCheck, String> {
+            Ok(crate::application::ports::SupportGuardCheck::Allow)
+        }
+        fn invoke_handler(
+            &self,
+            _: crate::application::ToolSpec,
+            _: &Map<String, Value>,
+            _: &WorkspaceContext,
+            _: crate::application::InvocationMode,
+            _: &CancellationToken,
+        ) -> Result<crate::application::ports::HandlerOutcome, String> {
+            unreachable!()
+        }
+        fn diagnostic_provider_registry(&self) -> Result<DiagnosticProviderRegistry, String> {
+            let (provider, _) = provider(&ANALYZER_DESCRIPTOR, self.outcome.clone());
+            DiagnosticProviderRegistry::new(vec![provider]).map_err(|error| format!("{error:?}"))
+        }
+        fn resolve_diagnostic_context(
+            &self,
+            request: &DiagnosticRequest,
+            workspace: &WorkspaceContext,
+            cancellation: &CancellationToken,
+        ) -> Result<DiagnosticContext, DiagnosticRequestError> {
+            FAKE_MAPPING.resolve_context(request, workspace, cancellation)
+        }
+        fn map_diagnostic_observation(
+            &self,
+            observation: DiagnosticObservation,
+            context: &DiagnosticContext,
+            cancellation: &CancellationToken,
+        ) -> Result<DiagnosticItem, DiagnosticMapError> {
+            FAKE_MAPPING.map_observation(observation, context, cancellation)
+        }
+        fn cache_report(
+            &self,
+            context: &WorkspaceContext,
+            events: &[crate::domain::events::DomainEvent],
+            mode: crate::application::InvocationMode,
+            access: crate::domain::cache::CacheAccess,
+        ) -> Result<crate::domain::cache::CacheReport, String> {
+            crate::infrastructure::workspace_state::WorkspaceStateRepository::new(context).report(
+                context,
+                events,
+                mode.is_preview(),
+                access,
+            )
+        }
+        fn notify_invalidation(
+            &self,
+            _: &WorkspaceContext,
+            _: &[crate::domain::events::DomainEvent],
+        ) {
+        }
+    }
+
+    #[test]
+    fn diagnostics_cache_freshness_requires_completed_analysis() {
+        use crate::domain::cache::CacheAccess;
+        use crate::domain::events::{DomainEvent, DomainEventKind};
+        use crate::infrastructure::workspace_state::WorkspaceStateRepository;
+        let root = tempfile::tempdir().unwrap();
+        let context = WorkspaceContext {
+            cwd: root.path().to_path_buf(),
+            workspace_root: root.path().to_path_buf(),
+            cache_root: root.path().join(".cache"),
+            workspace_epoch: 1,
+        };
+        let repo = WorkspaceStateRepository::new(&context);
+        repo.report(
+            &context,
+            &[DomainEvent::new(
+                DomainEventKind::ModuleChanged,
+                "Module.bsl",
+            )],
+            false,
+            CacheAccess::default(),
+        )
+        .unwrap();
+        let failed = super::provider_failure_outcome(
+            "provider_unavailable",
+            "provider is unavailable",
+            true,
+        );
+        let partial = DiagnosticProviderOutcome {
+            complete: false,
+            ..successful(vec![diagnostic(
+                ANALYZER,
+                "selected",
+                "A001",
+                DiagnosticSeverity::Warning,
+                DiagnosticObservationFocus::Target,
+            )])
+        };
+        let resource_failure = successful(vec![DiagnosticObservation::ResourceFailure {
+            provider: ANALYZER,
+            location: DiagnosticObservationLocation::Resource {
+                handle: "selected".to_string(),
+            },
+            error: DiagnosticError {
+                code: "resource_failed".to_string(),
+                message: "resource failed".to_string(),
+                retryable: false,
+            },
+        }]);
+        let spec = crate::application::tools()
+            .into_iter()
+            .find(|tool| tool.name == "unica.code.diagnostics")
+            .unwrap();
+        for (action, outcome, fresh) in [
+            ("analyze", failed.clone(), false),
+            ("analyze", partial, false),
+            ("analyze", resource_failure, false),
+            (
+                "status",
+                DiagnosticProviderOutcome {
+                    status: DiagnosticProviderStatus::Completed,
+                    readiness: Some(DiagnosticReadiness {
+                        state: DiagnosticReadinessState::Ready,
+                        retryable: false,
+                    }),
+                    ..successful(Vec::new())
+                },
+                false,
+            ),
+            ("catalog", successful(Vec::new()), false),
+            ("findings", successful(Vec::new()), false),
+            ("analyze", successful(Vec::new()), true),
+            ("analyze", failed, true),
+        ] {
+            let mut args = json!({"action": action, "sourceSet": "main"});
+            if action == "findings" {
+                args["metadataPath"] = json!("CommonModule.Selected.Module");
+            }
+            let expected_ok = matches!(outcome.status, DiagnosticProviderStatus::Completed | DiagnosticProviderStatus::Empty);
+            let result = crate::application::call_tool(
+                spec,
+                args.as_object().unwrap(),
+                &CachePorts {
+                    workspace: context.clone(),
+                    outcome,
+                },
+                &CancellationToken::new(),
+                ProviderDeadline::from_budget(Duration::from_secs(5)),
+            )
+            .unwrap();
+            assert_eq!(result.ok, expected_ok, "{action}");
+            let cache = result.cache;
+            assert_eq!(
+                cache.fresh.iter().any(|name| name == "bsl_diagnostics"),
+                fresh,
+                "{action}"
+            );
+            assert_eq!(
+                cache.stale.iter().any(|name| name == "bsl_diagnostics"),
+                !fresh,
+                "{action}"
+            );
+            if !fresh {
+                assert!(cache.lazy_rebuilt.is_empty(), "{action}");
+            }
+            let persisted = repo
+                .report(&context, &[], false, CacheAccess::default())
+                .unwrap();
+            assert_eq!(
+                persisted.fresh.iter().any(|name| name == "bsl_diagnostics"),
+                fresh,
+                "persisted {action}"
+            );
+        }
+    }
+
     #[test]
     fn diagnostics_provider_selection_uses_registry_order_and_skips_inapplicable_providers() {
         let empty = successful(Vec::new());
