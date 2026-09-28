@@ -6239,6 +6239,63 @@ struct ActorLogicalReadLease {"#,
         );
     }
 
+    #[test]
+    fn logical_read_admission_deadline_returns_canonical_rejection() {
+        assert_logical_read_deadline_returns_canonical_rejection(true);
+    }
+
+    #[test]
+    fn logical_read_publication_deadline_discards_staged_source_data() {
+        assert_logical_read_deadline_returns_canonical_rejection(false);
+    }
+
+    fn assert_logical_read_deadline_returns_canonical_rejection(expire_at_admission: bool) {
+        let (workspace, _) = source_selection_read_fixture();
+        let runtime = bootstrap_runtime();
+        let request = InvocationRequest::new(
+            ToolIdentity::View,
+            serde_json::json!({"at": "main:Catalog.Items"}),
+            std::fs::canonicalize(workspace.path()).unwrap().to_string_lossy(),
+            7_000,
+        )
+        .unwrap();
+        let invocation = bind_workspace_invocation(
+            &request,
+            &runtime.workspace_actors,
+            Arc::clone(&runtime.deliveries),
+            Arc::clone(&runtime.provider_hosts),
+            Arc::clone(&runtime.runtime_resources),
+            None,
+            runtime.capture_response_deadline_for_test(),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let expires = started + LOGICAL_READ_OPERATION_BUDGET;
+        set_logical_read_now(if expire_at_admission { expires } else { started });
+        let deadline = ProviderDeadline::with_clock(expires, logical_read_now);
+        let cancellation = CancellationToken::new();
+        let execution = invocation
+            .begin_execution_with_logical_deadline_for_test(&cancellation, deadline)
+            .unwrap_or_else(|error| panic!("deadline must remain a domain rejection at admission: {error}"));
+        let service =
+            crate::infrastructure::daemon::v13_service::CanonicalV13ReadService::default();
+        let staged = service.execute(&execution, cancellation.clone()).unwrap();
+        if !expire_at_admission {
+            assert!(staged.ok, "{staged:?}");
+            assert!(staged.data.is_some(), "the reader must stage actual source data");
+            set_logical_read_now(expires);
+        }
+        let result = execution
+            .publish(Ok(staged), &cancellation)
+            .unwrap_or_else(|error| panic!("deadline must remain a domain rejection at publication: {error}"))
+            .expect("deadline must not become an invocation failure");
+        assert!(!result.ok);
+        assert_eq!(result.diagnostics[0]["code"], "deadline_exceeded");
+        assert_eq!(result.diagnostics[0]["outcome"], "retryAsIs");
+        assert!(result.data.is_none(), "expired source data escaped: {result:?}");
+        assert!(result.rev.is_none(), "expired revision escaped: {result:?}");
+    }
+
     struct ManualInvocationClock(Mutex<Instant>);
 
     impl ManualInvocationClock {
