@@ -6241,21 +6241,97 @@ struct ActorLogicalReadLease {"#,
 
     #[test]
     fn logical_read_admission_deadline_returns_canonical_rejection() {
-        assert_logical_read_deadline_returns_canonical_rejection(true);
+        assert_logical_read_deadline_returns_canonical_rejection(
+            LogicalReadDeadlineCase::Admission,
+        );
     }
 
     #[test]
     fn logical_read_publication_deadline_discards_staged_source_data() {
-        assert_logical_read_deadline_returns_canonical_rejection(false);
+        assert_logical_read_deadline_returns_canonical_rejection(
+            LogicalReadDeadlineCase::Publication,
+        );
     }
 
-    fn assert_logical_read_deadline_returns_canonical_rejection(expire_at_admission: bool) {
-        let (workspace, _) = source_selection_read_fixture();
+    #[test]
+    fn logical_read_admission_scan_deadline_returns_canonical_rejection() {
+        assert_logical_read_deadline_returns_canonical_rejection(
+            LogicalReadDeadlineCase::AdmissionScan,
+        );
+    }
+
+    #[test]
+    fn logical_read_publication_scan_deadline_discards_staged_source_data() {
+        assert_logical_read_deadline_returns_canonical_rejection(
+            LogicalReadDeadlineCase::PublicationScan,
+        );
+    }
+
+    #[test]
+    fn logical_read_expired_clock_does_not_reclassify_execution_failure() {
+        assert_logical_read_deadline_returns_canonical_rejection(
+            LogicalReadDeadlineCase::ExecutionFailure,
+        );
+    }
+
+    #[test]
+    fn logical_read_parent_admission_deadline_discards_staged_extension_data() {
+        assert_logical_read_deadline_returns_canonical_rejection(
+            LogicalReadDeadlineCase::ParentAdmissionScan,
+        );
+    }
+
+    #[test]
+    fn logical_read_admission_deadline_is_preserved_by_every_read_tool() {
+        for tool in [
+            ToolIdentity::Resolve,
+            ToolIdentity::Search,
+            ToolIdentity::Check,
+            ToolIdentity::Diff,
+        ] {
+            assert_logical_read_deadline_for_tool(LogicalReadDeadlineCase::Admission, tool);
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum LogicalReadDeadlineCase {
+        Admission,
+        AdmissionScan,
+        Publication,
+        PublicationScan,
+        ExecutionFailure,
+        ParentAdmissionScan,
+    }
+
+    fn assert_logical_read_deadline_returns_canonical_rejection(case: LogicalReadDeadlineCase) {
+        assert_logical_read_deadline_for_tool(case, ToolIdentity::View);
+    }
+
+    fn assert_logical_read_deadline_for_tool(case: LogicalReadDeadlineCase, tool: ToolIdentity) {
+        let parent_admission = matches!(case, LogicalReadDeadlineCase::ParentAdmissionScan);
+        let workspace = if parent_admission {
+            borrowing_view_fixture("normal")
+        } else {
+            source_selection_read_fixture().0
+        };
         let runtime = bootstrap_runtime();
+        let arguments = match tool {
+            ToolIdentity::Search => {
+                serde_json::json!({"query": "Items", "scope": "main:Configuration"})
+            }
+            ToolIdentity::Diff => {
+                serde_json::json!({"left": "main:Catalog.Items", "right": "main:Catalog.Items"})
+            }
+            _ => {
+                serde_json::json!({"at": if parent_admission { "ext:Catalog.Items" } else { "main:Catalog.Items" }})
+            }
+        };
         let request = InvocationRequest::new(
-            ToolIdentity::View,
-            serde_json::json!({"at": "main:Catalog.Items"}),
-            std::fs::canonicalize(workspace.path()).unwrap().to_string_lossy(),
+            tool,
+            arguments,
+            std::fs::canonicalize(workspace.path())
+                .unwrap()
+                .to_string_lossy(),
             7_000,
         )
         .unwrap();
@@ -6271,28 +6347,86 @@ struct ActorLogicalReadLease {"#,
         .unwrap();
         let started = Instant::now();
         let expires = started + LOGICAL_READ_OPERATION_BUDGET;
-        set_logical_read_now(if expire_at_admission { expires } else { started });
+        set_logical_read_now(if matches!(case, LogicalReadDeadlineCase::Admission) {
+            expires
+        } else {
+            started
+        });
         let deadline = ProviderDeadline::with_clock(expires, logical_read_now);
         let cancellation = CancellationToken::new();
+        let _admission_scan = matches!(case, LogicalReadDeadlineCase::AdmissionScan).then(|| {
+            crate::infrastructure::source_revision::set_retained_scan_test_mutation(
+                crate::infrastructure::source_revision::RetainedScanTestMutationPoint::ScanStart,
+                move || set_logical_read_now(expires),
+            )
+        });
         let execution = invocation
             .begin_execution_with_logical_deadline_for_test(&cancellation, deadline)
-            .unwrap_or_else(|error| panic!("deadline must remain a domain rejection at admission: {error}"));
+            .unwrap_or_else(|error| {
+                panic!("deadline must remain a domain rejection at admission: {error}")
+            });
         let service =
             crate::infrastructure::daemon::v13_service::CanonicalV13ReadService::default();
+        let _parent_scan = parent_admission.then(|| {
+            crate::infrastructure::source_revision::set_retained_scan_test_mutation(
+                crate::infrastructure::source_revision::RetainedScanTestMutationPoint::ScanStart,
+                move || set_logical_read_now(expires),
+            )
+        });
         let staged = service.execute(&execution, cancellation.clone()).unwrap();
-        if !expire_at_admission {
-            assert!(staged.ok, "{staged:?}");
-            assert!(staged.data.is_some(), "the reader must stage actual source data");
-            set_logical_read_now(expires);
+        if parent_admission {
+            assert_eq!(
+                logical_read_now(),
+                expires,
+                "parent scan must exhaust the deadline"
+            );
+            assert_eq!(
+                staged.data.as_ref().unwrap()["props"]["parentStatus"],
+                "unavailable"
+            );
         }
+        if !matches!(
+            case,
+            LogicalReadDeadlineCase::Admission | LogicalReadDeadlineCase::AdmissionScan
+        ) {
+            assert!(staged.ok, "{staged:?}");
+            assert!(
+                staged.data.is_some(),
+                "the reader must stage actual source data"
+            );
+            if !matches!(case, LogicalReadDeadlineCase::PublicationScan) {
+                set_logical_read_now(expires);
+            }
+        }
+        if matches!(case, LogicalReadDeadlineCase::ExecutionFailure) {
+            let failure = InvocationFailure::new("reader_failed", "unrelated provider failure");
+            let published = execution
+                .publish(Err(failure.clone()), &cancellation)
+                .unwrap();
+            assert_eq!(published, Err(failure));
+            return;
+        }
+        let _publication_scan =
+            matches!(case, LogicalReadDeadlineCase::PublicationScan).then(|| {
+                execution.mark_source_revision_dirty_for_test();
+                crate::infrastructure::source_revision::set_retained_scan_test_mutation(
+                crate::infrastructure::source_revision::RetainedScanTestMutationPoint::ScanStart,
+                move || set_logical_read_now(expires),
+            )
+            });
         let result = execution
             .publish(Ok(staged), &cancellation)
-            .unwrap_or_else(|error| panic!("deadline must remain a domain rejection at publication: {error}"))
+            .unwrap_or_else(|error| {
+                panic!("deadline must remain a domain rejection at publication: {error}")
+            })
             .expect("deadline must not become an invocation failure");
         assert!(!result.ok);
         assert_eq!(result.diagnostics[0]["code"], "deadline_exceeded");
-        assert_eq!(result.diagnostics[0]["outcome"], "retryAsIs");
-        assert!(result.data.is_none(), "expired source data escaped: {result:?}");
+        assert_eq!(result.diagnostics[0]["outcome"], "retry");
+        assert!(
+            result.data.is_none(),
+            "expired source data escaped: {result:?}"
+        );
         assert!(result.rev.is_none(), "expired revision escaped: {result:?}");
     }
 
