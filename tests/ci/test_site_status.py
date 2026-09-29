@@ -6,6 +6,7 @@ import base64
 import importlib.util
 import json
 import subprocess
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -114,6 +115,80 @@ class ChannelTests(unittest.TestCase):
                 "stable_url": self.RELEASES,
             },
         )
+
+
+class CandidateTests(unittest.TestCase):
+    """Карточка кандидата на главной зовёт поставить то, что раздаёт канал."""
+
+    RELEASES = [
+        {"tag_name": "v0.13.0-rc.3", "published_at": "2026-09-28T20:58:22Z"},
+        {"tag_name": "v0.13.0-rc.2", "published_at": "2026-09-25T22:40:00Z"},
+        {"tag_name": "v0.12.3", "published_at": "2026-08-19T14:54:10Z"},
+    ]
+
+    def setUp(self) -> None:
+        self.module = load_module()
+
+    def candidates(self, next_tag: str, stable_tag: str, version: str) -> list[dict[str, str]]:
+        """`version` — последний стабильный релиз; по нему главная показывает стабильную версию."""
+        status = {"next_tag": next_tag, "next_url": f"https://releases/tag/{next_tag}", "stable_tag": stable_tag, "version": version}
+        return self.module.candidates(status, self.RELEASES)
+
+    def test_a_candidate_ahead_of_the_stable_version_gets_a_card_with_its_own_release_date(self) -> None:
+        self.assertEqual(self.candidates("v0.13.0-rc.3", "v0.12.3", "v0.12.3"), [{
+            "candidate_tag": "v0.13.0-rc.3",
+            "candidate_url": "https://releases/tag/v0.13.0-rc.3",
+            "candidate_date": "28.09.2026",
+        }])
+        # Каталог main не прочитался: кандидат сравнивается с релизом.
+        self.assertEqual(len(self.candidates("v0.13.0-rc.3", "—", "v0.12.3")), 1)
+
+    def test_no_card_once_the_release_is_out_or_the_channel_is_unknown(self) -> None:
+        for next_tag, stable_tag, version in (("v0.13.0", "v0.13.0", "v0.13.0"), ("—", "v0.12.3", "v0.12.3")):
+            with self.subTest(next=next_tag):
+                self.assertEqual(self.candidates(next_tag, stable_tag, version), [])
+
+    def test_a_stable_release_is_never_shown_as_a_candidate(self) -> None:
+        """Полная версия приходит в next раньше, чем в main; до main она ещё не кандидат."""
+        self.assertEqual(self.candidates("v0.13.0", "v0.12.3", "v0.13.0"), [])
+        self.assertEqual(self.candidates("v0.13.0", "v0.12.3", "v0.12.3"), [])
+
+    def test_a_candidate_older_than_the_published_release_gets_no_card(self) -> None:
+        """Релиз 0.13.0 вышел, а каталоги ещё не сдвинуты: rc.3 уже не впереди."""
+        self.assertEqual(self.candidates("v0.13.0-rc.3", "v0.12.3", "v0.13.0"), [])
+
+    def test_release_date_is_a_dash_for_an_unknown_tag(self) -> None:
+        self.assertEqual(self.module.release_date(self.RELEASES, "v0.12.3"), "19.08.2026")
+        self.assertEqual(self.module.release_date(self.RELEASES, "—"), "—")
+
+
+class CountWordTests(unittest.TestCase):
+    """Слово при числе в карточке линии согласуется с числом."""
+
+    def setUp(self) -> None:
+        self.module = load_module()
+
+    def test_the_word_agrees_with_the_count(self) -> None:
+        cases = {
+            0: "тестов", 1: "тест", 2: "теста", 4: "теста", 5: "тестов", 11: "тестов", 12: "тестов",
+            14: "тестов", 21: "тест", 22: "теста", 25: "тестов", 111: "тестов", 785: "тестов", 15653: "теста",
+        }
+        for count, word in cases.items():
+            with self.subTest(count):
+                self.assertEqual(self.module.plural(count, "тест", "теста", "тестов"), word)
+
+    def test_the_line_card_counts_carry_their_words(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = Path(tmp) / "summary.json"
+            summary.write_text(json.dumps({"statistic": {"total": 785, "passed": 781, "failed": 1, "broken": 1, "skipped": 2}}), encoding="utf-8")
+            counts = self.module.summary_counts(summary)
+
+        self.assertEqual(counts, {
+            "tests_total": "785", "tests_total_word": "тестов",
+            "tests_passed": "781", "tests_passed_word": "прошёл",
+            "tests_failed": "2", "tests_failed_word": "упали",
+            "tests_skipped": "2", "tests_skipped_word": "пропущены",
+        })
 
 if __name__ == "__main__":
     unittest.main()
