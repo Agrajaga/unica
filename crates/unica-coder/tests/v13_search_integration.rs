@@ -357,6 +357,16 @@ fn canonical_search_is_source_scoped_and_rejects_legacy_call_shape() {
         "main:CommonModule.Main"
     );
 
+    let module_path = "CommonModules/Main/Ext/Module.bsl";
+    let resolved = domain_result(&mcp.exchange(call_tool(
+        36,
+        "unica.resolve",
+        json!({"path": module_path}),
+    )));
+    assert_eq!(resolved["ok"], true, "{resolved:#}");
+    assert_eq!(resolved["data"]["at"], "main:CommonModule.Main");
+    assert_eq!(resolved["data"]["path"], module_path);
+
     let missing_scope = domain_result(&mcp.exchange(call_tool(
         21,
         "unica.search",
