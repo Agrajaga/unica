@@ -103,6 +103,14 @@ impl<'a> GitGrepProvider<'a> {
             args.push(".".to_string());
         }
         args.push(generated_corpus_exclusion());
+        if let Some(scope) = scope {
+            for subtree in &scope.excluded_subtrees {
+                args.push(format!(
+                    ":(exclude){}",
+                    subtree.to_string_lossy().replace('\\', "/")
+                ));
+            }
+        }
         let command = ProcessCommand {
             program: PathBuf::from("git"),
             args,
@@ -1836,6 +1844,7 @@ mod tests {
             filters: vec![RelativeSearchFilter::Exact(PathBuf::from(
                 "CommonModules/Scoped/Ext/Module.bsl",
             ))],
+            excluded_subtrees: Vec::new(),
             legacy_selector: false,
         })
     }

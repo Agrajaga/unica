@@ -72,6 +72,10 @@ impl ActorReadSourceCapability {
         self.binding.source_set_name()
     }
 
+    pub(in crate::infrastructure::daemon) fn source_root(&self) -> &std::path::Path {
+        self.binding.source_root()
+    }
+
     pub(in crate::infrastructure::daemon) const fn source_kind(&self) -> SourceSetKind {
         self.binding.source_kind()
     }
