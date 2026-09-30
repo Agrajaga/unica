@@ -2026,13 +2026,17 @@ mod tests {
             commands: Mutex::new(Vec::new()),
         };
         let provider = GitGrepProvider::with_runner(&runner);
+        let mut scope =
+            CodeSearchScope::all("main".to_string(), PathBuf::from("/workspace/src"), false);
+        scope.excluded_subtrees.push(PathBuf::from("lib[ab]"));
+        let context = context().with_search_scope(scope);
 
         let section = provider.search(
             &SearchRequest {
                 query: "Post.*".to_string(),
                 limit: 20,
             },
-            &context(),
+            &context,
             ProviderDeadline::new(Instant::now() + Duration::from_secs(60)),
             &CancellationToken::new(),
         );
@@ -2058,6 +2062,7 @@ mod tests {
                 "--",
                 ".",
                 ":(exclude,glob)**/.build/**",
+                ":(exclude,literal)lib[ab]",
             ]
         );
         assert!(commands[0].args.iter().any(|arg| arg == "-F"));
@@ -2163,7 +2168,7 @@ mod tests {
     #[test]
     fn git_grep_excludes_only_the_literal_nested_source_root() {
         let root = tempfile::tempdir().unwrap();
-        let nested = if cfg!(windows) { "lib[ab]" } else { "lib*" };
+        let nested = "lib[ab]";
         for directory in [nested, "liba", "libb"] {
             std::fs::create_dir(root.path().join(directory)).unwrap();
             std::fs::write(
