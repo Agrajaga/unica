@@ -1,4 +1,6 @@
-use crate::application::v13::find::{FindDocument, FindFact, FindFactKind, FindIndex};
+use crate::application::v13::find::{
+    FindDocument, FindFact, FindFactKind, FindIndex, FindPathAlias,
+};
 use crate::domain::address::{NodeKind, QualifiedAddress};
 use crate::domain::cancellation::CancellationToken;
 use crate::domain::code_intelligence::ProviderDeadline;
@@ -8,7 +10,7 @@ use crate::infrastructure::metadata_kinds::metadata_kind_by_directory;
 use crate::infrastructure::platform::filesystem::{
     RetainedChildCapability, RetainedDirectoryCapability, RetainedRegularFileCapability,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -140,6 +142,7 @@ struct DirectoryBuild {
     documents: Vec<FindDocument>,
     fact_bytes: usize,
     omissions: FindOmissions,
+    include_module_aliases: bool,
 }
 
 impl DirectoryBuild {
@@ -195,7 +198,27 @@ impl WorkspaceFindDirectoryBuilder {
         deadline: ProviderDeadline,
         cancellation: &CancellationToken,
     ) -> Result<FindIndex, FindBuildError> {
-        let outcome = self.build_for_search(sources, deadline, cancellation)?;
+        self.build_exact(sources, deadline, cancellation, false)
+    }
+
+    pub(crate) fn build_for_path(
+        &self,
+        sources: &[LayoutFindSource<'_>],
+        deadline: ProviderDeadline,
+        cancellation: &CancellationToken,
+    ) -> Result<FindIndex, FindBuildError> {
+        self.build_exact(sources, deadline, cancellation, true)
+    }
+
+    fn build_exact(
+        &self,
+        sources: &[LayoutFindSource<'_>],
+        deadline: ProviderDeadline,
+        cancellation: &CancellationToken,
+        include_module_aliases: bool,
+    ) -> Result<FindIndex, FindBuildError> {
+        let outcome =
+            self.build_internal(sources, deadline, cancellation, include_module_aliases)?;
         if outcome.omissions.total != 0 {
             return Err(FindBuildError::with_detail(
                 RefusalDetail::SourceUnreadable,
@@ -214,6 +237,16 @@ impl WorkspaceFindDirectoryBuilder {
         deadline: ProviderDeadline,
         cancellation: &CancellationToken,
     ) -> Result<FindBuildOutcome, FindBuildError> {
+        self.build_internal(sources, deadline, cancellation, false)
+    }
+
+    fn build_internal(
+        &self,
+        sources: &[LayoutFindSource<'_>],
+        deadline: ProviderDeadline,
+        cancellation: &CancellationToken,
+        include_module_aliases: bool,
+    ) -> Result<FindBuildOutcome, FindBuildError> {
         if sources.len() > MAX_SOURCE_SETS {
             return Err(FindBuildError::new(
                 RefusalCode::ProviderLimitExceeded,
@@ -224,6 +257,7 @@ impl WorkspaceFindDirectoryBuilder {
             documents: Vec::new(),
             fact_bytes: 0,
             omissions: FindOmissions::default(),
+            include_module_aliases,
         };
         for source in sources {
             find_checkpoint(deadline, cancellation)?;
@@ -303,7 +337,7 @@ impl WorkspaceFindDirectoryBuilder {
                     RetainedChildCapability::Directory(collection) => collection,
                     _ => return Err(unsafe_layout_entry()),
                 };
-            let mut proved_owners = HashSet::new();
+            let mut proved_owners = HashMap::new();
             let mut owner_directories = Vec::new();
             let mut unsafe_owner_directories = HashSet::new();
             for owner in immediate_names(&collection, deadline, cancellation)? {
@@ -346,6 +380,7 @@ impl WorkspaceFindDirectoryBuilder {
                             continue;
                         }
                         let synonym = descriptor_identity(&head).1;
+                        let document_index = build.documents.len();
                         self.push(
                             build,
                             source,
@@ -355,7 +390,10 @@ impl WorkspaceFindDirectoryBuilder {
                             synonym.as_deref(),
                             &relative,
                         )?;
-                        proved_owners.insert(stem.to_string());
+                        proved_owners.insert(
+                            stem.to_string(),
+                            (build.documents.len() > document_index).then_some(document_index),
+                        );
                     }
                     RetainedChildCapability::Directory(owner_root) => {
                         if owner_name.ends_with(".xml") {
@@ -375,13 +413,13 @@ impl WorkspaceFindDirectoryBuilder {
             }
             if unsafe_owner_directories
                 .iter()
-                .any(|name| proved_owners.contains(name))
+                .any(|name| proved_owners.contains_key(name))
             {
                 return Err(unsafe_layout_entry());
             }
             for (owner_name, original_identity) in owner_directories {
                 find_checkpoint(deadline, cancellation)?;
-                if proved_owners.contains(&owner_name) {
+                if let Some(document_index) = proved_owners.get(&owner_name) {
                     let owner_root = match retain_enumerated_child(
                         &collection,
                         OsStr::new(&owner_name),
@@ -395,6 +433,44 @@ impl WorkspaceFindDirectoryBuilder {
                         }
                         _ => return Err(unsafe_layout_entry()),
                     };
+                    if build.include_module_aliases && layout.tag == "CommonModule" {
+                        if let Some(document_index) = document_index {
+                            let alias = match common_module_path(
+                                &owner_root,
+                                &PathBuf::from(directory).join(&owner_name),
+                                deadline,
+                                cancellation,
+                            ) {
+                                Ok(alias) => alias,
+                                Err(error) if error.is_local_unreadable() => {
+                                    find_checkpoint(deadline, cancellation)?;
+                                    build.record_omission(source.name, "module_unreadable");
+                                    None
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            let alias = alias.map(|relative| FindPathAlias {
+                                absolute: source
+                                    .root
+                                    .path()
+                                    .join(&relative)
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                relative,
+                            });
+                            let next_total = build.fact_bytes.saturating_add(
+                                alias.as_ref().map_or(0, FindPathAlias::estimated_bytes),
+                            );
+                            if next_total > self.max_total_fact_bytes {
+                                return Err(FindBuildError::new(
+                                    RefusalCode::ProviderLimitExceeded,
+                                    "find directory exceeds the bounded workspace byte budget",
+                                ));
+                            }
+                            build.fact_bytes = next_total;
+                            build.documents[*document_index].set_path_alias(alias);
+                        }
+                    }
                     self.add_nested_families(
                         source,
                         build,
@@ -676,6 +752,29 @@ impl WorkspaceFindDirectoryBuilder {
     }
 }
 
+fn common_module_path(
+    owner: &RetainedDirectoryCapability,
+    relative: &Path,
+    deadline: ProviderDeadline,
+    cancellation: &CancellationToken,
+) -> Result<Option<String>, FindBuildError> {
+    let ext = match retain_optional_child(owner, OsStr::new("Ext"), deadline, cancellation)? {
+        Some(RetainedChildCapability::Directory(ext)) => ext,
+        None => return Ok(None),
+        Some(_) => return Err(unsafe_layout_entry()),
+    };
+    match retain_optional_child(&ext, OsStr::new("Module.bsl"), deadline, cancellation)? {
+        Some(RetainedChildCapability::RegularFile(file)) => {
+            file.validate_named_identity()
+                .map_err(|_| unsafe_layout_entry())?;
+            find_checkpoint(deadline, cancellation)?;
+            Ok(Some(path_text(&relative.join("Ext/Module.bsl"))))
+        }
+        None => Ok(None),
+        Some(_) => Err(unsafe_layout_entry()),
+    }
+}
+
 fn read_descriptor_head_prefix(
     file: &RetainedRegularFileCapability,
     _relative: &Path,
@@ -926,6 +1025,21 @@ mod tests {
             }
         }
 
+        fn directory_for_paths(&self) -> crate::application::v13::find::FindIndex {
+            let root = RetainedDirectoryCapability::open(&self.source).unwrap();
+            WorkspaceFindDirectoryBuilder::default()
+                .build_for_path(
+                    &[LayoutFindSource::new(
+                        "main",
+                        SourceSetKind::Configuration,
+                        &root,
+                    )],
+                    ProviderDeadline::from_budget(Duration::from_secs(7)),
+                    &CancellationToken::new(),
+                )
+                .unwrap()
+        }
+
         fn directory(&self) -> crate::application::v13::find::FindIndex {
             let root = RetainedDirectoryCapability::open(&self.source).unwrap();
             WorkspaceFindDirectoryBuilder::default()
@@ -997,7 +1111,7 @@ mod tests {
             let located = index
                 .locate_path(query)
                 .unwrap_or_else(|| panic!("{query} must locate its owner"));
-            assert_eq!(located.at(), "main:Catalog.Валюты", "{query}");
+            assert_eq!(located.owner.at(), "main:Catalog.Валюты", "{query}");
         }
         // Хвост принимается только целиком, посегментно: иначе «Валюты.xml»
         // притянул бы «НеВалюты.xml».
@@ -1010,6 +1124,310 @@ mod tests {
         assert_eq!(located.placed_path(), Some("Catalogs/Валюты.xml"));
         // Мост не гадает: близкого адреса для него не существует.
         assert!(index.locate_address("main:Catalog.Валют").is_none());
+    }
+
+    #[test]
+    fn a_common_module_file_resolves_to_its_owner_without_becoming_a_name_fact() {
+        let fixture = Fixture::new();
+        write(
+            &fixture.source.join("CommonModules/Main.xml"),
+            &owner("Main", "CommonModule", "Main", ""),
+        );
+        write(
+            &fixture.source.join("CommonModules/Main/Ext/Module.bsl"),
+            "Procedure HiddenSymbol()\nEndProcedure\n",
+        );
+        let index = fixture.directory_for_paths();
+        let absolute = fixture.source.join("CommonModules/Main/Ext/Module.bsl");
+        for path in [
+            "CommonModules/Main/Ext/Module.bsl",
+            "src/CommonModules/Main/Ext/Module.bsl",
+            absolute.to_str().unwrap(),
+        ] {
+            let found = index.locate_path(path).expect("existing module file");
+            assert_eq!(found.owner.at(), "main:CommonModule.Main");
+            assert_eq!(found.path, "CommonModules/Main/Ext/Module.bsl");
+        }
+        assert_eq!(
+            single(&index, "Main"),
+            (
+                "main:CommonModule.Main".into(),
+                "CommonModules/Main.xml".into()
+            )
+        );
+        assert_eq!(
+            index
+                .find(
+                    FindRequest::new("Main")
+                        .unwrap()
+                        .with_kind("CommonModule")
+                        .unwrap()
+                )
+                .candidates()
+                .len(),
+            1
+        );
+        for query in ["Module.bsl", "HiddenSymbol"] {
+            assert!(index.find(FindRequest::new(query).unwrap()).is_nearest());
+        }
+        assert_eq!(
+            index
+                .locate_address("main:CommonModule.Main")
+                .unwrap()
+                .placed_path(),
+            Some("CommonModules/Main.xml")
+        );
+    }
+
+    #[test]
+    fn a_common_module_alias_requires_both_the_descriptor_and_the_file() {
+        let fixture = Fixture::new();
+        write(
+            &fixture.source.join("CommonModules/Main.xml"),
+            &owner("Main", "CommonModule", "Main", ""),
+        );
+        assert!(fixture
+            .directory_for_paths()
+            .locate_path("CommonModules/Main/Ext/Module.bsl")
+            .is_none());
+        for directory in ["CommonModules/Main", "CommonModules/Main/Ext"] {
+            fs::create_dir_all(fixture.source.join(directory)).unwrap();
+            let index = fixture.directory_for_paths();
+            assert!(index
+                .locate_path("CommonModules/Main/Ext/Module.bsl")
+                .is_none());
+            assert!(index.locate_address("main:CommonModule.Main").is_some());
+        }
+        fs::remove_file(fixture.source.join("CommonModules/Main.xml")).unwrap();
+        write(
+            &fixture.source.join("CommonModules/Main/Ext/Module.bsl"),
+            "",
+        );
+        let index = fixture.directory_for_paths();
+        assert!(index
+            .locate_path("CommonModules/Main/Ext/Module.bsl")
+            .is_none());
+        assert!(index.locate_address("main:CommonModule.Main").is_none());
+    }
+
+    #[test]
+    fn a_common_module_alias_is_not_chosen_between_source_sets() {
+        let fixture = Fixture::new();
+        write(
+            &fixture.source.join("CommonModules/Main.xml"),
+            &owner("Main", "CommonModule", "Main", ""),
+        );
+        write(
+            &fixture.source.join("CommonModules/Main/Ext/Module.bsl"),
+            "",
+        );
+        let root = RetainedDirectoryCapability::open(&fixture.source).unwrap();
+        let index = WorkspaceFindDirectoryBuilder::default()
+            .build_for_path(
+                &[
+                    LayoutFindSource::new("main", SourceSetKind::Configuration, &root),
+                    LayoutFindSource::new("other", SourceSetKind::Extension, &root),
+                ],
+                ProviderDeadline::from_budget(Duration::from_secs(7)),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert!(index
+            .locate_path("CommonModules/Main/Ext/Module.bsl")
+            .is_none());
+        assert!(index.locate_address("main:CommonModule.Main").is_some());
+        assert!(index.locate_address("other:CommonModule.Main").is_some());
+        assert_eq!(
+            index
+                .locate_path("CommonModules/Main.xml")
+                .unwrap()
+                .owner
+                .at(),
+            "other:CommonModule.Main"
+        );
+    }
+
+    #[test]
+    fn an_absolute_common_module_alias_identifies_its_source_root() {
+        let main = Fixture::new();
+        let extension = main.source.join("src/extension");
+        for source in [&main.source, &extension] {
+            write(
+                &source.join("CommonModules/Main.xml"),
+                &owner("Main", "CommonModule", "Main", ""),
+            );
+            write(&source.join("CommonModules/Main/Ext/Module.bsl"), "");
+        }
+        let main_root = RetainedDirectoryCapability::open(&main.source).unwrap();
+        let extension_root = RetainedDirectoryCapability::open(&extension).unwrap();
+        let index = WorkspaceFindDirectoryBuilder::default()
+            .build_for_path(
+                &[
+                    LayoutFindSource::new("main", SourceSetKind::Configuration, &main_root),
+                    LayoutFindSource::new("extension", SourceSetKind::Extension, &extension_root),
+                ],
+                ProviderDeadline::from_budget(Duration::from_secs(7)),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert!(index
+            .locate_path("CommonModules/Main/Ext/Module.bsl")
+            .is_none());
+        for (source, expected) in [
+            (&main.source, "main:CommonModule.Main"),
+            (&extension, "extension:CommonModule.Main"),
+        ] {
+            let path = source.join("CommonModules/Main/Ext/Module.bsl");
+            for query in [path.clone(), fs::canonicalize(&path).unwrap()] {
+                let found = index
+                    .locate_path(query.to_str().unwrap())
+                    .expect("absolute alias selects its source");
+                assert_eq!(found.owner.at(), expected);
+                assert_eq!(found.path, "CommonModules/Main/Ext/Module.bsl");
+            }
+        }
+        let found = index
+            .locate_path("src/extension/CommonModules/Main/Ext/Module.bsl")
+            .expect("workspace-relative alias selects its source");
+        assert_eq!(found.owner.at(), "extension:CommonModule.Main");
+        assert_eq!(found.path, "CommonModules/Main/Ext/Module.bsl");
+        assert!(index
+            .locate_path("missing-prefix/CommonModules/Main/Ext/Module.bsl")
+            .is_none());
+        assert!(index.locate_path("Module.bsl").is_none());
+        assert!(index.locate_path("Main/Ext/Module.bsl").is_none());
+        let outside = tempfile::tempdir().unwrap();
+        assert!(index
+            .locate_path(
+                outside
+                    .path()
+                    .join("CommonModules/Main/Ext/Module.bsl")
+                    .to_str()
+                    .unwrap()
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn a_common_module_alias_consumes_the_directory_byte_budget() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            &root.path().join("CommonModules/Main.xml"),
+            &owner("Main", "CommonModule", "Main", ""),
+        );
+        let capability = RetainedDirectoryCapability::open(root.path()).unwrap();
+        let sources = [LayoutFindSource::new(
+            "main",
+            SourceSetKind::Configuration,
+            &capability,
+        )];
+        let deadline = ProviderDeadline::from_budget(Duration::from_secs(7));
+        let cancellation = CancellationToken::new();
+        let baseline = WorkspaceFindDirectoryBuilder::default()
+            .build_for_path(&sources, deadline, &cancellation)
+            .unwrap();
+        let bytes = baseline
+            .locate_address("main:CommonModule.Main")
+            .unwrap()
+            .estimated_identity_bytes();
+        WorkspaceFindDirectoryBuilder::with_limits(1, bytes)
+            .build_for_path(&sources, deadline, &cancellation)
+            .unwrap();
+        write(&root.path().join("CommonModules/Main/Ext/Module.bsl"), "");
+        let failure = WorkspaceFindDirectoryBuilder::with_limits(1, bytes)
+            .build_for_path(&sources, deadline, &cancellation)
+            .unwrap_err();
+        assert_eq!(failure.code(), RefusalCode::ProviderLimitExceeded);
+        let index = WorkspaceFindDirectoryBuilder::with_limits(
+            1,
+            bytes
+                + "CommonModules/Main/Ext/Module.bsl".len()
+                + capability
+                    .path()
+                    .join("CommonModules/Main/Ext/Module.bsl")
+                    .to_string_lossy()
+                    .len(),
+        )
+        .build_for_path(&sources, deadline, &cancellation)
+        .unwrap();
+        assert!(index
+            .locate_path("CommonModules/Main/Ext/Module.bsl")
+            .is_some());
+    }
+
+    #[test]
+    fn a_nonregular_common_module_alias_refuses_the_layout() {
+        let fixture = Fixture::new();
+        write(
+            &fixture.source.join("CommonModules/Main.xml"),
+            &owner("Main", "CommonModule", "Main", ""),
+        );
+        fs::create_dir_all(fixture.source.join("CommonModules/Main/Ext/Module.bsl")).unwrap();
+        let root = RetainedDirectoryCapability::open(&fixture.source).unwrap();
+        let sources = [LayoutFindSource::new(
+            "main",
+            SourceSetKind::Configuration,
+            &root,
+        )];
+        let deadline = ProviderDeadline::from_budget(Duration::from_secs(7));
+        let cancellation = CancellationToken::new();
+        let search = WorkspaceFindDirectoryBuilder::default()
+            .build_for_search(&sources, deadline, &cancellation)
+            .unwrap();
+        assert_eq!(search.omissions.total, 0);
+        assert_eq!(single(&search.index, "Main").0, "main:CommonModule.Main");
+        assert!(WorkspaceFindDirectoryBuilder::default()
+            .build(&sources, deadline, &cancellation)
+            .unwrap()
+            .locate_address("main:CommonModule.Main")
+            .is_some());
+        let failure = WorkspaceFindDirectoryBuilder::default()
+            .build_for_path(
+                &[LayoutFindSource::new(
+                    "main",
+                    SourceSetKind::Configuration,
+                    &root,
+                )],
+                ProviderDeadline::from_budget(Duration::from_secs(7)),
+                &CancellationToken::new(),
+            )
+            .unwrap_err();
+        assert_eq!(failure.code(), RefusalCode::InvalidSource);
+    }
+
+    #[test]
+    fn a_linked_common_module_alias_refuses_the_layout() {
+        use crate::infrastructure::platform::testing::{
+            create_file_link_fixture_for_test, FileLinkFixtureOutcome,
+        };
+
+        let fixture = Fixture::new();
+        write(
+            &fixture.source.join("CommonModules/Main.xml"),
+            &owner("Main", "CommonModule", "Main", ""),
+        );
+        let physical = fixture.source.join("physical-module.bsl");
+        write(&physical, "");
+        fs::create_dir_all(fixture.source.join("CommonModules/Main/Ext")).unwrap();
+        let alias = fixture.source.join("CommonModules/Main/Ext/Module.bsl");
+        match create_file_link_fixture_for_test(&physical, &alias).unwrap() {
+            FileLinkFixtureOutcome::Created => {}
+            FileLinkFixtureOutcome::Unsupported
+            | FileLinkFixtureOutcome::WindowsPrivilegeUnavailable => return,
+        }
+        let root = RetainedDirectoryCapability::open(&fixture.source).unwrap();
+        let failure = WorkspaceFindDirectoryBuilder::default()
+            .build_for_path(
+                &[LayoutFindSource::new(
+                    "main",
+                    SourceSetKind::Configuration,
+                    &root,
+                )],
+                ProviderDeadline::from_budget(Duration::from_secs(7)),
+                &CancellationToken::new(),
+            )
+            .unwrap_err();
+        assert_eq!(failure.code(), RefusalCode::InvalidSource);
     }
 
     #[test]
@@ -1316,6 +1734,7 @@ mod tests {
             documents: Vec::new(),
             fact_bytes: 0,
             omissions: super::FindOmissions::default(),
+            include_module_aliases: false,
         };
         for _ in 0..=super::MAX_OMISSION_DETAILS {
             build.record_omission("main", "descriptor_unreadable");

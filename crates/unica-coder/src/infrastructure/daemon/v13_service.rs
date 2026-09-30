@@ -510,6 +510,7 @@ impl CanonicalV13ReadService {
                         let directory = directory.as_ref()?;
                         let (placed, role) = placed_for_module_file(path)?;
                         let entry = directory.locate_path(&placed)?;
+                        let entry = entry.owner;
                         if entry.at().split(':').next() != Some(source_set) {
                             return None;
                         }
@@ -1984,7 +1985,10 @@ impl CanonicalV13ReadService {
             .iter()
             .map(|source| LayoutFindSource::new(source.name(), source.kind(), source.root()))
             .collect::<Vec<_>>();
-        let directory = match self.find_builder.build(&layout, deadline, cancellation) {
+        let directory = match self
+            .find_builder
+            .build_for_path(&layout, deadline, cancellation)
+        {
             Ok(directory) => directory,
             Err(error) => return find_build_error_result(None, error),
         };
@@ -1995,18 +1999,10 @@ impl CanonicalV13ReadService {
                 format!("no admitted source set places `{path}`"),
             );
         };
-        // Путь называет файл, а не узел внутри него: строки не спрашивали.
-        let Some(placed) = entry.placed_path() else {
-            return error_result(
-                None,
-                RefusalCode::NotFound,
-                format!("no admitted source set places `{path}`"),
-            );
-        };
         resolve_result(ResolvedSource::new(
-            entry.at(),
-            entry.kind(),
-            placed,
+            entry.owner.at(),
+            entry.owner.kind(),
+            entry.path,
             ResolvedLines::NotLineBased,
         ))
     }
