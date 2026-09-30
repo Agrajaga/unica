@@ -1422,7 +1422,7 @@ impl CanonicalV13ReadService {
                         )
                     })
                     .collect::<Vec<_>>(),
-                Err(error) => return error_result(None, RefusalCode::ProviderUnavailable, error),
+                Err(error) => return error_result(None, RefusalCode::InvalidState, error),
             }
         } else {
             Vec::new()
@@ -2233,9 +2233,7 @@ fn search_unscoped_lexical(
         return Err("no admitted source set is available for a role search".to_string());
     }
     let started = Instant::now();
-    let budget = deadlines
-        .search_total_timeout()
-        .min(deadlines.search_git_grep_timeout());
+    let budget = deadlines.search_total_timeout();
     let mut contexts = source_sets
         .iter()
         .map(|name| {
@@ -3876,6 +3874,47 @@ mod tests {
         }
     }
 
+    struct PerSourceDeadlineProvider;
+
+    impl CodeIntelligenceProvider for PerSourceDeadlineProvider {
+        fn identity(&self) -> ProviderIdentity {
+            ProviderIdentity::new(ProviderRole::Lexical, "per-source-deadline")
+        }
+
+        fn capabilities(&self) -> &[ProviderCapability] {
+            &[ProviderCapability::Search]
+        }
+
+        fn search(
+            &self,
+            _: &SearchRequest,
+            context: &CodeIntelligenceContext,
+            deadline: ProviderDeadline,
+            _: &CancellationToken,
+        ) -> ProviderSearchSection {
+            if context.source_root.source_set.as_deref() == Some("first") {
+                std::thread::sleep(Duration::from_secs(1));
+            } else if deadline.remaining() < Duration::from_millis(2500) {
+                return ProviderSearchSection::timed_out(
+                    self.identity(),
+                    SearchRanking::None,
+                    SearchOrdering::ProviderTraversal,
+                    Vec::new(),
+                    vec!["the second source lacked its configured provider budget".to_string()],
+                )
+                .unwrap();
+            }
+            ProviderSearchSection::complete(
+                self.identity(),
+                SearchRanking::None,
+                SearchOrdering::ProviderTraversal,
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap()
+        }
+    }
+
     fn two_source_lexical_workspace(
     ) -> (tempfile::TempDir, WorkspaceContext, Vec<(String, PathBuf)>) {
         let root = tempfile::tempdir().unwrap();
@@ -4032,6 +4071,38 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item.as_str().unwrap().contains("source set `second`")));
+    }
+
+    #[test]
+    fn unscoped_lexical_keeps_each_provider_timeout_under_the_shared_total() {
+        let (_root, workspace, roots) = two_source_lexical_workspace();
+        let execution = super::search_unscoped_lexical(
+            &crate::infrastructure::application_ports::InfrastructureApplicationPorts::new(),
+            &workspace,
+            UnscopedLexicalSources {
+                names: &["first".to_string(), "second".to_string()],
+                retained_roots: &roots,
+            },
+            CodeIntelligenceRegistry::new(vec![Arc::new(PerSourceDeadlineProvider)]).unwrap(),
+            &SearchRequest {
+                query: "Needle".to_string(),
+                limit: 200,
+            },
+            &CancellationToken::new(),
+            CodeIntelligenceDeadlines::for_test_values(
+                Duration::from_secs(10),
+                Duration::from_secs(10),
+                Duration::from_secs(3),
+                Duration::from_secs(10),
+            ),
+        )
+        .unwrap();
+        let section = &execution.result.sections[0];
+        assert!(section.search_complete, "{section:#?}");
+        assert_eq!(
+            section.status,
+            crate::domain::code_intelligence::ProviderSectionStatus::Empty
+        );
     }
 
     #[test]
