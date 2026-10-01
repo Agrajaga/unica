@@ -4079,13 +4079,14 @@ pub(crate) mod tests {
     fn assert_retained_fence_failure(error: FenceError, expected: RetainedRevisionErrorKind) {
         for fail_at in 0..4 {
             let workspace = tempdir().unwrap();
-            let source = workspace.path().join("src");
+            let workspace_root = workspace.path().canonicalize().unwrap();
+            let source = workspace_root.join("src");
             fs::create_dir_all(&source).unwrap();
             fs::write(source.join("Configuration.xml"), "<Configuration/>").unwrap();
             let context = WorkspaceContext {
-                cwd: workspace.path().to_path_buf(),
-                workspace_root: workspace.path().to_path_buf(),
-                cache_root: workspace.path().join("cache"),
+                cwd: workspace_root.clone(),
+                workspace_root: workspace_root.clone(),
+                cache_root: workspace_root.join("cache"),
                 workspace_epoch: 0,
             };
             let start = std::time::Instant::now();
