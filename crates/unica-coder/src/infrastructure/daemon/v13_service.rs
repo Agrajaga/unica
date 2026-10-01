@@ -126,6 +126,24 @@ impl CanonicalV13ReadService {
     }
 
     #[cfg(test)]
+    pub(super) fn with_directory_limit_for_test(max_documents: usize) -> Self {
+        Self {
+            find_builder: WorkspaceFindDirectoryBuilder::with_document_limit(max_documents),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_directory_fact_limit_for_test(max_fact_bytes: usize) -> Self {
+        Self {
+            find_builder: WorkspaceFindDirectoryBuilder::with_fact_byte_limit_for_test(
+                max_fact_bytes,
+            ),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn with_name_read_fault_for_test(
         relative: &'static str,
         kind: std::io::ErrorKind,
@@ -521,6 +539,7 @@ impl CanonicalV13ReadService {
                         let directory = directory.as_ref()?;
                         let (placed, role) = placed_for_module_file(path)?;
                         let entry = directory.locate_path(&placed)?;
+                        let entry = entry.owner;
                         if entry.at().split(':').next() != Some(source_set) {
                             return None;
                         }
@@ -2112,19 +2131,14 @@ impl CanonicalV13ReadService {
             .iter()
             .map(|source| LayoutFindSource::new(source.name(), source.kind(), source.root()))
             .collect::<Vec<_>>();
-        let directory = match self.find_builder.build(&layout, deadline, cancellation) {
-            Ok(directory) => directory,
+        let entry = match self
+            .find_builder
+            .locate_path(&layout, path, deadline, cancellation)
+        {
+            Ok(entry) => entry,
             Err(error) => return find_build_error_result(None, error),
         };
-        let Some(entry) = directory.locate_path(path) else {
-            return error_result(
-                None,
-                RefusalCode::NotFound,
-                format!("no admitted source set places `{path}`"),
-            );
-        };
-        // Путь называет файл, а не узел внутри него: строки не спрашивали.
-        let Some(placed) = entry.placed_path() else {
+        let Some(entry) = entry else {
             return error_result(
                 None,
                 RefusalCode::NotFound,
@@ -2134,7 +2148,7 @@ impl CanonicalV13ReadService {
         resolve_result(ResolvedSource::new(
             entry.at(),
             entry.kind(),
-            placed,
+            entry.placed_path().expect("located path has a place"),
             ResolvedLines::NotLineBased,
         ))
     }
