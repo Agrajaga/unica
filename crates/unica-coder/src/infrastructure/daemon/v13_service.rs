@@ -1455,7 +1455,7 @@ impl CanonicalV13ReadService {
                     .map(|source| {
                         (
                             source.source_set_name().to_owned(),
-                            source.source_root().to_path_buf(),
+                            source.retained_root().path().to_path_buf(),
                         )
                     })
                     .collect::<Vec<_>>(),
