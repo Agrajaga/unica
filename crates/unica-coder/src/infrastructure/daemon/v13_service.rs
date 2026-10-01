@@ -33,6 +33,7 @@ use crate::domain::code_intelligence::{
 use crate::domain::invocation::{DomainResult, InvocationFailure};
 use crate::domain::project_sources::SourceSetKind;
 use crate::domain::refusal::{RefusalCode, RefusalDetail};
+use crate::infrastructure::capacity_observation::CapacityObserver;
 use crate::infrastructure::metadata_kinds::metadata_kind;
 use crate::infrastructure::native_operations::apply::{
     ApplyPlanErrorKind, ApplyStagedState, PlannedApplyEffects, StagedChangeKind, StagedFileState,
@@ -115,6 +116,14 @@ impl CanonicalInvocationService for CanonicalV13ReadService {
 }
 
 impl CanonicalV13ReadService {
+    pub(crate) fn with_capacity_observer(observer: Arc<CapacityObserver>) -> Self {
+        let mut service = Self::default();
+        service.cursors =
+            Arc::new(ViewCursorStore::default().with_capacity_observer(observer.clone()));
+        service.find_builder = service.find_builder.with_capacity_observer(observer);
+        service
+    }
+
     #[cfg(test)]
     pub(super) fn with_name_read_fault_for_test(
         relative: &'static str,
@@ -1395,6 +1404,34 @@ impl CanonicalV13ReadService {
                 )
             }
         };
+        // An explicit provider role has no neighboring provider to fall back
+        // to. Acquire only the selected engine after validating the request,
+        // before starting the provider. Lexical and role-free search stay local.
+        if let Some(engine) = selected_role_engine(role) {
+            if let Some(plugin_root) =
+                crate::infrastructure::plugin_runtime::find_plugin_root(&context.cwd)
+            {
+                let progress =
+                    crate::infrastructure::engine_delivery::CanonicalDeliveryProgress::default();
+                let state = crate::infrastructure::engine_delivery::deliver_if_missing(
+                    invocation.delivery_work(),
+                    &plugin_root,
+                    engine,
+                    cancellation,
+                    &progress,
+                );
+                if cancellation.is_cancelled() {
+                    return error_result(None, RefusalCode::Cancelled, "role search cancelled");
+                }
+                if let Some(result) =
+                    crate::infrastructure::engine_delivery::canonical_delivery_result(
+                        state, &progress,
+                    )
+                {
+                    return result;
+                }
+            }
+        }
         let request = SearchRequest {
             query: query.to_string(),
             limit: PROVIDER_SEARCH_FETCH_LIMIT,
@@ -2180,6 +2217,14 @@ impl CanonicalV13ReadService {
             // занимает файл целиком, и называть часть было бы неверно.
             _ => Ok(ResolvedLines::NotLineBased),
         }
+    }
+}
+
+fn selected_role_engine(role: ProviderRole) -> Option<&'static str> {
+    match role {
+        ProviderRole::Lexical => None,
+        ProviderRole::Symbol => Some("bsl-analyzer"),
+        ProviderRole::Semantic => Some("rlm-bsl-mcp"),
     }
 }
 
@@ -4103,6 +4148,29 @@ mod tests {
             section.status,
             crate::domain::code_intelligence::ProviderSectionStatus::Empty
         );
+    }
+
+    #[test]
+    fn explicit_search_roles_name_only_the_engine_they_execute() {
+        assert_eq!(super::selected_role_engine(ProviderRole::Lexical), None);
+        let lock_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("plugins/unica/third-party/tools.lock.json");
+        let lock: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(lock_path).unwrap()).unwrap();
+        for (role, tool, artifact) in [
+            (ProviderRole::Symbol, "bsl-analyzer", "bsl-analyzer"),
+            (ProviderRole::Semantic, "rlm-bsl-mcp", "rlm-tools-bsl"),
+        ] {
+            assert_eq!(super::selected_role_engine(role), Some(tool));
+            let pinned = lock["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["name"] == tool)
+                .unwrap();
+            assert_eq!(pinned["releaseName"].as_str().unwrap_or(tool), artifact);
+        }
     }
 
     #[test]
