@@ -1343,6 +1343,22 @@ impl RetainedRegularFileCapability {
         self.validate_named_identity_relative()
     }
 
+    /// Reopen the retained name with an independent file offset, while proving
+    /// that it still names the admitted regular file. A cloned descriptor
+    /// shares its offset on supported hosts and is unsafe for concurrent
+    /// streaming readers.
+    pub(crate) fn open_named_identity_for_read(&self) -> io::Result<fs::File> {
+        self.parent.validate_named_identity()?;
+        let reopened = open_regular_child_nofollow(&self.parent.retained.directory, &self.name)?;
+        if file_identity(&reopened)? != self.identity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "named regular-file identity changed after capability admission",
+            ));
+        }
+        Ok(reopened)
+    }
+
     pub(crate) fn validate_named_identity_relative(&self) -> io::Result<()> {
         let rebound = open_regular_child_nofollow(&self.parent.retained.directory, &self.name)?;
         if file_identity(&rebound)? != self.identity {
@@ -1498,6 +1514,49 @@ pub(crate) fn file_identity(file: &fs::File) -> io::Result<FileIdentity> {
     })
 }
 
+#[cfg(unix)]
+pub(crate) fn file_change_time(
+    _file: &fs::File,
+    metadata: &fs::Metadata,
+) -> io::Result<(i64, i64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok((metadata.ctime(), metadata.ctime_nsec()))
+}
+
+#[cfg(windows)]
+pub(crate) fn file_change_time(
+    file: &fs::File,
+    _metadata: &fs::Metadata,
+) -> io::Result<(i64, i64)> {
+    use std::mem::size_of;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
+    };
+
+    let mut information = FILE_BASIC_INFO {
+        CreationTime: 0,
+        LastAccessTime: 0,
+        LastWriteTime: 0,
+        ChangeTime: 0,
+        FileAttributes: 0,
+    };
+    // SAFETY: the file handle remains open and `information` has the Win32 layout and size.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&mut information as *mut FILE_BASIC_INFO).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((information.ChangeTime, 0))
+}
+
 #[cfg(windows)]
 pub(crate) fn hard_link_count(file: &fs::File) -> io::Result<u64> {
     Ok(u64::from(windows_file_information(file)?.nNumberOfLinks))
@@ -1549,6 +1608,17 @@ pub(crate) fn file_identity(_file: &fs::File) -> io::Result<FileIdentity> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "file identity is not available on this host",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn file_change_time(
+    _file: &fs::File,
+    _metadata: &fs::Metadata,
+) -> io::Result<(i64, i64)> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "file change time is not available on this host",
     ))
 }
 
@@ -5826,6 +5896,32 @@ mod tests {
 
     #[cfg(windows)]
     use super::strip_windows_extended_length_prefix;
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn retained_file_reopen_gives_streaming_readers_independent_offsets() {
+        use super::RetainedDirectoryCapability;
+        use std::io::Read;
+
+        let root = unique_temp_root("independent-retained-readers");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("source.bsl"), b"first\nsecond\n").unwrap();
+        let physical_root = fs::canonicalize(&root).unwrap();
+        let directory = RetainedDirectoryCapability::open(&physical_root).unwrap();
+        let retained = directory
+            .retain_regular_child(std::ffi::OsStr::new("source.bsl"))
+            .unwrap();
+        let mut first = retained.open_named_identity_for_read().unwrap();
+        let mut second = retained.open_named_identity_for_read().unwrap();
+        let mut first_byte = [0_u8; 1];
+        let mut second_byte = [0_u8; 1];
+        first.read_exact(&mut first_byte).unwrap();
+        second.read_exact(&mut second_byte).unwrap();
+        assert_eq!(first_byte, *b"f");
+        assert_eq!(second_byte, *b"f");
+        drop((first, second, retained, directory));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(any(unix, windows))]
     #[test]
