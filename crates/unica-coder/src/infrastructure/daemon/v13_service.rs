@@ -3947,9 +3947,46 @@ pub(super) fn preflight_apply_operations(
         if let Some(redirect) =
             registry.retired_argument_redirect(operation.name(), &site, operation.args())
         {
-            return Err(Box::new(with_operation_dictionary(
+            let location = Some(format!("ops[{index}].args.{}", redirect.location));
+            if redirect.listing {
+                // Значение называло подузел не именем: адрес из него не
+                // строится, и `next` ведёт к коллекции, где имя видно.
+                let mut refusal = error_result(
+                    location,
+                    RefusalCode::BadValue,
+                    format!(
+                        "`{}` names its subject by address, not by `{}`; call it at `{}.<Name>`, reading the name in `{}`",
+                        operation.name(),
+                        redirect.location,
+                        redirect.at,
+                        redirect.at
+                    ),
+                );
+                refusal.next.push(json!({
+                    "tool": "unica.view",
+                    "args": {"at": redirect.at.to_string(), "filter": {"sections": ["items"]}},
+                    "reason": format!(
+                        "имена узлов для операции `{}`: элемент коллекции несёт свой `id` в `props`",
+                        operation.name()
+                    ),
+                }));
+                return Err(Box::new(refusal));
+            }
+            // Адрес построен из значения аргумента, и узла с таким именем
+            // может не быть: вторым шагом — коллекция, где видны имена.
+            let (member, owner) = redirect
+                .at
+                .segments()
+                .split_last()
+                .expect("a member address has a terminal segment");
+            let branch = QualifiedAddress {
+                source_set: redirect.at.source_set().to_string(),
+                segments: owner.to_vec(),
+            };
+            let branch = format!("{branch}.{}", member.kind().as_str());
+            let mut refusal = with_operation_dictionary(
                 error_result(
-                    Some(format!("ops[{index}].args.{}", redirect.location)),
+                    location,
                     RefusalCode::BadValue,
                     format!(
                         "`{}` names its subject by address, not by `{}`; call it at `{}`",
@@ -3960,7 +3997,13 @@ pub(super) fn preflight_apply_operations(
                 ),
                 &redirect.at.to_string(),
                 descriptor,
-            )));
+            );
+            refusal.next.push(json!({
+                "tool": "unica.view",
+                "args": {"at": branch},
+                "reason": "существующие узлы этого вида у владельца",
+            }));
+            return Err(Box::new(refusal));
         }
         if descriptor.applies_at(&site) {
             continue;
