@@ -6,6 +6,7 @@ check:
   - crates/unica-coder/src/infrastructure/daemon/server.rs::call_graph_branch_answers_working_while_the_analyzer_is_being_delivered
   - crates/unica-coder/src/infrastructure/daemon/v13_read_modes.rs::the_call_graph_is_not_a_view_section
   - crates/unica-coder/src/infrastructure/daemon/v13_call_graph.rs::the_method_node_names_both_branches_without_a_count
+  - crates/unica-coder/src/infrastructure/daemon/server.rs::every_route_refuses_a_missing_engine_with_one_typed_refusal
 ---
 
 # Граф вызовов читается только адресом ветви
@@ -26,7 +27,7 @@ check:
 поставка идёт, ответ называет её состояние `working` и просит повторить тот
 же вызов (`delivery_in_progress`). Провал поставки приходит её
 типизированным отказом «нет движка», а не ветвью с состоянием `unavailable`.
-Установка, которой нечего заказывать, по-прежнему отвечает ветвью
-`unavailable`; общий отказ «нет движка» для этого случая задаёт
-[#549](https://github.com/IngvarConsulting/unica/issues/549). Если анализатор
-есть, а граф ещё строится, ветвь отвечает состоянием `indexing`.
+Если заказывать нечего или движка нет и после поставки, ветвь отвечает тем же
+[отказом «нет движка»](../mcp/missing-engine-refusal.md) с шагом, на котором
+движка не оказалось. Если анализатор есть, а граф ещё строится, ветвь
+отвечает состоянием `indexing`.

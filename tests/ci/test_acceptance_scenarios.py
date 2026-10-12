@@ -524,20 +524,20 @@ class AcceptanceCorpusShapeTests(unittest.TestCase):
 
     def test_corpus_is_uniquely_numbered_and_not_missing_steps(self) -> None:
         scenarios = self.corpus["scenarios"]
-        self.assertEqual(len(scenarios), 397)
+        self.assertEqual(len(scenarios), 398)
         # Исполнение apply следует за планированием с сохранением токена.
-        self.assertEqual(sum(len(scenario["wire"]) for scenario in scenarios), 965,
-            "a wire step went missing: the corpus freezes 965 steps",
+        self.assertEqual(sum(len(scenario["wire"]) for scenario in scenarios), 966,
+            "a wire step went missing: the corpus freezes 966 steps",
         )
         identifiers = [scenario["id"] for scenario in scenarios]
-        self.assertEqual(identifiers, [f"S{index:03d}" for index in range(1, 398)])
+        self.assertEqual(identifiers, [f"S{index:03d}" for index in range(1, 399)])
 
     def test_all_scenarios_have_an_executable_profile(self) -> None:
         source = {s["id"] for s in select_profile(self.corpus, "source")["scenarios"]}
         delivery = {s["id"] for s in select_profile(self.corpus, "delivery")["scenarios"]}
         agent = {s["id"] for s in select_profile(self.corpus, "agent-evaluation")["scenarios"]}
         fault = {s["id"] for s in select_profile(self.corpus, "fault-injection")["scenarios"]}
-        self.assertEqual(fault, {"S344", "S345", "S346", "S389", "S390", "S396"})
+        self.assertEqual(fault, {"S344", "S345", "S346", "S389", "S390", "S396", "S398"})
         self.assertFalse(fault & (source | delivery | agent))
         self.assertFalse(source & delivery or source & agent or delivery & agent)
         self.assertEqual(source | delivery | agent | fault, {s["id"] for s in self.corpus["scenarios"]})
@@ -977,7 +977,7 @@ class AcceptanceFaultCorpusRunTests(unittest.TestCase):
             records = []
             run_corpus(self, fault_cases(self.corpus, "analyzer-jsonl-fault"), plugin,
                        scenario_driver=fault_driver(plugin, records))
-            self.assertEqual(sum(record["tool"] == "unica.check" for record in records), 5)
+            self.assertEqual(sum(record["tool"] == "unica.check" for record in records), 6)
 
     def test_call_graph_branch_names_a_failed_analyzer_delivery(self):
         from tests.ci.acceptance_faults import stage_missing_analyzer, delivery_failure_driver

@@ -410,11 +410,14 @@ impl RunEngineDelivery {
             );
         }
         let progress = crate::infrastructure::engine_delivery::CanonicalDeliveryProgress::default();
-        let state = crate::infrastructure::plugin_runtime::find_plugin_root(&self.workspace_hint)
+        let plugin_root =
+            crate::infrastructure::plugin_runtime::find_plugin_root(&self.workspace_hint);
+        let state = plugin_root
+            .as_deref()
             .map(|plugin_root| {
                 crate::infrastructure::engine_delivery::deliver_if_missing(
                     &self.desk,
-                    &plugin_root,
+                    plugin_root,
                     "v8-runner",
                     &cancellation,
                     &progress,
@@ -428,7 +431,20 @@ impl RunEngineDelivery {
                 "run cancelled while waiting for engine delivery",
             );
         }
-        match crate::infrastructure::engine_delivery::canonical_delivery_result(state, &progress) {
+        let delivery = match plugin_root.as_deref() {
+            Some(plugin_root) => {
+                crate::infrastructure::engine_delivery::canonical_engine_delivery_result(
+                    state,
+                    &progress,
+                    plugin_root,
+                    "v8-runner",
+                )
+            }
+            None => {
+                crate::infrastructure::engine_delivery::canonical_delivery_result(state, &progress)
+            }
+        };
+        match delivery {
             Some(result) => result,
             None => run(cancellation),
         }
@@ -3083,6 +3099,229 @@ pub(crate) mod actor_capacity_tests {
             .env("UNICA_PLUGIN_ROOT", &plugin)
             .env("UNICA_ARTIFACT_CACHE", root.path().join("cache"))
             .env("UNICA_RUNTIME_MANIFEST", root.path().join("missing-release.json"))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stdout.contains("running 1 test"), "{stdout}\n{stderr}");
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+    }
+
+    /// #549: «нет поставляемого движка» — один отказ на всех четырёх
+    /// маршрутах. `run` (раннер), `search` с ролью (поставщик поиска), `check`
+    /// модуля (анализ BSL) и `view` со сводкой графа (анализатор) отвечают
+    /// `provider_unavailable` с уточнением `provider_absent` и одинаковыми
+    /// полями движка в `data` — и когда файла нет, и когда его контрольная
+    /// сумма не совпала с манифестом.
+    #[test]
+    fn every_route_refuses_a_missing_engine_with_one_typed_refusal() {
+        const CHILD: &str = "UNICA_MISSING_ENGINE_ROUTES_CHILD";
+        const ROOT: &str = "UNICA_MISSING_ENGINE_ROUTES_ROOT";
+        let target = crate::infrastructure::platform::current_target_id().unwrap();
+        let exe = std::env::consts::EXE_SUFFIX;
+        if std::env::var_os(CHILD).is_some() {
+            let root = std::path::PathBuf::from(std::env::var_os(ROOT).unwrap());
+            let workspace = root.join("workspace");
+            let plugin = root.join("plugin");
+            let runtime = bootstrap_runtime();
+            let call = |tool: ToolIdentity, arguments: serde_json::Value| -> DomainResult {
+                let request = InvocationRequest::new(
+                    tool,
+                    arguments,
+                    std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+                    7_000,
+                )
+                .unwrap();
+                match runtime.bind(request) {
+                    Ok(bound) => match bound.prepare() {
+                        Ok(prepared) => prepared.execute(CancellationToken::new()).unwrap(),
+                        Err(result) => *result,
+                    },
+                    Err(V5CanonicalPrepareError::Direct(result))
+                    | Err(V5CanonicalPrepareError::Rejected(result)) => *result,
+                    Err(error) => panic!("{error:?}"),
+                }
+            };
+            // `view` спрашивает граф адресом ветви метода: это единственный
+            // вход в граф вызовов.
+            let view_arguments = serde_json::json!({
+                "at": "main:CommonModule.Пример.Method.ОбработатьПример.Caller",
+            });
+            let routes = [
+                (
+                    "run",
+                    "v8-runner",
+                    ToolIdentity::Run,
+                    serde_json::json!({"op":"extensions.list","args":{},"dryRun":true}),
+                ),
+                (
+                    "search",
+                    "bsl-analyzer",
+                    ToolIdentity::Search,
+                    serde_json::json!({"query":"ОбработатьПример","role":"symbol"}),
+                ),
+                (
+                    "check",
+                    "bsl-analyzer",
+                    ToolIdentity::Check,
+                    serde_json::json!({"at":"main:CommonModule.Пример"}),
+                ),
+                ("view", "bsl-analyzer", ToolIdentity::View, view_arguments),
+            ];
+            let binary = |tool: &str| plugin.join(format!("bin/{target}/{tool}{exe}"));
+            let flat = |sha: &dyn Fn(&str) -> String| {
+                serde_json::json!({
+                    "schemaVersion": 2,
+                    "tools": (["v8-runner", "bsl-analyzer"].map(|tool| serde_json::json!({
+                        "name": tool,
+                        "version": if tool == "v8-runner" { RUNNER_VERSION } else { "0.2.86" },
+                        "binaryPath": format!("bin/{target}/{tool}{exe}"),
+                        "sha256": sha(tool),
+                    }))),
+                })
+            };
+            let write_manifest = |manifest: serde_json::Value| {
+                std::fs::write(
+                    plugin.join("third-party/manifest.json"),
+                    manifest.to_string(),
+                )
+                .unwrap();
+            };
+            // Файл, который ОС не может запустить: без права исполнения на
+            // Unix (иначе ОС отдала бы его оболочке как сценарий) и не образ
+            // программы на Windows.
+            let unstartable = b"not the published engine";
+            let unstartable_sha = {
+                use sha2::Digest;
+                format!("{:x}", sha2::Sha256::digest(unstartable))
+            };
+            for stage in ["manifest", "target", "delivery", "checksum", "start"] {
+                match stage {
+                    "manifest" => write_manifest(serde_json::json!({
+                        "schemaVersion": 2,
+                        "tools": [],
+                    })),
+                    "target" => write_manifest(serde_json::json!({
+                        "schemaVersion": 2,
+                        "tools": (["v8-runner", "bsl-analyzer"].map(|tool| serde_json::json!({
+                            "name": tool,
+                            "version": "0.0.1",
+                            "binaries": {"plan9-mips": {
+                                "binaryPath": format!("bin/plan9-mips/{tool}"),
+                                "sha256": "0".repeat(64),
+                            }},
+                        }))),
+                    })),
+                    "delivery" => write_manifest(flat(&|_| "0".repeat(64))),
+                    "checksum" => {
+                        std::fs::create_dir_all(plugin.join(format!("bin/{target}"))).unwrap();
+                        for tool in ["v8-runner", "bsl-analyzer"] {
+                            std::fs::write(binary(tool), unstartable).unwrap();
+                            crate::infrastructure::platform::testing::clear_execute_permission_for_test(
+                                &binary(tool),
+                            )
+                            .unwrap();
+                        }
+                    }
+                    _ => write_manifest(flat(&|_| unstartable_sha.clone())),
+                }
+                for (route, tool, identity, arguments) in &routes {
+                    let result = call(*identity, arguments.clone());
+                    let case = format!("{route} at {stage}");
+                    assert!(!result.ok, "{case}");
+                    assert_eq!(result.diagnostics.len(), 1, "{case}");
+                    let diagnostic = &result.diagnostics[0];
+                    assert_eq!(diagnostic["code"], "provider_unavailable", "{case}");
+                    assert_eq!(diagnostic["detailCode"], "provider_absent", "{case}");
+                    assert_eq!(diagnostic["outcome"], "needsHuman", "{case}");
+                    let message = diagnostic["message"].as_str().unwrap();
+                    assert!(
+                        message.starts_with(&format!(
+                            "bundled_tool_missing: {tool} is not available for "
+                        )),
+                        "одна формулировка на всех маршрутах: {case}"
+                    );
+                    let data = result.data.as_ref().expect("поля движка в data");
+                    assert_eq!(data["tool"], *tool, "{case}");
+                    assert_eq!(data["target"], target, "{case}");
+                    assert_eq!(data["stage"], stage, "{case}");
+                    assert_eq!(data["retryable"], false, "{case}");
+                    if matches!(stage, "delivery" | "checksum" | "start") {
+                        assert_eq!(
+                            *data,
+                            serde_json::json!({
+                                "tool": tool,
+                                "path": binary(tool).display().to_string(),
+                                "target": target,
+                                "pinnedVersion": if *tool == "v8-runner" { RUNNER_VERSION } else { "0.2.86" },
+                                "stage": stage,
+                                "retryable": false,
+                            }),
+                            "{case}"
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let plugin = root.path().join("plugin");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/acceptance/workspace-diagnostics");
+        for relative in [
+            "v8project.yaml",
+            "src/Configuration.xml",
+            "src/Languages/Русский.xml",
+            "src/CommonModules/Пример.xml",
+            "src/CommonModules/Пример/Ext/Module.bsl",
+        ] {
+            let destination = workspace.join(relative);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::copy(fixture.join(relative), destination).unwrap();
+        }
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(workspace.join("v8project.yaml"))
+            .and_then(|mut file| {
+                std::io::Write::write_all(&mut file, b"infobase:\n  connection: 'File=base'\n")
+            })
+            .unwrap();
+        std::fs::create_dir_all(plugin.join("third-party")).unwrap();
+        std::fs::write(
+            plugin.join("third-party/manifest.json"),
+            serde_json::json!({
+                "schemaVersion": 2,
+                "tools": [
+                    {
+                        "name": "v8-runner",
+                        "version": RUNNER_VERSION,
+                        "binaryPath": format!("bin/{target}/v8-runner{exe}"),
+                        "sha256": "0".repeat(64),
+                    },
+                    {
+                        "name": "bsl-analyzer",
+                        "version": "0.2.86",
+                        "binaryPath": format!("bin/{target}/bsl-analyzer{exe}"),
+                        "sha256": "0".repeat(64),
+                    },
+                ],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "infrastructure::daemon::server::actor_capacity_tests::every_route_refuses_a_missing_engine_with_one_typed_refusal",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env(ROOT, root.path())
+            .env("UNICA_PLUGIN_ROOT", &plugin)
+            .env_remove("UNICA_ARTIFACT_CACHE")
+            .env_remove("UNICA_RUNTIME_MANIFEST")
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -10262,7 +10501,7 @@ struct ActorLogicalReadLease {"#,
             (
                 AnalyzerRunFailureKind::EngineMissing,
                 Some("provider_absent"),
-                "bsl-analyzer is not installed on this machine for darwin-arm64; build it from third-party/tools.lock.json",
+                "bsl-analyzer is not available for darwin-arm64: its file is not on this machine; build it from third-party/tools.lock.json",
             ),
             (
                 AnalyzerRunFailureKind::StartFailed,
