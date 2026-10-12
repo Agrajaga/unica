@@ -162,7 +162,7 @@ pub(crate) fn project_property_event_implementation(
         platform_event_write: PlatformEventWriteCapability::Proven,
     })
     .map_err(EventProjectionError::invalid_source)?;
-    let methods = form_method_facts(&module);
+    let methods = form_method_facts(&module)?;
     let owner_at = source
         .owner_chain
         .last()
@@ -227,18 +227,31 @@ pub(crate) fn project_property_event_implementation(
     )
 }
 
-fn form_method_facts(module: &ModuleProjectionSet) -> Vec<FormMethodFact<'_>> {
+fn form_method_facts(
+    module: &ModuleProjectionSet,
+) -> Result<Vec<FormMethodFact<'_>>, EventProjectionError> {
     module
         .methods()
         .iter()
         .map(|method| {
-            FormMethodFact::new(
+            Ok(FormMethodFact::new(
                 &method.name,
                 method.method_kind,
                 &method.signature,
-                method.compile.contexts.iter().map(String::as_str).collect(),
+                method
+                    .compile
+                    .contexts
+                    .as_ref()
+                    .ok_or_else(|| {
+                        EventProjectionError::invalid_source(
+                            "form method compilation contexts are unavailable",
+                        )
+                    })?
+                    .iter()
+                    .map(String::as_str)
+                    .collect(),
             )
-            .with_directive(method.compile.directive.as_deref())
+            .with_directive(method.compile.directive.as_deref()))
         })
         .collect()
 }
@@ -444,7 +457,7 @@ pub(crate) fn project_property_events_from_projection(
     inputs: &FormSemanticInputs,
     module: &ModuleProjectionSet,
 ) -> Result<Vec<EventProjection>, EventProjectionError> {
-    let methods = form_method_facts(module);
+    let methods = form_method_facts(module)?;
     Ok(project_form_owner_events(
         &evidence.context,
         &inputs.owners,

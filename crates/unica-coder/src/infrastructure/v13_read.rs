@@ -872,19 +872,18 @@ impl<'a> LogicalViewReadAuthority<'a> {
             ViewError::detailed(RefusalDetail::SourceUnreadable, error.to_string())
         })?;
         payload.insert("collections".to_string(), collections);
-        // Ошибка проекции пофактовой части вида оставляет её поле `null`, и
-        // без этой записи `view` выдал бы непрочитанное за отсутствующее:
-        // узел называет его в `limits`, а ветвь без данных отказывает, а не
-        // отвечает пустым списком. Остальные диагностики читателя (например,
-        // значения заполнения реквизитов) сюда сознательно не входят: их поля
-        // не обнуляют ветвей и адресованы внутренним индексом, а не именем.
-        let unreadable = local
+        // Preserve property diagnostics alongside independent facts. A missing
+        // prerequisite limits its dependent collection rather than the owner.
+        let mut unreadable = local
             .diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.severity == MetaDiagnosticSeverity::Error)
             .filter_map(|diagnostic| {
                 let field = diagnostic.field.as_deref()?;
-                field.starts_with("details.").then(|| {
+                (field.starts_with("details.")
+                    || field.starts_with("properties.")
+                    || field.starts_with("relations."))
+                .then(|| {
                     json!({
                         "field": field,
                         "message": diagnostic.message,
@@ -892,9 +891,6 @@ impl<'a> LogicalViewReadAuthority<'a> {
                 })
             })
             .collect::<Vec<_>>();
-        if !unreadable.is_empty() {
-            payload.insert("unreadable".to_string(), Value::Array(unreadable));
-        }
         // Заимствование отвечает только в наборе расширения; там оно есть у
         // всякого объекта, и «своё» — такой же ответ, как «заимствовано».
         if let Some(borrowing) = read.borrowing {
@@ -906,13 +902,26 @@ impl<'a> LogicalViewReadAuthority<'a> {
         // Предопределённые элементы — содержимое самого объекта, и писатель у
         // них есть. Без читателя агент, добавивший элемент, не может
         // подтвердить результат: ни счёта, ни списка, ни адреса.
-        if let Some(predefined) = self.read.predefined_items(
+        match self.read.predefined_items(
             target,
             local.kind,
             local.predefined_code_type.as_deref(),
             &mut || self.read_checkpoint(),
-        )? {
-            insert_serialized(&mut payload, "predefinedItems", &predefined)?;
+        ) {
+            Ok(Some(predefined)) => {
+                insert_serialized(&mut payload, "predefinedItems", &predefined)?
+            }
+            Ok(None) => {}
+            Err(error)
+                if local.predefined_code_type.is_none()
+                    && error.detail() == Some(RefusalDetail::SourceUnreadable) =>
+            {
+                unreadable.push(json!({"field": "predefinedItems", "message": error.to_string()}));
+            }
+            Err(error) => return Err(error),
+        }
+        if !unreadable.is_empty() {
+            payload.insert("unreadable".to_string(), Value::Array(unreadable));
         }
         Ok(Value::Object(payload))
     }
@@ -2360,43 +2369,78 @@ fn common_module_properties(
             .map_err(|error| ViewError::detailed(RefusalDetail::SourceUnreadable, error))?
             .extends
             .is_some_and(|id| uuid::Uuid::parse_str(&id).is_ok());
-    let boolean = |name| -> Result<bool, ViewError> {
-        let raw = xml_descendant_text(root, name).ok_or_else(|| {
-            ViewError::detailed(
+    use crate::domain::metadata::{
+        MetaInfoPropertyAbsence, MetaInfoPropertyValue, META_INFO_PROPERTY_PROFILE,
+    };
+    const NS: &str = "http://v8.1c.ru/8.3/MDClasses";
+    let objects = root
+        .children()
+        .filter(roxmltree::Node::is_element)
+        .collect::<Vec<_>>();
+    let [object] = objects.as_slice() else {
+        return Err(ViewError::detailed(
+            RefusalDetail::SourceUnreadable,
+            "common module descriptor must contain one object",
+        ));
+    };
+    if !object.has_tag_name((NS, "CommonModule")) {
+        return Err(ViewError::detailed(
+            RefusalDetail::SourceUnreadable,
+            "common module descriptor has the wrong object kind",
+        ));
+    }
+    let containers = object
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "Properties")
+        .collect::<Vec<_>>();
+    let properties = match containers.as_slice() {
+        [node] if node.tag_name().namespace() == Some(NS) => *node,
+        _ => {
+            return Err(ViewError::detailed(
+                RefusalDetail::SourceUnreadable,
+                "common module descriptor must contain one direct Properties container",
+            ))
+        }
+    };
+    let observe = |name| {
+        let value = crate::infrastructure::native_operations::meta::observe_meta_info_property(
+            properties,
+            MetadataKind::CommonModule,
+            name,
+        )
+        .map_err(|error| ViewError::detailed(RefusalDetail::SourceUnreadable, error.message))?;
+        if value.is_none()
+            && META_INFO_PROPERTY_PROFILE.absence(MetadataKind::CommonModule, name, borrowed)
+                == MetaInfoPropertyAbsence::Required
+        {
+            return Err(ViewError::detailed(
                 RefusalDetail::SourceUnreadable,
                 format!("common module descriptor has no {name} property"),
-            )
-        })?;
-        match raw {
-            "true" => Ok(true),
-            "false" => Ok(false),
+            ));
+        }
+        Ok(value)
+    };
+    let boolean = |name| -> Result<Option<bool>, ViewError> {
+        match observe(name)? {
+            Some(MetaInfoPropertyValue::Boolean(value)) => Ok(Some(value)),
+            None => Ok(None),
             _ => Err(ViewError::detailed(
                 RefusalDetail::SourceUnreadable,
                 format!("common module {name} property is not boolean"),
             )),
         }
     };
-    let privileged = match root
-        .descendants()
-        .find(|node| node.is_element() && node.tag_name().name() == "Privileged")
-    {
-        None if borrowed => None,
-        None => {
+    let return_values_reuse = match observe("ReturnValuesReuse")? {
+        Some(MetaInfoPropertyValue::String(value)) if !value.trim().is_empty() => {
+            Some(value.trim().to_string())
+        }
+        None => None,
+        _ => {
             return Err(ViewError::detailed(
                 RefusalDetail::SourceUnreadable,
-                "common module descriptor has no Privileged property",
-            ));
+                "common module ReturnValuesReuse property is empty or malformed",
+            ))
         }
-        Some(node) => match node.text().map(str::trim) {
-            Some("true") => Some(true),
-            Some("false") => Some(false),
-            _ => {
-                return Err(ViewError::detailed(
-                    RefusalDetail::SourceUnreadable,
-                    "common module Privileged property is not boolean",
-                ));
-            }
-        },
     };
     Ok(CommonModuleProperties {
         global: boolean("Global")?,
@@ -2405,23 +2449,9 @@ fn common_module_properties(
         external_connection: boolean("ExternalConnection")?,
         client_ordinary_application: boolean("ClientOrdinaryApplication")?,
         server_call: boolean("ServerCall")?,
-        privileged,
-        return_values_reuse: xml_descendant_text(root, "ReturnValuesReuse")
-            .ok_or_else(|| {
-                ViewError::detailed(
-                    RefusalDetail::SourceUnreadable,
-                    "common module descriptor has no ReturnValuesReuse property",
-                )
-            })?
-            .to_string(),
+        privileged: boolean("Privileged")?,
+        return_values_reuse,
     })
-}
-
-fn xml_descendant_text<'a>(root: roxmltree::Node<'a, 'a>, name: &str) -> Option<&'a str> {
-    root.descendants()
-        .find(|node| node.is_element() && node.tag_name().name() == name)
-        .and_then(|node| node.text())
-        .map(str::trim)
 }
 
 fn module_title(at: &QualifiedAddress, capability: ModuleCapability) -> String {
@@ -2443,6 +2473,32 @@ fn module_title(at: &QualifiedAddress, capability: ModuleCapability) -> String {
 }
 
 fn module_projection_view(
+    requested: &QualifiedAddress,
+    prefix_len: usize,
+    projections: &ModuleProjectionSet,
+    filter: &ModuleViewFilter,
+) -> Result<NodeViewData, ViewError> {
+    let unknown = projections
+        .summary()
+        .props
+        .common_module
+        .as_ref()
+        .is_some_and(|props| !props.execution_contexts_known());
+    if unknown && filter.context.is_some() {
+        return Err(ViewError::detailed(
+            RefusalDetail::SourceUnreadable,
+            "cannot filter by compilation context: common-module execution properties are absent",
+        ));
+    }
+    let view = module_projection_view_data(requested, prefix_len, projections, filter)?;
+    Ok(if unknown {
+        view.with_limit("Compilation contexts are unknown because common-module execution properties are absent")
+    } else {
+        view
+    })
+}
+
+fn module_projection_view_data(
     requested: &QualifiedAddress,
     prefix_len: usize,
     projections: &ModuleProjectionSet,
@@ -2643,6 +2699,7 @@ fn module_method_matches_filter(method: &MethodProjection, filter: &ModuleViewFi
                 .compile
                 .contexts
                 .iter()
+                .flatten()
                 .any(|candidate| module_context_matches(context, candidate))
         })
 }
@@ -2676,6 +2733,7 @@ fn module_body_line_matches_filter(
                 .compile
                 .contexts
                 .iter()
+                .flatten()
                 .any(|candidate| module_context_matches(context, candidate))
             && projections
                 .compilation()
@@ -2685,6 +2743,7 @@ fn module_body_line_matches_filter(
                     range
                         .contexts
                         .iter()
+                        .flatten()
                         .any(|candidate| module_context_matches(context, candidate))
                 })
     })

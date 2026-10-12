@@ -642,14 +642,7 @@ pub(crate) mod tests {
                 properties: Vec::new(),
                 declarations: crate::domain::metadata::MetaInfoDeclarations::default(),
                 predefined_code_type: Some("String".to_string()),
-                relations: crate::domain::metadata::MetaRelationsData {
-                    owners: Vec::new(),
-                    register_records: Vec::new(),
-                    based_on: Vec::new(),
-                    input_by_string: Vec::new(),
-                    data_lock_fields: None,
-                    source: Vec::new(),
-                },
+                relations: crate::domain::metadata::MetaRelationsData::default(),
                 collections: crate::domain::metadata::MetaCollectionsData {
                     attributes: Vec::new(),
                     columns: Vec::new(),

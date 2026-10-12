@@ -4,18 +4,18 @@
      tests/fixtures/acceptance/scenario-corpus.json. Не правьте вручную:
      измените корпус и выполните `python scripts/ci/render-acceptance-registry.py --write`. -->
 
-Корпус держит **388 сценариев** реальных задач разработчика конфигурации и **917 шагов** канонических вызовов `unica.*`. Каждый шаг заморожен в одном из классов ответа. Исходный профиль `tests/ci/test_acceptance_scenarios.py` исполняется против собранного `target/debug/unica`; основное рабочее пространство — `tests/fixtures/acceptance/workspace/`; сценарии форматных проб (выгрузка 2.21, без версии, без файла поддержки) идут на выведенном из него пространстве `tests/fixtures/acceptance/workspace-format/`, а сценарии ответа до допуска наборов — на пустом `tests/fixtures/acceptance/workspace-bare/`. Профиль delivery использует отдельную `tests/fixtures/acceptance/workspace-symbol/` с контрольным методом. СКД, MXL и вставка BSL проверяются на отдельных `workspace-dcs/`, `workspace-mxl/` и `workspace-code/`; точное расположение узлов — на `workspace-resolve/`; агентные сценарии выбираются большим набором `tests/agent_evaluation/`. Источник истины — JSON корпуса; этот документ — его рендер для людей, и проверка на расхождение входит в тот же тест.
+Корпус держит **389 сценариев** реальных задач разработчика конфигурации и **929 шагов** канонических вызовов `unica.*`. Каждый шаг заморожен в одном из классов ответа. Исходный профиль `tests/ci/test_acceptance_scenarios.py` исполняется против собранного `target/debug/unica`; основное рабочее пространство — `tests/fixtures/acceptance/workspace/`; сценарии форматных проб (выгрузка 2.21, без версии, без файла поддержки) идут на выведенном из него пространстве `tests/fixtures/acceptance/workspace-format/`, а сценарии ответа до допуска наборов — на пустом `tests/fixtures/acceptance/workspace-bare/`. Профиль delivery использует отдельную `tests/fixtures/acceptance/workspace-symbol/` с контрольным методом. СКД, MXL и вставка BSL проверяются на отдельных `workspace-dcs/`, `workspace-mxl/` и `workspace-code/`; точное расположение узлов — на `workspace-resolve/`; агентные сценарии выбираются большим набором `tests/agent_evaluation/`. Источник истины — JSON корпуса; этот документ — его рендер для людей, и проверка на расхождение входит в тот же тест.
 
-Профили исполнения: `source` — 376 сценария; `delivery/bsl-analyzer` — 7; `agent-evaluation/codex` — 2; `fault-injection/analyzer-jsonl-fault` — 3. Delivery-драйвер скачивает закреплённый движок с проверкой SHA256 и выполняет MCP на отдельной синтетической фикстуре. Ошибка доставки или незавершённая задача проваливает прогон. Агентный профиль исполняется отдельным большим набором в release/all: реальный Codex, закрытый аудит инструментов, проверки итогового XML и независимый смысловой reviewer; отсутствие CLI или авторизации означает отказ прогона. Fault-injection исполняет управляемый нативный producer повреждённого JSONL через настоящий процесс и публичный check; это не проверка опубликованного анализатора. Этот medium-профиль обязателен в очереди и не скачивает движок. Runtime добавляется с исполняемым драйвером; неизвестный профиль не пропускается.
+Профили исполнения: `source` — 377 сценария; `delivery/bsl-analyzer` — 7; `agent-evaluation/codex` — 2; `fault-injection/analyzer-jsonl-fault` — 3. Delivery-драйвер скачивает закреплённый движок с проверкой SHA256 и выполняет MCP на отдельной синтетической фикстуре. Ошибка доставки или незавершённая задача проваливает прогон. Агентный профиль исполняется отдельным большим набором в release/all: реальный Codex, закрытый аудит инструментов, проверки итогового XML и независимый смысловой reviewer; отсутствие CLI или авторизации означает отказ прогона. Fault-injection исполняет управляемый нативный producer повреждённого JSONL через настоящий процесс и публичный check; это не проверка опубликованного анализатора. Этот medium-профиль обязателен в очереди и не скачивает движок. Runtime добавляется с исполняемым драйвером; неизвестный профиль не пропускается.
 
 ## Классы ответа шага
 
 | Класс | Что означает | Шагов |
 | --- | --- | ---: |
-| `ok` | результат | 763 |
+| `ok` | результат | 774 |
 | `refused` | умышленный типизированный отказ | 105 |
 | `ok` / `provider` / `task` | любой из: результат; провайдер недоступен; длинная задача | 26 |
-| `provider` | провайдер недоступен | 12 |
+| `provider` | провайдер недоступен | 13 |
 | `gap` | задокументированный пробел | 3 |
 | `unsupported` | закрытый список | 3 |
 | `ok` / `provider` | любой из: результат; провайдер недоступен | 2 |
@@ -278,7 +278,7 @@
 | Инструмент | Сценариев |
 | --- | ---: |
 | `unica.apply` | 216 |
-| `unica.view` | 105 |
+| `unica.view` | 106 |
 | `unica.check` | 64 |
 | `unica.search` | 33 |
 | `unica.docs` | 26 |
@@ -287,7 +287,7 @@
 
 ## Каталог сценариев
 
-Области: Навигация и чтение (52) · Свойства объектов (29) · Реквизиты и состав (46) · Создание и удаление объектов (22) · Формы (27) · Код BSL (37) · Роли и права (15) · СКД (41) · Макеты (14) · Подсистемы и интерфейс (12) · XDTO и обмены (9) · Сборка, ИБ и выгрузка (2) · Проверки качества (20) · Тесты и запуск (1) · Документация и стандарты (19) · Поддержка поставщика (16) · Расширения конфигурации (7) · Объекты метаданных (3) · Рабочее пространство (4) · Метаданные (2) · Приёмочный корпус (8) · Известные пробелы (2)
+Области: Навигация и чтение (53) · Свойства объектов (29) · Реквизиты и состав (46) · Создание и удаление объектов (22) · Формы (27) · Код BSL (37) · Роли и права (15) · СКД (41) · Макеты (14) · Подсистемы и интерфейс (12) · XDTO и обмены (9) · Сборка, ИБ и выгрузка (2) · Проверки качества (20) · Тесты и запуск (1) · Документация и стандарты (19) · Поддержка поставщика (16) · Расширения конфигурации (7) · Объекты метаданных (3) · Рабочее пространство (4) · Метаданные (2) · Приёмочный корпус (8) · Известные пробелы (2)
 
 ### Навигация и чтение
 
@@ -345,6 +345,7 @@
 | S384 | Разрешить методы, тела и вложенные области в разных модулях | `source` | `resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve` | `ok`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`refused` |
 | S385 | Разрешить реквизиты и элементы форм в содержащий их XML | `source` | `resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve`<br>`resolve` | `ok`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`refused`<br>`refused` |
 | S386 | Сохранить обратное разрешение пути и расположение владельца | `source` | `resolve`<br>`resolve`<br>`resolve`<br>`resolve` | `ok`<br>`ok`<br>`ok`<br>`ok` |
+| S389 | Прочитать неполные заимствованные метаданные без родителя: сохранить локальные факты и исходник BSL, неизвестность контекстов и отказ зависимого фильтра без записи файлов | `source` | `view`<br>`view`<br>`view`<br>`view`<br>`view`<br>`view`<br>`view`<br>`view`<br>`view`<br>`view`<br>`view`<br>`view` | `ok`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`provider`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`ok`<br>`ok` |
 
 ### Свойства объектов
 

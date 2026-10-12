@@ -117,6 +117,77 @@ fn borrowed_common_module_view_serializes_unknown_privileged_without_losing_cont
     assert!(data["branches"].is_array());
 }
 
+#[test]
+fn borrowed_common_module_missing_reuse_preserves_methods_and_source() {
+    // Synthetic omission reproduces #1304; it is not a platform export.
+    let fixture = RealReaderFixture::new();
+    let configuration = fs::read_to_string(fixture.source.join("Configuration.xml")).unwrap();
+    write(
+        &fixture.source.join("Configuration.xml"),
+        &configuration.replace(
+            "</ChildObjects>",
+            "<CommonModule>CorpusModule</CommonModule></ChildObjects>",
+        ),
+    );
+    let descriptor = fixture_text("platform_8_3_27/cfe_borrow/extension-common-module.xml")
+        .replace("<ReturnValuesReuse>DontUse</ReturnValuesReuse>", "");
+    let path = fixture.source.join("CommonModules/CorpusModule.xml");
+    write(&path, &descriptor);
+    let module = fixture
+        .source
+        .join("CommonModules/CorpusModule/Ext/Module.bsl");
+    let source = "Процедура Проверка() Экспорт\nКонецПроцедуры\n";
+    write(&module, source);
+    let service = fixture.extension_view_service();
+    let view = service.view(ViewRequest::new("main:CommonModule.CorpusModule").unwrap());
+    assert!(view.ok, "{:?}", view.diagnostics);
+    let data = view.data.unwrap();
+    assert_eq!(
+        data["props"]["commonModule"]["returnValuesReuse"],
+        serde_json::Value::Null
+    );
+    for at in [
+        "main:CommonModule.CorpusModule.Method",
+        "main:CommonModule.CorpusModule.Method.Проверка",
+        "main:CommonModule.CorpusModule.Body",
+    ] {
+        let view = service.view(ViewRequest::new(at).unwrap());
+        assert!(view.ok, "{at}: {:?}", view.diagnostics);
+    }
+    assert_eq!(fs::read_to_string(path).unwrap(), descriptor);
+    assert_eq!(fs::read_to_string(module).unwrap(), source);
+}
+
+#[test]
+fn common_module_present_damage_is_not_missing() {
+    // Synthetic corruptions exercise reader boundaries, not platform validity.
+    let borrowed = fixture_text("platform_8_3_27/cfe_borrow/extension-common-module.xml");
+    for value in [
+        "<Server/>",
+        "<Server>maybe</Server>",
+        "<Server>false</Server><Server>true</Server>",
+        "<Server xmlns=\"urn:foreign\">false</Server>",
+        "<Server><Nested>false</Nested></Server>",
+        "<Server extra=\"false\">false</Server>",
+    ] {
+        let invalid = borrowed.replace("<Server>false</Server>", value);
+        assert!(
+            super::common_module_properties(invalid.as_bytes(), SourceSetKind::Extension).is_err(),
+            "{value}"
+        );
+    }
+    for value in [
+        "<ReturnValuesReuse/>",
+        "<ReturnValuesReuse><Nested>DontUse</Nested></ReturnValuesReuse>",
+    ] {
+        let invalid = borrowed.replace("<ReturnValuesReuse>DontUse</ReturnValuesReuse>", value);
+        assert!(
+            super::common_module_properties(invalid.as_bytes(), SourceSetKind::Extension).is_err(),
+            "{value}"
+        );
+    }
+}
+
 fn configuration_payload(
     reader: &ProviderReadAuthority,
 ) -> Result<serde_json::Value, crate::application::v13::view::ViewError> {
@@ -1683,6 +1754,14 @@ fn predefined_items_other_owner_fields_survive_addressed_reads() {
         ),
     ] {
         write_metadata_owner(&fixture.source, directory, kind, name, "");
+        if kind == "ChartOfCalculationTypes" {
+            let path = fixture.source.join(format!("{directory}/{name}.xml"));
+            let xml = fs::read_to_string(&path).unwrap();
+            write(
+                &path,
+                &xml.replace("</Properties>", "<CodeType>String</CodeType></Properties>"),
+            );
+        }
     }
     for (directory, name, fixture_file) in [
         ("ChartsOfAccounts", "Accounts", "ChartOfAccounts.xml"),
@@ -4842,7 +4921,7 @@ impl RealReaderFixture {
                 " xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"",
                 " xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">",
                 "<Name>Items</Name><Hierarchical>true</Hierarchical>",
-                "<CodeLength>11</CodeLength>",
+                "<CodeType>String</CodeType><CodeLength>11</CodeLength>",
                 "<Owners><xr:Item xsi:type=\"xr:MDObjectRef\">Catalog.Владельцы</xr:Item></Owners>",
                 "<InputByString><xr:Field>Catalog.Items.Attribute.Code</xr:Field></InputByString>",
                 "<DataLockFields><xr:Field>Catalog.Items.Attribute.Code</xr:Field></DataLockFields>",
@@ -7478,4 +7557,313 @@ fn retained_mxl_check_keeps_unbounded_body_read_and_format_warnings() {
     );
     fixture.cancellation.cancel();
     assert!(authority.mxl_validation_input(&at).is_err());
+}
+
+#[test]
+fn platform_borrowed_common_module_preserves_unknown_contexts_and_independent_facts() {
+    let fixture = RealReaderFixture::new();
+    let configuration = fs::read_to_string(fixture.source.join("Configuration.xml")).unwrap();
+    write(
+        &fixture.source.join("Configuration.xml"),
+        &configuration.replace(
+            "</ChildObjects>",
+            "<CommonModule>CorpusModule</CommonModule></ChildObjects>",
+        ),
+    );
+    let descriptor =
+        fixture_text("platform_8_3_27/incomplete_borrowed/extension-common-module.xml");
+    let path = fixture.source.join("CommonModules/CorpusModule.xml");
+    write(&path, &descriptor);
+    let module = fixture
+        .source
+        .join("CommonModules/CorpusModule/Ext/Module.bsl");
+    let source = "#Если Сервер Тогда\nПроцедура Проверка() Экспорт\nКонецПроцедуры\n#КонецЕсли\n";
+    write(&module, source);
+    let service = fixture.extension_view_service();
+    let view = service.view(ViewRequest::new("main:CommonModule.CorpusModule").unwrap());
+    assert!(view.ok, "{view:?}");
+    let data = view.data.unwrap();
+    let props = data["props"]["commonModule"].as_object().unwrap();
+    assert_eq!(props.len(), 8);
+    assert!(props.values().all(serde_json::Value::is_null));
+    assert!(data["limits"]
+        .as_array()
+        .is_some_and(|limits| !limits.is_empty()));
+    for at in [
+        "main:CommonModule.CorpusModule.Method",
+        "main:CommonModule.CorpusModule.Method.Проверка",
+        "main:CommonModule.CorpusModule.Method.Проверка.Body",
+        "main:CommonModule.CorpusModule.Body",
+    ] {
+        let view = service.view(ViewRequest::new(at).unwrap());
+        assert!(view.ok, "{at}: {view:?}");
+        let filtered = service.view(ViewRequest::new(at).unwrap().with_filter(
+            serde_json::Map::from_iter([("context".to_string(), json!("server"))]),
+        ));
+        assert!(
+            !filtered.ok,
+            "unknown contexts must not produce a filtered empty list: {at}"
+        );
+    }
+    let method = service
+        .view(ViewRequest::new("main:CommonModule.CorpusModule.Method.Проверка").unwrap())
+        .data
+        .unwrap();
+    assert_eq!(
+        method["props"]["compile"]["contexts"],
+        serde_json::Value::Null
+    );
+    assert_eq!(method["props"]["compile"]["guard"], "Server");
+    assert_eq!(method["props"]["export"], true);
+    let compilation = service
+        .view(ViewRequest::new("main:CommonModule.CorpusModule.Compilation").unwrap())
+        .data
+        .unwrap();
+    assert_eq!(compilation["items"][0]["contexts"], serde_json::Value::Null);
+    assert_eq!(fs::read_to_string(&path).unwrap(), descriptor);
+    assert_eq!(fs::read_to_string(&module).unwrap(), source);
+
+    // A synthetic unknown descriptive property cannot prevent BSL exploration.
+    write(
+        &path,
+        &descriptor.replace(
+            "</Properties>",
+            "<FutureDescription>Observed</FutureDescription></Properties>",
+        ),
+    );
+    assert!(
+        fixture
+            .extension_view_service()
+            .view(ViewRequest::new("main:CommonModule.CorpusModule.Method.Проверка").unwrap())
+            .ok
+    );
+}
+
+#[test]
+fn common_module_absence_policy_keeps_ordinary_properties_required() {
+    let ordinary = fixture_text("platform_8_3_27/incomplete_borrowed/parent-common-module.xml");
+    let borrowed = fixture_text("platform_8_3_27/incomplete_borrowed/extension-common-module.xml");
+    for name in [
+        "Global",
+        "ClientManagedApplication",
+        "Server",
+        "ExternalConnection",
+        "ClientOrdinaryApplication",
+        "ServerCall",
+        "Privileged",
+        "ReturnValuesReuse",
+    ] {
+        let doc = roxmltree::Document::parse(ordinary.trim_start_matches('\u{feff}')).unwrap();
+        let node = doc
+            .descendants()
+            .find(|node| node.has_tag_name(name))
+            .unwrap();
+        let omitted = ordinary.replace(&doc.input_text()[node.range()], "");
+        assert!(
+            super::common_module_properties(omitted.as_bytes(), SourceSetKind::Configuration)
+                .is_err(),
+            "{name}"
+        );
+        let raw = if name == "ReturnValuesReuse" {
+            "DuringSession"
+        } else {
+            "false"
+        };
+        let explicit = borrowed.replace(
+            "</Properties>",
+            &format!("<{name}>{raw}</{name}></Properties>"),
+        );
+        let observed = serde_json::to_value(
+            super::common_module_properties(explicit.as_bytes(), SourceSetKind::Extension).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            observed
+                .as_object()
+                .unwrap()
+                .values()
+                .filter(|value| !value.is_null())
+                .count(),
+            1
+        );
+        let invalid = borrowed.replace(
+            "</Properties>",
+            &format!("<{name}>broken</{name}></Properties>"),
+        );
+        assert!(
+            super::common_module_properties(invalid.as_bytes(), SourceSetKind::Extension).is_err(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn missing_or_damaged_code_type_limits_only_dependent_predefined_read() {
+    // Synthetic combinations exercise the reader; platform acceptance of
+    // borrowed predefined data without CodeType has not been established.
+    for replacement in [
+        "",
+        "<CodeType/>",
+        "<CodeType>broken</CodeType>",
+        "<CodeType>String</CodeType><CodeType>Number</CodeType>",
+    ] {
+        let fixture = RealReaderFixture::new();
+        let path = fixture.source.join("Catalogs/Items.xml");
+        let original = fs::read_to_string(&path).unwrap();
+        assert!(original.contains("<CodeType>String</CodeType>"));
+        let descriptor = original.replace("<CodeType>String</CodeType>", replacement);
+        write(&path, &descriptor);
+        let service = fixture.view_service();
+        let result = service.view(ViewRequest::new("main:Catalog.Items").unwrap());
+        assert!(result.ok, "{result:?}");
+        let data = result.data.unwrap();
+        assert_eq!(data["props"]["CodeLength"], 11);
+        assert!(data["limits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|limit| limit.as_str().unwrap().contains("predefinedItems")));
+        assert_eq!(
+            data["limits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|limit| limit.as_str().unwrap().contains("properties.CodeType")),
+            !replacement.is_empty()
+        );
+        let dependent =
+            service.view(ViewRequest::new("main:Catalog.Items.PredefinedItem").unwrap());
+        assert!(!dependent.ok, "{dependent:?}");
+        assert_eq!(fs::read_to_string(path).unwrap(), descriptor);
+    }
+}
+
+#[test]
+fn missing_relation_preserves_known_targets_and_reports_incompleteness() {
+    // Synthetic relation variants isolate reader behavior; the raw platform
+    // borrowed catalog separately proves that these containers may be absent.
+    for (owners, expected_unknown) in [
+        ("", true),
+        ("<Owners/>", false),
+        ("<Owners><Broken/></Owners>", true),
+        ("<Owners xmlns=\"urn:foreign\"/>", true),
+    ] {
+        let fixture = RealReaderFixture::new();
+        let path = fixture.source.join("Catalogs/Items.xml");
+        let xml = fs::read_to_string(&path).unwrap();
+        let document = roxmltree::Document::parse(&xml).unwrap();
+        let owner_range = document
+            .descendants()
+            .find(|node| node.has_tag_name("Owners"))
+            .unwrap()
+            .range();
+        let mut xml = xml.clone();
+        xml.replace_range(owner_range, "");
+        let xml = xml.replace("</Properties>", &format!(r#"{owners}<BasedOn xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><xr:Item xsi:type="xr:MDObjectRef">Document.Order</xr:Item></BasedOn></Properties>"#));
+        write(&path, &xml);
+        let service = fixture.view_service();
+        for at in ["main:Catalog.Items", "main:Catalog.Items.Relation"] {
+            let result = service.view(ViewRequest::new(at).unwrap());
+            assert!(result.ok, "{result:?}");
+            let data = result.data.unwrap();
+            let has_limit = data["limits"].as_array().is_some_and(|limits| {
+                limits
+                    .iter()
+                    .any(|limit| limit.as_str().unwrap().contains("relations.owners"))
+            });
+            assert_eq!(has_limit, expected_unknown, "{data}");
+            if at.ends_with(".Relation") {
+                assert!(
+                    data["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["relation"] == "basedOn"
+                            && item["at"] == "main:Document.Order"),
+                    "{data}"
+                );
+            }
+        }
+        assert_eq!(fs::read_to_string(path).unwrap(), xml);
+    }
+}
+
+#[test]
+fn specialized_relation_limits_distinguish_absence_empty_and_damage() {
+    // Synthetic edits exercise each reader route. Absence of BaseCalculationTypes
+    // also occurs in the unmodified platform export used by acceptance S389.
+    for (directory, kind, name, property, field) in [
+        (
+            "DocumentJournals",
+            "DocumentJournal",
+            "Журнал",
+            "RegisteredDocuments",
+            "registeredDocuments",
+        ),
+        (
+            "ChartsOfCalculationTypes",
+            "ChartOfCalculationTypes",
+            "ВидыРасчета",
+            "BaseCalculationTypes",
+            "baseCalculationTypes",
+        ),
+        (
+            "WebServices",
+            "WebService",
+            "Exchange",
+            "XDTOPackages",
+            "xdtoPackages",
+        ),
+    ] {
+        for variant in ["missing", "empty", "broken", "duplicate", "foreign"] {
+            let fixture = RealReaderFixture::new();
+            let path = fixture.source.join(format!("{directory}/{name}.xml"));
+            let xml = fs::read_to_string(&path).unwrap();
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let range = doc
+                .descendants()
+                .find(|node| node.has_tag_name(property))
+                .unwrap()
+                .range();
+            let replacement = match variant {
+                "missing" => String::new(),
+                "empty" => format!("<{property}/>"),
+                "broken" => format!("<{property}><Broken/></{property}>"),
+                "duplicate" => format!("<{property}/><{property}/>"),
+                "foreign" => format!("<{property} xmlns=\"urn:foreign\"/>"),
+                _ => unreachable!(),
+            };
+            let mut xml = xml.clone();
+            xml.replace_range(range, &replacement);
+            write(&path, &xml);
+            let service = fixture.view_service();
+            for suffix in ["", ".Relation"] {
+                let result =
+                    service.view(ViewRequest::new(&format!("main:{kind}.{name}{suffix}")).unwrap());
+                assert!(result.ok, "{variant}: {result:?}");
+                let data = result.data.unwrap();
+                let relevant = data["limits"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|limit| {
+                        limit.contains(&format!("details.{field}"))
+                            || limit.contains(&format!("properties.{property}"))
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    !relevant.is_empty(),
+                    variant != "empty",
+                    "{variant}: {data}"
+                );
+                assert_eq!(
+                    relevant.iter().any(|limit| limit.contains(" is absent;")),
+                    variant == "missing",
+                    "{variant}: {data}"
+                );
+            }
+            assert_eq!(fs::read_to_string(path).unwrap(), xml);
+        }
+    }
 }

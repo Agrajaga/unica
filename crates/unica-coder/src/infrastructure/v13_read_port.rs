@@ -915,7 +915,10 @@ impl ProviderReadAuthority {
                 items: Vec::new(),
             }));
         };
-        let code_type = match code_type.unwrap_or("String") {
+        let code_type = match code_type.ok_or_else(|| ViewError::detailed(
+            RefusalDetail::SourceUnreadable,
+            "predefined code validation is unavailable because the owner CodeType is absent or invalid",
+        ))? {
             "String" => crate::infrastructure::native_operations::meta::PredefinedCodeType::String,
             "Number" => crate::infrastructure::native_operations::meta::PredefinedCodeType::Number,
             other => {

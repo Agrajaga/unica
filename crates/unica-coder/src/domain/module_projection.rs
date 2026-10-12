@@ -40,14 +40,23 @@ impl BranchKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CommonModuleProperties {
-    pub(crate) global: bool,
-    pub(crate) client_managed_application: bool,
-    pub(crate) server: bool,
-    pub(crate) external_connection: bool,
-    pub(crate) client_ordinary_application: bool,
-    pub(crate) server_call: bool,
+    pub(crate) global: Option<bool>,
+    pub(crate) client_managed_application: Option<bool>,
+    pub(crate) server: Option<bool>,
+    pub(crate) external_connection: Option<bool>,
+    pub(crate) client_ordinary_application: Option<bool>,
+    pub(crate) server_call: Option<bool>,
     pub(crate) privileged: Option<bool>,
-    pub(crate) return_values_reuse: String,
+    pub(crate) return_values_reuse: Option<String>,
+}
+
+impl CommonModuleProperties {
+    pub(crate) fn execution_contexts_known(&self) -> bool {
+        self.client_managed_application.is_some()
+            && self.client_ordinary_application.is_some()
+            && self.server.is_some()
+            && self.external_connection.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -126,7 +135,7 @@ pub(crate) struct CompilationFacts {
     pub(crate) directive: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) guard: Option<String>,
-    pub(crate) contexts: Vec<String>,
+    pub(crate) contexts: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) form_context: Option<bool>,
     pub(crate) conditional_body: bool,
@@ -324,7 +333,7 @@ pub(crate) struct CompilationProjection {
     pub(crate) from_line: usize,
     pub(crate) to_line: usize,
     pub(crate) guard: String,
-    pub(crate) contexts: Vec<String>,
+    pub(crate) contexts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -509,6 +518,9 @@ impl ModuleProjectionSet {
                 ProjectionError::not_found(format!("method `{method_at}` was not found"))
             })?;
         if let Some(context) = context {
+            if method.compile.contexts.is_none() {
+                return Err(ProjectionError::invalid_context("compilation contexts are unknown because common-module execution properties are absent"));
+            }
             const CONTEXTS: &[&str] = &[
                 "server",
                 "externalConnection",
@@ -530,6 +542,7 @@ impl ModuleProjectionSet {
                 .compile
                 .contexts
                 .iter()
+                .flatten()
                 .any(|candidate| candidate == context)
             {
                 return Ok(BodyPage {
@@ -556,9 +569,13 @@ impl ModuleProjectionSet {
                     .filter(|range| line.line >= range.from_line && line.line <= range.to_line)
                     .collect::<Vec<_>>();
                 covering.is_empty()
-                    || covering
-                        .iter()
-                        .all(|range| range.contexts.iter().any(|candidate| candidate == context))
+                    || covering.iter().all(|range| {
+                        range
+                            .contexts
+                            .iter()
+                            .flatten()
+                            .any(|candidate| candidate == context)
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -753,7 +770,7 @@ mod tests {
             compile: CompilationFacts {
                 directive: Some("&НаСервере".to_string()),
                 guard: Some("Server".to_string()),
-                contexts: vec!["server".to_string()],
+                contexts: Some(vec!["server".to_string()]),
                 form_context: None,
                 conditional_body: true,
             },
@@ -808,7 +825,7 @@ mod tests {
             from_line: 7,
             to_line: 7,
             guard: "Server".to_string(),
-            contexts: vec!["server".to_string()],
+            contexts: Some(vec!["server".to_string()]),
         };
         let body = [
             BodyLine {
@@ -947,14 +964,14 @@ mod tests {
     #[test]
     fn common_module_flags_serialize_exactly_once_and_never_become_contexts() {
         let props = ModuleProperties::common(CommonModuleProperties {
-            global: false,
-            client_managed_application: true,
-            server: true,
-            external_connection: true,
-            client_ordinary_application: false,
-            server_call: false,
+            global: Some(false),
+            client_managed_application: Some(true),
+            server: Some(true),
+            external_connection: Some(true),
+            client_ordinary_application: Some(false),
+            server_call: Some(false),
             privileged: Some(false),
-            return_values_reuse: "DuringRequest".to_string(),
+            return_values_reuse: Some("DuringRequest".to_string()),
         });
         let mut common_identity = identity(props);
         common_identity.at = QualifiedAddress::parse("main:CommonModule.ЗаказыСервер").unwrap();
@@ -1025,7 +1042,7 @@ mod tests {
             compile: CompilationFacts {
                 directive: None,
                 guard: None,
-                contexts: vec!["server".to_string()],
+                contexts: Some(vec!["server".to_string()]),
                 form_context: None,
                 conditional_body: false,
             },
