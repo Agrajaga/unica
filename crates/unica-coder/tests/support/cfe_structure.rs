@@ -323,3 +323,79 @@ fn canonical_stdio_borrow_refresh_preserves_module_and_identity() {
     }
     mcp.finish();
 }
+
+#[test]
+fn canonical_stdio_views_borrowed_common_module_without_return_values_reuse() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let source = workspace.join("ext");
+    fs::create_dir_all(source.join("CommonModules/CorpusModule/Ext")).unwrap();
+    let project =
+        "format: DESIGNER\nsource-set:\n  - name: ext\n    type: EXTENSION\n    path: ext\n";
+    let config = configuration("<CommonModule>CorpusModule</CommonModule>", true);
+    let borrowed = include_str!(
+        "../../../../tests/fixtures/platform_8_3_27/cfe_borrow/extension-common-module.xml"
+    );
+    let xml = borrowed.replace("<ReturnValuesReuse>DontUse</ReturnValuesReuse>", "");
+    assert_ne!(xml, borrowed);
+    let bsl = "Procedure Check() Export\nEndProcedure\n";
+    let files = [
+        (workspace.join("v8project.yaml"), project),
+        (source.join("Configuration.xml"), config.as_str()),
+        (source.join("CommonModules/CorpusModule.xml"), xml.as_str()),
+        (
+            source.join("CommonModules/CorpusModule/Ext/Module.bsl"),
+            bsl,
+        ),
+    ];
+    for (path, bytes) in &files {
+        fs::write(path, bytes).unwrap();
+    }
+    let mut mcp = start(&workspace, &root.path().join("state"));
+    let collection = call(&mut mcp, "unica.view", json!({"at":"ext:CommonModule"}));
+    let items = collection["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{collection:#}");
+    assert_eq!(items[0]["at"], "ext:CommonModule.CorpusModule");
+
+    let module = call(
+        &mut mcp,
+        "unica.view",
+        json!({"at":"ext:CommonModule.CorpusModule"}),
+    );
+    assert_eq!(module["data"]["kind"], "Module");
+    assert_eq!(
+        module["data"]["props"]["commonModule"],
+        json!({
+            "global": false,
+            "clientManagedApplication": false,
+            "server": false,
+            "externalConnection": true,
+            "clientOrdinaryApplication": true,
+            "serverCall": false,
+            "privileged": null,
+            "returnValuesReuse": null
+        })
+    );
+    let methods = call(
+        &mut mcp,
+        "unica.view",
+        json!({"at":"ext:CommonModule.CorpusModule.Method"}),
+    );
+    let items = methods["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{methods:#}");
+    assert_eq!(items[0]["at"], "ext:CommonModule.CorpusModule.Method.Check");
+    assert_eq!(items[0]["props"]["export"], true);
+    assert_eq!(items[0]["props"]["methodKind"], "procedure");
+    let method = call(
+        &mut mcp,
+        "unica.view",
+        json!({"at":"ext:CommonModule.CorpusModule.Method.Check"}),
+    );
+    assert_eq!(method["data"]["kind"], "Method");
+    assert_eq!(method["data"]["title"], "Check");
+    assert_eq!(method["data"]["props"]["export"], true);
+    mcp.finish();
+    for (path, bytes) in &files {
+        assert_eq!(fs::read(path).unwrap(), bytes.as_bytes(), "{path:?}");
+    }
+}
