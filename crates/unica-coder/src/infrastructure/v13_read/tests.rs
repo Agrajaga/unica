@@ -84,6 +84,76 @@ fn borrowed_common_module_keeps_missing_privileged_unknown() {
 }
 
 #[test]
+fn common_module_return_values_reuse_requires_value_unless_borrowed() {
+    let borrowed = fixture_text("platform_8_3_27/cfe_borrow/extension-common-module.xml").replace(
+        "<ServerCall>false</ServerCall>",
+        "<ServerCall>false</ServerCall><Privileged>false</Privileged>",
+    );
+    let property = "<ReturnValuesReuse>DontUse</ReturnValuesReuse>";
+    let missing = borrowed.replace(property, "");
+    let props = super::common_module_properties(missing.as_bytes(), SourceSetKind::Extension)
+        .expect("borrowed CommonModule may omit ReturnValuesReuse");
+    assert_eq!(
+        serde_json::to_value(props)
+            .unwrap()
+            .get("returnValuesReuse"),
+        Some(&serde_json::Value::Null),
+    );
+    let invalid_extends =
+        missing.replace("ac847dc9-e222-45cf-af4a-6fa863c919a8", "invalid-parent-id");
+    let own_extension = missing.replace(
+        "<ExtendedConfigurationObject>ac847dc9-e222-45cf-af4a-6fa863c919a8</ExtendedConfigurationObject>",
+        "",
+    );
+    let ordinary =
+        fixture_text("platform_8_3_27/cfe_borrow/parent-common-module.xml").replace(property, "");
+    for (label, xml, source_kind) in [
+        ("ordinary", ordinary, SourceSetKind::Configuration),
+        (
+            "borrowed descriptor in configuration",
+            missing,
+            SourceSetKind::Configuration,
+        ),
+        ("own extension", own_extension, SourceSetKind::Extension),
+        ("invalid Extends", invalid_extends, SourceSetKind::Extension),
+    ] {
+        assert!(
+            super::common_module_properties(xml.as_bytes(), source_kind).is_err(),
+            "{label} must require ReturnValuesReuse",
+        );
+    }
+    for empty in [
+        "<ReturnValuesReuse/>",
+        "<ReturnValuesReuse></ReturnValuesReuse>",
+    ] {
+        let invalid = borrowed.replace(property, empty);
+        assert!(
+            super::common_module_properties(invalid.as_bytes(), SourceSetKind::Extension).is_err(),
+            "explicit empty ReturnValuesReuse must not become null",
+        );
+    }
+    for (raw, expected) in [
+        ("DontUse", "DontUse"),
+        ("DuringRequest", "DuringRequest"),
+        ("DuringSession", "DuringSession"),
+        (" DuringRequest ", "DuringRequest"),
+        (" FutureValue ", "FutureValue"),
+        ("   ", ""),
+    ] {
+        let explicit = borrowed.replace(
+            property,
+            &format!("<ReturnValuesReuse>{raw}</ReturnValuesReuse>"),
+        );
+        let props =
+            super::common_module_properties(explicit.as_bytes(), SourceSetKind::Extension).unwrap();
+        assert_eq!(
+            serde_json::to_value(props).unwrap()["returnValuesReuse"],
+            expected
+        );
+    }
+}
+
+#[test]
 fn borrowed_common_module_view_serializes_unknown_privileged_without_losing_contexts() {
     let fixture = RealReaderFixture::new();
     let configuration = fs::read_to_string(fixture.source.join("Configuration.xml")).unwrap();

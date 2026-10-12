@@ -32021,6 +32021,98 @@
      ]
     }
    ]
+  },
+  {
+   "id": "S389",
+   "area": "Расширения конфигурации",
+   "task": "Открыть заимствованный общий модуль без ReturnValuesReuse и прочитать его метод (#1304)",
+   "workspace": "tests/fixtures/acceptance/workspace-format",
+   "wire": [
+    {
+     "tool": "unica.view",
+     "args": {
+      "at": "ext:CommonModule"
+     },
+     "expect": [
+      "ok"
+     ],
+     "assertions": [
+      {
+       "pointer": "/data/items/0/at",
+       "eq": "ext:CommonModule.CorpusModule"
+      }
+     ]
+    },
+    {
+     "tool": "unica.view",
+     "args": {
+      "at": "ext:CommonModule.CorpusModule"
+     },
+     "expect": [
+      "ok"
+     ],
+     "assertions": [
+      {
+       "pointer": "/data/kind",
+       "eq": "Module"
+      },
+      {
+       "pointer": "/data/props/commonModule/returnValuesReuse",
+       "eq": null
+      },
+      {
+       "pointer": "/data/props/commonModule/privileged",
+       "eq": null
+      }
+     ]
+    },
+    {
+     "tool": "unica.view",
+     "args": {
+      "at": "ext:CommonModule.CorpusModule.Method"
+     },
+     "expect": [
+      "ok"
+     ],
+     "assertions": [
+      {
+       "pointer": "/data/items/0/at",
+       "eq": "ext:CommonModule.CorpusModule.Method.Check"
+      },
+      {
+       "pointer": "/data/items/0/props/export",
+       "eq": true
+      }
+     ]
+    },
+    {
+     "tool": "unica.view",
+     "args": {
+      "at": "ext:CommonModule.CorpusModule.Method.Check"
+     },
+     "expect": [
+      "ok"
+     ],
+     "assertions": [
+      {
+       "pointer": "/data/kind",
+       "eq": "Method"
+      },
+      {
+       "pointer": "/data/title",
+       "eq": "Check"
+      },
+      {
+       "pointer": "/data/props/methodKind",
+       "eq": "procedure"
+      },
+      {
+       "pointer": "/data/props/export",
+       "eq": true
+      }
+     ]
+    }
+   ]
   }
  ]
 }

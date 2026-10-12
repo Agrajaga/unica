@@ -47,7 +47,7 @@ pub(crate) struct CommonModuleProperties {
     pub(crate) client_ordinary_application: bool,
     pub(crate) server_call: bool,
     pub(crate) privileged: Option<bool>,
-    pub(crate) return_values_reuse: String,
+    pub(crate) return_values_reuse: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -954,7 +954,7 @@ mod tests {
             client_ordinary_application: false,
             server_call: false,
             privileged: Some(false),
-            return_values_reuse: "DuringRequest".to_string(),
+            return_values_reuse: Some("DuringRequest".to_string()),
         });
         let mut common_identity = identity(props);
         common_identity.at = QualifiedAddress::parse("main:CommonModule.ЗаказыСервер").unwrap();

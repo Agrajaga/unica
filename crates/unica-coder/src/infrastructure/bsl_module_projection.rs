@@ -1817,7 +1817,7 @@ mod tests {
                     client_ordinary_application: false,
                     server_call: false,
                     privileged: Some(false),
-                    return_values_reuse: "DuringRequest".to_string(),
+                    return_values_reuse: Some("DuringRequest".to_string()),
                 }
             });
         project_module(ModuleProjectionRequest {

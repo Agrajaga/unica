@@ -2406,14 +2406,23 @@ fn common_module_properties(
         client_ordinary_application: boolean("ClientOrdinaryApplication")?,
         server_call: boolean("ServerCall")?,
         privileged,
-        return_values_reuse: xml_descendant_text(root, "ReturnValuesReuse")
-            .ok_or_else(|| {
-                ViewError::detailed(
-                    RefusalDetail::SourceUnreadable,
-                    "common module descriptor has no ReturnValuesReuse property",
-                )
-            })?
-            .to_string(),
+        return_values_reuse: match root
+            .descendants()
+            .find(|node| node.is_element() && node.tag_name().name() == "ReturnValuesReuse")
+        {
+            None if borrowed => None,
+            node => Some(
+                node.and_then(|node| node.text())
+                    .map(str::trim)
+                    .ok_or_else(|| {
+                        ViewError::detailed(
+                            RefusalDetail::SourceUnreadable,
+                            "common module descriptor has no ReturnValuesReuse property",
+                        )
+                    })?
+                    .to_string(),
+            ),
+        },
     })
 }
 
