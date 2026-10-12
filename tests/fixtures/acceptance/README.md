@@ -190,6 +190,19 @@ bsl-analyzer-diagnostics имеет закрытый список случаев
 Medium-класс `AcceptanceFaultCorpusRunTests` входит в очередь без скачивания
 анализатора.
 
+S395 и S396 (#1373) проверяют, что граф вызовов читается только адресом
+ветви. S395 на общем пространстве: узел метода называет ветви `Caller` и
+`Callee` без счёта, а секция `callGraph` получает отказ неизвестной секции.
+S396 исполняет драйвер `fault-injection/analyzer-delivery-failure` на
+`workspace-diagnostics`: пакет называет анализатор, но не несёт ни его файла,
+ни манифеста выпуска. Обычное чтение метода поставку не заказывает, а чтение
+каждой ветви заказывает её и получает типизированный отказ «нет движка» с
+классом провала `configuration`. Состояние поставки `working` корпус не
+воспроизводит: для этого нужен управляемый медленный источник выпуска. Его
+проверяет Rust-тест
+`call_graph_branch_answers_working_while_the_analyzer_is_being_delivered`
+в `crates/unica-coder/src/infrastructure/daemon/server.rs`.
+
 S347–S348 используют синтетическое `workspace-metadata-warning/`:
 публичный журнал документов с пустыми RegisteredDocuments возвращает
 warning/passed, а колонка с пустыми References добавляет error/failed.
