@@ -2364,11 +2364,6 @@ fn common_module_properties(
     let document = roxmltree::Document::parse(text.trim_start_matches('\u{feff}'))
         .map_err(|error| ViewError::detailed(RefusalDetail::SourceUnreadable, error.to_string()))?;
     let root = document.root_element();
-    let borrowed = source_kind == SourceSetKind::Extension
-        && crate::infrastructure::native_operations::meta::parse_meta_borrowing(bytes)
-            .map_err(|error| ViewError::detailed(RefusalDetail::SourceUnreadable, error))?
-            .extends
-            .is_some_and(|id| uuid::Uuid::parse_str(&id).is_ok());
     use crate::domain::metadata::{
         MetaInfoPropertyAbsence, MetaInfoPropertyValue, META_INFO_PROPERTY_PROFILE,
     };
@@ -2402,6 +2397,17 @@ fn common_module_properties(
             ))
         }
     };
+    let borrowing_property = |name| {
+        crate::infrastructure::native_operations::meta::observe_meta_borrowing_property(
+            properties,
+            MetadataKind::CommonModule,
+            name,
+        )
+        .map_err(|error| ViewError::detailed(RefusalDetail::SourceUnreadable, error.message))
+    };
+    borrowing_property("ObjectBelonging")?;
+    let parent = borrowing_property("ExtendedConfigurationObject")?;
+    let borrowed = source_kind == SourceSetKind::Extension && parent.is_some();
     let observe = |name| {
         let value = crate::infrastructure::native_operations::meta::observe_meta_info_property(
             properties,

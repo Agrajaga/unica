@@ -1061,20 +1061,9 @@ pub(super) fn meta_info_profile_errors(
                     Some(MetaInfoPropertyRoute::Identity)
                         if matches!(name, "ObjectBelonging" | "ExtendedConfigurationObject") =>
                     {
-                        let value = direct_text_content(child);
-                        let valid = strict_text_leaf_is_valid(child)
-                            && match name {
-                                "ObjectBelonging" => matches!(value.as_str(), "Own" | "Adopted"),
-                                _ => uuid::Uuid::parse_str(&value).is_ok(),
-                            };
-                        if !valid {
-                            errors.push(ProjectionError::malformed(
-                                format!("properties.{name}"),
-                                format!(
-                                    "{} contains malformed borrowing identity `{name}`",
-                                    kind.as_str()
-                                ),
-                            ));
+                        if let Err(error) = observe_meta_borrowing_property(properties, kind, name)
+                        {
+                            errors.push(error);
                         }
                     }
                     Some(MetaInfoPropertyRoute::Identity)
@@ -1321,13 +1310,11 @@ pub(super) fn meta_info_property_value_is_valid(
     }
 }
 
-/// Observes one direct property without converting missing or damaged XML into a value.
-pub(crate) fn observe_meta_info_property(
-    properties: roxmltree::Node<'_, '_>,
+fn direct_meta_info_property<'a, 'input>(
+    properties: roxmltree::Node<'a, 'input>,
     kind: MetadataKind,
     name: &str,
-) -> Result<Option<crate::domain::metadata::MetaInfoPropertyValue>, ProjectionError> {
-    use crate::domain::metadata::MetaInfoPropertyValue;
+) -> Result<Option<roxmltree::Node<'a, 'input>>, ProjectionError> {
     let field = format!("properties.{name}");
     let nodes = properties
         .children()
@@ -1345,6 +1332,47 @@ pub(crate) fn observe_meta_info_property(
                 ),
             ))
         }
+    };
+    Ok(Some(node))
+}
+
+pub(crate) fn observe_meta_borrowing_property(
+    properties: roxmltree::Node<'_, '_>,
+    kind: MetadataKind,
+    name: &str,
+) -> Result<Option<String>, ProjectionError> {
+    let Some(node) = direct_meta_info_property(properties, kind, name)? else {
+        return Ok(None);
+    };
+    let value = direct_text_content(node);
+    let valid = strict_text_leaf_is_valid(node)
+        && match name {
+            "ObjectBelonging" => matches!(value.as_str(), "Own" | "Adopted"),
+            "ExtendedConfigurationObject" => uuid::Uuid::parse_str(&value).is_ok(),
+            _ => false,
+        };
+    if !valid {
+        return Err(ProjectionError::malformed(
+            format!("properties.{name}"),
+            format!(
+                "{} contains malformed borrowing identity `{name}`",
+                kind.as_str()
+            ),
+        ));
+    }
+    Ok(Some(value))
+}
+
+/// Observes one direct property without converting missing or damaged XML into a value.
+pub(crate) fn observe_meta_info_property(
+    properties: roxmltree::Node<'_, '_>,
+    kind: MetadataKind,
+    name: &str,
+) -> Result<Option<crate::domain::metadata::MetaInfoPropertyValue>, ProjectionError> {
+    use crate::domain::metadata::MetaInfoPropertyValue;
+    let field = format!("properties.{name}");
+    let Some(node) = direct_meta_info_property(properties, kind, name)? else {
+        return Ok(None);
     };
     let spec = META_INFO_PROPERTY_PROFILE
         .resolve(kind, name)

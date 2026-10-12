@@ -7637,6 +7637,45 @@ fn platform_borrowed_common_module_preserves_unknown_contexts_and_independent_fa
             .view(ViewRequest::new("main:CommonModule.CorpusModule.Method.Проверка").unwrap())
             .ok
     );
+
+    // Synthetic damage must not turn into permission to omit module properties.
+    for (name, valid) in [
+        (
+            "ExtendedConfigurationObject",
+            "ac847dc9-e222-45cf-af4a-6fa863c919a8",
+        ),
+        ("ObjectBelonging", "Adopted"),
+    ] {
+        let original = format!("<{name}>{valid}</{name}>");
+        assert!(descriptor.contains(&original));
+        for replacement in [
+            format!("{original}<{name}>broken</{name}>"),
+            format!("<{name}>broken</{name}>{original}"),
+            format!("<foreign:{name} xmlns:foreign=\"urn:foreign\">{valid}</foreign:{name}>"),
+            format!("<{name} unexpected=\"true\">{valid}</{name}>"),
+            format!("<{name}>{valid}<Nested/></{name}>"),
+            format!("<{name}>broken</{name}>"),
+        ] {
+            let damaged = descriptor.replace(&original, &replacement);
+            write(&path, &damaged);
+            let service = fixture.extension_view_service();
+            for at in [
+                "main:CommonModule.CorpusModule",
+                "main:CommonModule.CorpusModule.Method",
+                "main:CommonModule.CorpusModule.Method.Проверка",
+            ] {
+                let result = service.view(ViewRequest::new(at).unwrap());
+                assert!(!result.ok, "{replacement}: {at}: {result:?}");
+                assert_eq!(result.diagnostics[0]["detailCode"], "source_unreadable");
+                assert!(result.diagnostics[0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(name));
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), damaged);
+            assert_eq!(fs::read_to_string(&module).unwrap(), source);
+        }
+    }
 }
 
 #[test]
