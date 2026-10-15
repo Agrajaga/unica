@@ -1099,20 +1099,7 @@ impl ActorBoundExecution {
             .sources
             .iter()
             .chain(parents.iter())
-            .map(|source| {
-                self.invocation.actor.validate_binding(&source.binding)?;
-                Ok(ActorReadSourceCapability {
-                    binding: source.binding.clone(),
-                    identity: format!(
-                        "{}:{}",
-                        self.invocation.workspace_identity_hash.as_str(),
-                        source.binding.source_set_name()
-                    ),
-                    read_identity: source.read_identity.clone(),
-                    deadline: lease.deadline,
-                    registration_cache: Arc::clone(&source.registration_cache),
-                })
-            })
+            .map(|source| self.issue_read_source(source, lease.deadline))
             .collect()
     }
 
@@ -1186,6 +1173,48 @@ impl ActorBoundExecution {
                 })
             })
             .collect()
+    }
+
+    /// Повышает до типизированного читателя только кандидата раскладки,
+    /// выбранного resolve(path). Владельцем удерживаемого корня и артефактов
+    /// остаётся актор.
+    pub(in crate::infrastructure::daemon) fn layout_read_source(
+        &self,
+        name: &str,
+    ) -> Result<ActorReadSourceCapability, String> {
+        let ActorExecutionRevision::LayoutRead(lease) = &self.revision else {
+            return Err("typed layout reads require a layout invocation".into());
+        };
+        let binding = lease
+            .bindings
+            .iter()
+            .find(|binding| binding.source_set_name() == name)
+            .ok_or_else(|| "the selected layout source was not admitted".to_string())?;
+        let source = ActorLogicalReadSourceLease {
+            binding: binding.clone(),
+            read_identity: uuid::Uuid::new_v4().to_string(),
+            registration_cache: self.invocation.actor.source_artifacts(binding)?,
+        };
+        self.issue_read_source(&source, lease.deadline)
+    }
+
+    fn issue_read_source(
+        &self,
+        source: &ActorLogicalReadSourceLease,
+        read_deadline: ProviderDeadline,
+    ) -> Result<ActorReadSourceCapability, String> {
+        self.invocation.actor.validate_binding(&source.binding)?;
+        Ok(ActorReadSourceCapability {
+            binding: source.binding.clone(),
+            identity: format!(
+                "{}:{}",
+                self.invocation.workspace_identity_hash.as_str(),
+                source.binding.source_set_name()
+            ),
+            read_identity: source.read_identity.clone(),
+            deadline: read_deadline,
+            registration_cache: Arc::clone(&source.registration_cache),
+        })
     }
 
     pub(crate) fn rejected_logical_read_result(&self) -> Option<DomainResult> {
