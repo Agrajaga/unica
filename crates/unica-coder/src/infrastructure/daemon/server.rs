@@ -1301,6 +1301,8 @@ mod retained_directory_removal_tests;
 
 #[cfg(test)]
 mod html_template_tests;
+#[cfg(test)]
+mod new_xml_tests;
 
 #[cfg(test)]
 mod form_add_owner_bytes_tests;
