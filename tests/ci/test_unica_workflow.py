@@ -12,12 +12,17 @@ from __future__ import annotations
 import fnmatch
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts/ci"))
+import ci_rust_lanes as lanes  # noqa: E402
+import prepared_binary  # noqa: E402
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -583,14 +588,28 @@ class UnicaWorkflowGuardrailTests(unittest.TestCase):
             producer, executor = job(self.release, "build-rust-" + lane), job(self.release, "run-rust-" + lane)
             cache = steps_using(producer, "Swatinem/rust-cache")[0]
             self.assertEqual(cache["with"]["shared-key"], "ci-rust-" + lane)
-            self.assertIs(cache["with"].get("lookup-only"), True, "artifact producers must not restore mutable Cargo cache")
+            # Producer восстанавливает только зависимости: крейты workspace
+            # rust-cache вычищает перед записью и не включает их обратно.
+            self.assertNotIn("lookup-only", cache["with"])
+            self.assertNotIn("cache-workspace-crates", cache["with"])
+            # Кешируется тот каталог, куда собирает архив: `<root>/target`.
+            self.assertNotIn("workspaces", cache["with"])
+            archive = lanes.archive_command(lane, Path("tests.tar.zst"))
+            self.assertEqual(Path(archive[archive.index("--target-dir") + 1]), lanes.ROOT / "target")
+            # nextest ставится до восстановления: rust-cache исключает уже
+            # лежащие в ~/.cargo/bin файлы из записи и не подменяет их.
+            order = producer["steps"]
+            self.assertLess(order.index(steps_using(producer, "taiki-e/install-action")[0]), order.index(cache))
             self.assertEqual(producer["env"]["CARGO_PROFILE_DEV_DEBUG"], executor["env"]["CARGO_PROFILE_DEV_DEBUG"])
             for found in (producer, executor):
                 self.assertEqual(steps_using(found, "taiki-e/install-action")[0]["with"]["tool"], "cargo-nextest@0.9.148")
         self.assertFalse(steps_using(job(self.release, "test-rust-platforms"), "Swatinem/rust-cache"))
         product_cache = steps_using(job(self.release, "build-python-product"), "Swatinem/rust-cache")
         self.assertEqual(len(product_cache), 1)
-        self.assertIs(product_cache[0]["with"].get("lookup-only"), True)
+        self.assertNotIn("lookup-only", product_cache[0]["with"])
+        self.assertNotIn("cache-workspace-crates", product_cache[0]["with"])
+        # Продукт собирается в собственный target-dir: кешироваться должен он.
+        self.assertEqual(product_cache[0]["with"]["workspaces"], f". -> {prepared_binary.PRODUCT_TARGET.as_posix()}")
 
     def test_release_assessment_uses_affected_mechanism_contour(self) -> None:
         assessment = job(self.release, "release-assessment")
