@@ -5,6 +5,7 @@ mod dcs_parameter_expression;
 mod form;
 mod form_conditional_appearance;
 mod form_support;
+mod job_schedule;
 mod metadata;
 mod metadata_declaration_diagnostics;
 mod support;
