@@ -170,7 +170,9 @@ binary(unica_coder) & (
 )
 ) | (
 binary(unica_project_health) & (
-    test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    test(/^inspection::git::tests::project_health_git_ignore_batch_reads_staged_blobs_past_the_former_limits_with_two_children$/)
+    | test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    | test(/^inspection::resources::tests::staged_attribute_policy_past_the_former_file_and_byte_limits_is_checked$/)
 )
 ) | (
 binary(unica_workspace) & (
@@ -213,7 +215,9 @@ binary(unica_coder) & (
 )
 ) | (
 binary(unica_project_health) & (
-    test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    test(/^inspection::git::tests::project_health_git_ignore_batch_reads_staged_blobs_past_the_former_limits_with_two_children$/)
+    | test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    | test(/^inspection::resources::tests::staged_attribute_policy_past_the_former_file_and_byte_limits_is_checked$/)
 )
 ) | (
 binary(unica_workspace) & (
@@ -396,7 +400,9 @@ binary(unica_coder) & (
 )
 ) | (
 binary(unica_project_health) & (
-    test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    test(/^inspection::git::tests::project_health_git_ignore_batch_reads_staged_blobs_past_the_former_limits_with_two_children$/)
+    | test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    | test(/^inspection::resources::tests::staged_attribute_policy_past_the_former_file_and_byte_limits_is_checked$/)
 )
 ) | (
 binary(unica_workspace) & (
@@ -436,7 +442,9 @@ binary(unica_coder) & (
 )
 ) | (
 binary(unica_project_health) & (
-    test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    test(/^inspection::git::tests::project_health_git_ignore_batch_reads_staged_blobs_past_the_former_limits_with_two_children$/)
+    | test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    | test(/^inspection::resources::tests::staged_attribute_policy_past_the_former_file_and_byte_limits_is_checked$/)
 )
 ) | (
 binary(unica_workspace) & (
@@ -581,7 +589,9 @@ binary(unica_coder) & (
 )
 ) | (
 binary(unica_project_health) & (
-    test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    test(/^inspection::git::tests::project_health_git_ignore_batch_reads_staged_blobs_past_the_former_limits_with_two_children$/)
+    | test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    | test(/^inspection::resources::tests::staged_attribute_policy_past_the_former_file_and_byte_limits_is_checked$/)
 )
 ) | (
 binary(unica_workspace) & (
@@ -637,7 +647,9 @@ binary(unica_coder) & (
 )
 ) | (
 binary(unica_project_health) & (
-    test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    test(/^inspection::git::tests::project_health_git_ignore_batch_reads_staged_blobs_past_the_former_limits_with_two_children$/)
+    | test(/^inspection::resources::tests::continued_repository_eol_resumes_on_disk_past_the_former_evidence_capacity$/)
+    | test(/^inspection::resources::tests::staged_attribute_policy_past_the_former_file_and_byte_limits_is_checked$/)
 )
 ) | (
 binary(unica_workspace) & (
