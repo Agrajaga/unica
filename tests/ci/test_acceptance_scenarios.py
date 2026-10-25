@@ -19,6 +19,7 @@ gives today:
   provider    typed provider_unavailable refusal
   cancelled   typed task_cancelled outcome of an intended cancellation
   failed      typed task_failed terminal outcome
+  invalid-result typed invalid_result terminal, used by controlled runtime faults
   refused     an intended typed refusal: a code from the closed dictionary in
               crates/unica-refusal/src/lib.rs whose default outcome
               is fixCall or fixSource, or invalid_state (needsHuman);
@@ -73,6 +74,8 @@ from tests.ci.acceptance_profiles import (
     DIAGNOSTICS_WORKSPACE, SOURCE_WORKSPACES, SYMBOL_WORKSPACE, completed_delivery_call, isolated_environment,
     select_profile,
 )
+
+from tests.ci.acceptance_pull_validation import WORKSPACE as PULL_VALIDATION_WORKSPACE
 
 REFUSAL_DICTIONARY = REPO_ROOT / "crates/unica-refusal/src/lib.rs"
 
@@ -154,6 +157,7 @@ EXPECT_CLASSES = {
     "provider",
     "cancelled",
     "failed",
+    "invalid-result",
     "refused",
     "gap",
 }
@@ -220,6 +224,8 @@ def classify(response, context):
         return "cancelled", message[:160]
     if code == "task_failed":
         return "failed", message[:160]
+    if code == "invalid_result":
+        return "invalid-result", message[:160]
     if code in REFUSAL_CODES:
         # Typed refusals from the closed code set: the caller's request, not
         # the surface, is what has to change.
@@ -668,7 +674,9 @@ class AcceptanceCorpusShapeTests(unittest.TestCase):
         fault = {s["id"] for s in select_profile(self.corpus, "fault-injection")["scenarios"]}
         self.assertFalse(fault & (source | delivery | agent))
         self.assertFalse(source & delivery or source & agent or delivery & agent)
-        self.assertEqual(source | delivery | agent | fault, {s["id"] for s in self.corpus["scenarios"]})
+        runtime = {s["id"] for s in select_profile(self.corpus, "runtime-fault")["scenarios"]}
+        self.assertFalse(runtime & (source | delivery | agent | fault))
+        self.assertEqual(source | delivery | agent | fault | runtime, {s["id"] for s in self.corpus["scenarios"]})
         # The closed S### block keeps its profiles; a per-file scenario
         # declares its own and is admitted by select_profile, so two added
         # scenarios never edit these sets.
@@ -683,7 +691,7 @@ class AcceptanceCorpusShapeTests(unittest.TestCase):
             workspace = scenario.get("workspace", self.corpus["workspace"])
             self.assertIn(
                 workspace,
-                SOURCE_WORKSPACES | {SYMBOL_WORKSPACE, DIAGNOSTICS_WORKSPACE, FORM_RUNTIME_WORKSPACE},
+                SOURCE_WORKSPACES | {SYMBOL_WORKSPACE, DIAGNOSTICS_WORKSPACE, FORM_RUNTIME_WORKSPACE, PULL_VALIDATION_WORKSPACE},
                 f"{scenario['id']}: a scenario runs on one of the registered fixture workspaces",
             )
             for index, step in enumerate(scenario["wire"]):
