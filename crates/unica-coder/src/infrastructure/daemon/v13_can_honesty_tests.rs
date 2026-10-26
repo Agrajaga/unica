@@ -1010,12 +1010,9 @@ fn check_node(checked: &Checked<'_>, at: &str, plan_writes: bool, mismatches: &m
     );
     assert!(viewed.ok, "{at}: {viewed:?}");
     let data = viewed.data.unwrap();
-    for entry in data["can"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|entry| entry["implemented"] == true)
-    {
+    // Every operation the node's dictionary names publishes its closed
+    // detailed contract.
+    for entry in data["can"].as_array().into_iter().flatten() {
         let op = entry["op"].as_str().unwrap();
         let detailed = invoke_on(
             &checked.runtime,
@@ -1023,10 +1020,7 @@ fn check_node(checked: &Checked<'_>, at: &str, plan_writes: bool, mismatches: &m
             ToolIdentity::View,
             json!({"at":format!("{at}.Can.{op}")}),
         );
-        assert!(
-            detailed.ok,
-            "implemented {op} at {at} has no contract: {detailed:?}"
-        );
+        assert!(detailed.ok, "{op} at {at} has no contract: {detailed:?}");
         let schema = &detailed.data.as_ref().unwrap()["props"]["contract"]["argsSchema"];
         assert!(schema.is_object(), "{at}.{op}: {schema}");
         assert_eq!(schema["additionalProperties"], false, "{at}.{op}: {schema}");
@@ -1785,7 +1779,7 @@ fn a_retired_scope_call_recovers_through_next_to_a_published_tabular_attribute()
     assert!(viewed.ok, "{viewed_value}");
     let entry = &viewed_value["data"]["props"];
     assert_eq!(entry["op"], "attribute.add", "{viewed_value}");
-    assert_eq!(entry["implemented"], true, "{viewed_value}");
+    assert!(entry.get("implemented").is_none(), "{viewed_value}");
     let contract = &entry["contract"];
     assert!(
         contract["argsSchema"]["properties"]["items"]["items"]["properties"]["type"].is_object(),
@@ -2490,7 +2484,7 @@ fn every_role_family_contract_builds_a_preview_without_source_writes() {
         );
         assert!(
             detailed.ok,
-            "implemented {operation} must publish its contract at {at}: {detailed:?}"
+            "{operation} must publish its contract at {at}: {detailed:?}"
         );
         let data = detailed.data.unwrap();
         assert_eq!(data["kind"], "Can");
@@ -2578,7 +2572,7 @@ fn support_can_contract_examples_preview_without_source_changes() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|entry| entry["op"] == operation && entry["implemented"] == true));
+            .any(|entry| entry["op"] == operation));
         let detailed = invoke_on(
             &runtime,
             &fixture.workspace,
@@ -2587,7 +2581,7 @@ fn support_can_contract_examples_preview_without_source_changes() {
         );
         assert!(
             detailed.ok,
-            "implemented {operation} at {at} has no usable detailed contract: {detailed:?}"
+            "{operation} at {at} has no usable detailed contract: {detailed:?}"
         );
         let data = detailed.data.unwrap();
         assert_eq!(data["kind"], "Can");
@@ -2883,7 +2877,7 @@ fn object_remove_skeleton_previews_with_only_the_outer_target() {
         .iter()
         .find(|entry| entry["op"] == "object.remove")
         .unwrap();
-    assert_eq!(entry["implemented"], true);
+    assert!(entry.get("implemented").is_none(), "{entry}");
     let skeleton = serde_json::to_value(
         crate::domain::apply::operation_registry()
             .lookup("object.remove")

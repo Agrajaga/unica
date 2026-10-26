@@ -314,8 +314,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "props.set",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       }
      ]
@@ -465,16 +464,14 @@
        "pointer": "/data/can",
        "contains": {
         "op": "object.create",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       },
       {
        "pointer": "/data/can",
        "contains": {
         "op": "subsystem.create",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       }
      ]
@@ -499,16 +496,14 @@
        "pointer": "/data/can",
        "contains": {
         "op": "attribute.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       },
       {
        "pointer": "/data/can",
        "contains": {
         "op": "props.set",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       }
      ]
@@ -533,8 +528,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "enumValue.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -559,16 +553,14 @@
        "pointer": "/data/can",
        "contains": {
         "op": "dimension.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       },
       {
        "pointer": "/data/can",
        "contains": {
         "op": "resource.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -1268,8 +1260,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "props.set",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       }
      ]
@@ -1887,8 +1878,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "attribute.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -2606,16 +2596,14 @@
        "pointer": "/data/can",
        "contains": {
         "op": "attribute.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       },
       {
        "pointer": "/data/can",
        "contains": {
         "op": "tabularSection.set",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       }
      ]
@@ -2640,16 +2628,14 @@
        "pointer": "/data/can",
        "contains": {
         "op": "attribute.set",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       },
       {
        "pointer": "/data/can",
        "contains": {
         "op": "attribute.remove",
-        "args": "at",
-        "implemented": true
+        "args": "at"
        }
       }
      ]
@@ -2674,8 +2660,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "enumValue.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       },
       {
@@ -3019,8 +3004,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "attribute.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -3711,8 +3695,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "object.create",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       }
      ]
@@ -4283,8 +4266,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "form.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -4517,8 +4499,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "supportRule.set",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       }
      ]
@@ -4857,8 +4838,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "code.insert",
-        "args": "text",
-        "implemented": true
+        "args": "text"
        }
       }
      ]
@@ -5176,8 +5156,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "right.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -5673,8 +5652,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "dataSet.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -6081,8 +6059,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "content.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -9644,7 +9621,7 @@
       },
       {
        "pointer": "/data/props/implemented",
-       "eq": true
+       "absent": true
       },
       {
        "pointer": "/data/props/contract/argsSchema/additionalProperties",
@@ -9747,7 +9724,7 @@
       },
       {
        "pointer": "/data/props/implemented",
-       "eq": true
+       "absent": true
       },
       {
        "pointer": "/data/props/contract/argsSchema/additionalProperties",
@@ -9847,7 +9824,7 @@
       },
       {
        "pointer": "/data/props/implemented",
-       "eq": true
+       "absent": true
       },
       {
        "pointer": "/data/props/contract/argsSchema/additionalProperties",
@@ -10246,7 +10223,7 @@
       },
       {
        "pointer": "/data/props/implemented",
-       "eq": true
+       "absent": true
       }
      ]
     },
@@ -33826,16 +33803,14 @@
        "pointer": "/data/can",
        "contains": {
         "op": "item.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       },
       {
        "pointer": "/data/can",
        "contains": {
         "op": "item.remove",
-        "args": "at",
-        "implemented": true
+        "args": "at"
        }
       }
      ],
@@ -33895,8 +33870,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "item.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -34792,7 +34766,7 @@
       },
       {
        "pointer": "/data/props/implemented",
-       "eq": true
+       "absent": true
       },
       {
        "pointer": "/data/props/contract/argsSchema/required",
@@ -34989,16 +34963,14 @@
        "pointer": "/data/can",
        "contains": {
         "op": "dimension.set",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       },
       {
        "pointer": "/data/can",
        "contains": {
         "op": "dimension.remove",
-        "args": "at",
-        "implemented": true
+        "args": "at"
        }
       }
      ]
@@ -35216,8 +35188,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "attribute.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -35245,7 +35216,7 @@
       },
       {
        "pointer": "/data/props/implemented",
-       "eq": true
+       "absent": true
       },
       {
        "pointer": "/data/props/contract/argsSchema/required",
@@ -37114,8 +37085,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "childSubsystem.remove",
-        "args": "at",
-        "implemented": true
+        "args": "at"
        }
       }
      ]
@@ -37133,8 +37103,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "childSubsystem.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -37582,8 +37551,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "right.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ],
@@ -37654,8 +37622,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "right.set",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       }
      ]
@@ -37856,8 +37823,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "area.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ],
@@ -39398,8 +39364,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "item.add",
-        "args": "items",
-        "implemented": true
+        "args": "items"
        }
       }
      ]
@@ -39513,8 +39478,7 @@
        "pointer": "/data/can",
        "contains": {
         "op": "event.bind",
-        "args": "values",
-        "implemented": true
+        "args": "values"
        }
       }
      ]
@@ -39692,7 +39656,7 @@
       },
       {
        "pointer": "/data/props/implemented",
-       "eq": true
+       "absent": true
       }
      ]
     },
