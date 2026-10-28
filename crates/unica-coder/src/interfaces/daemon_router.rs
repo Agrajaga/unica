@@ -1892,6 +1892,15 @@ mod tests {
     }
 
     #[test]
+    fn readiness_timeout_before_outer_cutoff_is_not_delivered() {
+        let error = V5TransportError::RequestNotSent(
+            "protocol-v5 deadline expired during spawn readiness".to_string(),
+        );
+        let cutoff = Instant::now() + Duration::from_secs(60);
+        let refusal = unconnected_refusal(&error, cutoff);
+        assert_not_delivered(&refusal);
+    }
+    #[test]
     fn a_daemon_refusing_the_connection_needs_a_person_not_a_repeat() {
         // The anchor stands; every further session is dropped right after its
         // handshake request, long before the cutoff.
