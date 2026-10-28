@@ -1609,7 +1609,7 @@ mod tests {
 
     #[test]
     fn initial_startup_accepts_delayed_child_readiness() {
-        use unica_process::test_support::wait_for_process_exit;
+        use unica_process::test_support::wait_for_detached_child_exit;
         let (root, state) = state_directory();
         let physical_root = std::fs::canonicalize(root.path()).unwrap();
         let fixture_deadline = Instant::now() + Duration::from_secs(30);
@@ -1657,7 +1657,7 @@ mod tests {
         assert_eq!(owner.daemon_pid(), pid);
         drop(owner);
         assert!(
-            wait_for_process_exit(pid, Duration::from_secs(5)),
+            wait_for_detached_child_exit(pid, Duration::from_secs(5)),
             "readiness fixture outlived its connection"
         );
     }
