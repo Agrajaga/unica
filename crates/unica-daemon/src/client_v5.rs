@@ -1678,7 +1678,8 @@ mod tests {
     #[test]
     fn failed_readiness_preserves_expiry_when_cleanup_cannot_confirm_exit() {
         use unica_process::test_support::{
-            long_running_command, wait_for_process_exit, ManualStartupTerminationProbe,
+            long_running_command, reap_runtime_authority_test_child, wait_for_process_exit,
+            ManualStartupTerminationProbe,
         };
         let (_root, state) = state_directory();
         let fixture = long_running_command();
@@ -1696,15 +1697,14 @@ mod tests {
             Instant::now(),
             deadline,
         );
+        let returned_before_deadline = Instant::now() < deadline;
+        drop(child);
+        reap_runtime_authority_test_child(pid);
         let Err(V5TransportError::SpawnReadinessExpired(message)) = result else {
             panic!("failed cleanup must preserve readiness expiry");
         };
         assert!(message.contains("startup cleanup failed"), "{message}");
-        assert!(
-            Instant::now() < deadline,
-            "cleanup replenished the deadline"
-        );
-        drop(child);
+        assert!(returned_before_deadline, "cleanup replenished the deadline");
         assert_eq!(probe.attempt_count(), 1);
         assert!(wait_for_process_exit(pid, Duration::from_secs(5)));
     }
