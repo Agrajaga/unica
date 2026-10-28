@@ -26,12 +26,12 @@ use unica_execution_contract::invocation::TaskId;
 use unica_process::ManagedStartupChild;
 use uuid::Uuid;
 
+const INITIAL_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest socket wait of an interruptible observation read between checks
 /// of its stop flag.
 const OBSERVATION_INTERRUPT_POLL: Duration = Duration::from_millis(25);
 const OWNER_RESPONSE_SAFETY_TIMEOUT: Duration = Duration::from_secs(10);
-const SPAWN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const EXISTING_ENDPOINT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 const STARTUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const RETRY_INTERVAL: Duration = Duration::from_millis(20);
@@ -290,7 +290,7 @@ impl V5DaemonProcessOwner {
         executable: PathBuf,
         idle_grace: Duration,
     ) -> Result<Self, String> {
-        let deadline = Instant::now() + CONNECT_TIMEOUT;
+        let deadline = Instant::now() + INITIAL_STARTUP_TIMEOUT;
         Self::connect_or_spawn_before(state_root, core_identity, executable, idle_grace, deadline)
     }
 
@@ -319,8 +319,7 @@ impl V5DaemonProcessOwner {
         }
 
         remaining(deadline, "spawn lock")?;
-        let lock_deadline = deadline.min(Instant::now() + SPAWN_LOCK_TIMEOUT);
-        let _spawn_lock = state.acquire_spawn_lock_before(lock_deadline)?;
+        let _spawn_lock = state.acquire_spawn_lock_before(deadline)?;
         if let Some(record) = state.read_v5_endpoint_record()? {
             if record.core_identity() != &core_identity {
                 return Err("protocol-v5 endpoint belongs to a foreign core identity".to_string());
@@ -1638,8 +1637,8 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         let started = Instant::now();
-        let deadline = started + CONNECT_TIMEOUT;
-        let cleanup_reserve = (CONNECT_TIMEOUT / 3).min(STARTUP_CLEANUP_TIMEOUT);
+        let deadline = started + INITIAL_STARTUP_TIMEOUT;
+        let cleanup_reserve = (INITIAL_STARTUP_TIMEOUT / 3).min(STARTUP_CLEANUP_TIMEOUT);
         let result = thread::scope(|scope| {
             scope.spawn(|| {
                 thread::sleep(Duration::from_secs(6));
